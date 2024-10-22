@@ -271,13 +271,9 @@ namespace MS.Internal.Documents
         /// <param name="findToolBar">FindToolBar instance.</param>
         internal static void ShowFindUnsuccessfulMessage(FindToolBar findToolBar)
         {
-            string messageString;
-
             // No, we did not find anything. Alert the user.
-            messageString = findToolBar.SearchUp ?
-                        SR.DocumentViewerSearchUpCompleteLabel :
-                        SR.DocumentViewerSearchDownCompleteLabel;
-            messageString = String.Format(System.Globalization.CultureInfo.CurrentCulture, messageString, findToolBar.SearchText);
+            string messageString = findToolBar.SearchUp ? SR.DocumentViewerSearchUpCompleteLabel : SR.DocumentViewerSearchDownCompleteLabel;
+            messageString = string.Format(CultureInfo.CurrentCulture, messageString, findToolBar.SearchText);
 
             HwndSource hwndSource = PresentationSource.CriticalFromVisual(findToolBar) as HwndSource;
             IntPtr hwnd = (hwndSource != null) ? hwndSource.Handle : IntPtr.Zero;
