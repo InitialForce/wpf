@@ -249,7 +249,7 @@ public sealed unsafe partial class DataObject :
     public void SetData(string format, object? data, bool autoConvert)
     {
         ArgumentNullException.ThrowIfNull(data);
-        
+
         _innerData.SetData(format, autoConvert, data);
     }
 
