@@ -2257,14 +2257,12 @@ namespace System.Windows.Automation.Peers
         {
             object result = null;
 
-            PatternInfo info = (PatternInfo)s_patternInfo[patternId];
-
-            if (info != null)
+            if (s_patternInfo.TryGetValue(patternId, out PatternInfo patternInfo))
             {
-                object iface = GetPattern(info.PatternInterface);
+                object iface = GetPattern(patternInfo.PatternInterface);
                 if (iface != null)
                 {
-                    result = info.WrapObject(this, iface);
+                    result = patternInfo.WrapObject(this, iface);
                 }
             }
 
@@ -2276,12 +2274,10 @@ namespace System.Windows.Automation.Peers
         {
             object result = null;
 
-            GetProperty getProperty = (GetProperty)s_propertyInfo[propertyId];
-
-            if (getProperty != null)
+            if (s_propertyInfo.TryGetValue(propertyId, out GetProperty getProperty))
             {
                 result = getProperty(this);
-                if(AutomationElementIdentifiers.HeadingLevelProperty != null && propertyId == AutomationElementIdentifiers.HeadingLevelProperty.Id)
+                if (AutomationElementIdentifiers.HeadingLevelProperty != null && propertyId == AutomationElementIdentifiers.HeadingLevelProperty.Id)
                 {
                     result = ConvertHeadingLevelToId((AutomationHeadingLevel)result);
                 }
