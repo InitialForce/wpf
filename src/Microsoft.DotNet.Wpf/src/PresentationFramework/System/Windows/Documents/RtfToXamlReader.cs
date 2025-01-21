@@ -3376,7 +3376,7 @@ namespace System.Windows.Documents
 
         internal void ComputePreferredCodePage()
         {
-            ReadOnlySpan<int> CodePageList = [1252, 932, 949, 1361, 936, 950, 1253, 1254, 1258, 1255, 1256, 1257, 1251, 874, 1250, 437, 850];
+            ReadOnlySpan<int> codePageList = [1252, 932, 949, 1361, 936, 950, 1253, 1254, 1258, 1255, 1256, 1257, 1251, 874, 1250, 437, 850];
 
             CodePage = 1252;
             CharSet = 0;
@@ -3386,7 +3386,7 @@ namespace System.Windows.Documents
                 byte[] rgBytes = new byte[Name.Length * 6];
                 char[] rgChars = new char[Name.Length * 6];
 
-                foreach (int codePage in CodePageList)
+                foreach (int codePage in codePageList)
                 {
                     Encoding e = InternalEncoding.GetEncoding(codePage);
 
@@ -3395,7 +3395,7 @@ namespace System.Windows.Documents
 
                     if (cch == Name.Length)
                     {
-                        int k = 0;
+                        int k;
                         for (k = 0; k < cch; k++)
                         {
                             if (rgChars[k] != Name[k])
