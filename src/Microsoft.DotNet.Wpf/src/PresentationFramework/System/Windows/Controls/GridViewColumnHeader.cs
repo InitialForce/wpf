@@ -856,7 +856,7 @@ namespace System.Windows.Controls
                     (_headerGripper == null || !_headerGripper.IsMouseOver))
                 {
                     // Hovering over the button will click in the OnHover click mode
-                    SetValue(IsPressedPropertyKey, BooleanBoxes.Box(true));
+                    SetValue(IsPressedPropertyKey, BooleanBoxes.TrueBox);
                     OnClick();
                 }
                 else
