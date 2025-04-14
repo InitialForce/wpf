@@ -7,29 +7,18 @@
 *
 \***************************************************************************/
 
-using System.Security;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using Microsoft.Win32;
 
-#if !PBTCOMPILER
-using MS.Win32;
-using System.IO.Packaging;
-#endif
-
 #if PRESENTATION_CORE
 using MS.Internal.AppModel;
+using System.Security;
+using MS.Win32;
 #endif
 
 #if PRESENTATIONFRAMEWORK_ONLY
-using System.Diagnostics;
 using System.Windows;
-using MS.Internal.Utility;      // BindUriHelper
-using MS.Internal.AppModel;
-#endif
-
-#if REACHFRAMEWORK
-using MS.Internal.Utility;
 #endif
 #if WINDOWS_BASE
 // This existed originally to allow FontCache service to 
@@ -50,10 +39,6 @@ using MS.Internal.PresentationCore;
 namespace MS.Internal // Promote the one from PresentationCore as the default to use.
 #elif PRESENTATIONFRAMEWORK
 namespace MS.Internal.PresentationFramework
-#elif PBTCOMPILER
-namespace MS.Internal.PresentationBuildTasks
-#elif REACHFRAMEWORK
-namespace MS.Internal.ReachFramework
 #elif DRT
 namespace MS.Internal.Drt
 #else
