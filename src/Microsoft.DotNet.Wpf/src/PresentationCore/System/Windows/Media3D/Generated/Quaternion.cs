@@ -338,7 +338,6 @@ namespace System.Windows.Media.Media3D
         #region Internal Fields
 
 
-
         #endregion Internal Fields
 
 
