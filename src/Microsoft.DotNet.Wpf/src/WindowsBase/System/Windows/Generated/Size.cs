@@ -197,7 +197,6 @@ namespace System.Windows
         #region Protected Methods
 
 
-
         #endregion ProtectedMethods
 
         //------------------------------------------------------
