@@ -232,7 +232,6 @@ namespace System.Windows
 
         #region Internal Properties
 
-
         /// <summary>
         /// Creates a string representation of this object based on the current culture.
         /// </summary>
