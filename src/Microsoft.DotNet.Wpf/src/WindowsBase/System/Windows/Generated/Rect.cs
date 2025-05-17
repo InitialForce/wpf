@@ -16,7 +16,6 @@ using System.Windows.Converters;
 
 namespace System.Windows
 {
-
     [Serializable]
     [TypeConverter(typeof(RectConverter))]
     [ValueSerializer(typeof(RectValueSerializer))] // Used by MarkupWriter
@@ -355,7 +354,6 @@ namespace System.Windows
         //  Constructors
         //
         //------------------------------------------------------
-
 
 
 
