@@ -316,7 +316,6 @@ namespace System.Windows.Media
         }
 
 
-
         #endregion Constructors
     }
 }
