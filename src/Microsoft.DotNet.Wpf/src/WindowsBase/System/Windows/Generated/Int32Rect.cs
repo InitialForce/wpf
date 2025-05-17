@@ -397,7 +397,6 @@ namespace System.Windows
         internal int _width;
         internal int _height;
 
-
         #endregion Internal Fields
 
 
