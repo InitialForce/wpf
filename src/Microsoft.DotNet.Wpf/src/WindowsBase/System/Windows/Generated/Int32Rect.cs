@@ -391,7 +391,6 @@ namespace System.Windows
 
         #region Internal Fields
 
-
         internal int _x;
         internal int _y;
         internal int _width;
