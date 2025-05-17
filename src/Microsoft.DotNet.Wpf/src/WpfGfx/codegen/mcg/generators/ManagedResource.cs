@@ -2209,8 +2209,8 @@ namespace MS.Internal.MilCodeGen.Generators
 
         private string WriteReleaseOnChannel(McgResource resource)
         {
-            if (resource.IsValueType) return String.Empty;
-            if (!resource.HasUnmanagedResource) return String.Empty;
+            if (resource.IsValueType || !resource.HasUnmanagedResource)
+				return null;
 
             StringCodeSink cs = new StringCodeSink();
             string duceRelease = String.Empty;
@@ -2238,7 +2238,7 @@ namespace MS.Internal.MilCodeGen.Generators
                 }
                 else
                 {
-                    return "";
+                    return null;
                 }
             }
 
