@@ -195,7 +195,6 @@ namespace System.Windows
         #region Public Properties
 
 
-
         #endregion Public Properties
 
         //------------------------------------------------------
