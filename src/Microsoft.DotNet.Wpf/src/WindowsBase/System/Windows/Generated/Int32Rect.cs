@@ -399,7 +399,6 @@ namespace System.Windows
         internal int _height;
 
 
-
         #endregion Internal Fields
 
 
