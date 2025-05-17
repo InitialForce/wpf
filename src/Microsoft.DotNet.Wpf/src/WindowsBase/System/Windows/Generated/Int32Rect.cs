@@ -366,7 +366,6 @@ namespace System.Windows
         }
 
 
-
         #endregion Internal Properties
 
         //------------------------------------------------------
