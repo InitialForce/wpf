@@ -2067,8 +2067,8 @@ namespace MS.Internal.MilCodeGen.Generators
 
         private string WriteAddRefOnChannel(McgResource resource)
         {
-            if (resource.IsValueType) return String.Empty;
-            if (!resource.HasUnmanagedResource) return String.Empty;
+            if (resource.IsValueType || !resource.HasUnmanagedResource)
+				return null;
 
             StringCodeSink cs = new StringCodeSink();
 
@@ -2095,7 +2095,7 @@ namespace MS.Internal.MilCodeGen.Generators
                 }
                 else
                 {
-                    return "";
+                    return null;
                 }
             }
 
