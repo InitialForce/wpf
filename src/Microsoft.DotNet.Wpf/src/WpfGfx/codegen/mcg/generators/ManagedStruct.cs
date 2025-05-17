@@ -237,7 +237,7 @@ namespace MS.Internal.MilCodeGen.Generators
 
             if (resource.Extends == null)
             {
-                string readPreamble = String.Empty;
+                string readPreamble = null;
 
                 if (resource.IsFreezable)
                 {
