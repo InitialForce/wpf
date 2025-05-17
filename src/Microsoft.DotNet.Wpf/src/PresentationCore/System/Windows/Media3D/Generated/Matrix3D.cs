@@ -252,7 +252,6 @@ namespace System.Windows.Media.Media3D
         //------------------------------------------------------
 
 
-
         #region Public Properties
 
 
