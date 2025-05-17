@@ -340,7 +340,6 @@ namespace System.Windows.Media.Media3D
 
         #region Internal Fields
 
-
         internal double _x;
         internal double _y;
         internal double _z;
