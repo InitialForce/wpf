@@ -1477,7 +1477,8 @@ namespace MS.Internal.MilCodeGen.Generators
 
         private string WriteCreateInstanceCore(McgResource resource)
         {
-            if (resource.IsAbstract || resource.IsValueType) return String.Empty;
+            if (resource.IsAbstract || resource.IsValueType)
+				return null;
 
             if (resource.CreateInstanceCoreViaActivator)
             {
