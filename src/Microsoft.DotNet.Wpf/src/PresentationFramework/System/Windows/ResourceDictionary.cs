@@ -1499,7 +1499,7 @@ namespace System.Windows
             {
                 if (_ownerFEs == null)
                 {
-                    _ownerFEs = new WeakReferenceList(1);
+                    _ownerFEs = new WeakReferenceList<FrameworkElement>(1);
                 }
                 else if (_ownerFEs.Contains(fe) && ContainsCycle(this))
                 {
@@ -1521,7 +1521,7 @@ namespace System.Windows
                 {
                     if (_ownerFCEs == null)
                     {
-                        _ownerFCEs = new WeakReferenceList(1);
+                        _ownerFCEs = new WeakReferenceList<FrameworkContentElement>(1);
                     }
                     else if (_ownerFCEs.Contains(fce) && ContainsCycle(this))
                     {
@@ -1543,7 +1543,7 @@ namespace System.Windows
                     {
                         if (_ownerApps == null)
                         {
-                            _ownerApps = new WeakReferenceList(1);
+                            _ownerApps = new WeakReferenceList<Application>(1);
                         }
                         else if (_ownerApps.Contains(app) && ContainsCycle(this))
                         {
@@ -1809,14 +1809,14 @@ namespace System.Windows
             return GetValue(resourceKey, out canCache);
         }
 
-        private WeakReferenceList GetOrCreateWeakReferenceList(object resourceKey)
+        private WeakReferenceList<DeferredResourceReference> GetOrCreateWeakReferenceList(object resourceKey)
         {
-            this._weakDeferredResourceReferencesMap ??= new();
+            _weakDeferredResourceReferencesMap ??= new Dictionary<object, WeakReferenceList<DeferredResourceReference>>();
 
-            if (!this._weakDeferredResourceReferencesMap.TryGetValue(resourceKey, out var weakDeferredResourceReferences))
+            if (!_weakDeferredResourceReferencesMap.TryGetValue(resourceKey, out var weakDeferredResourceReferences))
             {
-                weakDeferredResourceReferences = new WeakReferenceList();
-                this._weakDeferredResourceReferencesMap[resourceKey] = weakDeferredResourceReferences;
+                weakDeferredResourceReferences = new WeakReferenceList<DeferredResourceReference>();
+                _weakDeferredResourceReferencesMap[resourceKey] = weakDeferredResourceReferences;
             }
 
             return weakDeferredResourceReferences;
@@ -1824,8 +1824,7 @@ namespace System.Windows
 
         internal void RemoveDeferredResourceReference(DeferredResourceReference deferredResourceReference)
         {
-            
-            if (this._weakDeferredResourceReferencesMap?.TryGetValue(deferredResourceReference.Key, out var weakDeferredResourceReferences) is true)
+            if (_weakDeferredResourceReferencesMap?.TryGetValue(deferredResourceReference.Key, out var weakDeferredResourceReferences) is true)
             {
                 weakDeferredResourceReferences.Remove(deferredResourceReference);
             }
@@ -2016,14 +2015,12 @@ namespace System.Windows
 
                 if (mergedDictionary._ownerFEs == null)
                 {
-                    mergedDictionary._ownerFEs = new WeakReferenceList(_ownerFEs.Count);
+                    mergedDictionary._ownerFEs = new WeakReferenceList<FrameworkElement>(_ownerFEs.Count);
                 }
 
-                foreach (object o in _ownerFEs)
+                foreach (FrameworkElement fe in _ownerFEs)
                 {
-                    FrameworkElement fe = o as FrameworkElement;
-                    if (fe != null)
-                        mergedDictionary.AddOwner(fe);
+                    mergedDictionary.AddOwner(fe);
                 }
             }
 
@@ -2033,14 +2030,12 @@ namespace System.Windows
 
                 if (mergedDictionary._ownerFCEs == null)
                 {
-                    mergedDictionary._ownerFCEs = new WeakReferenceList(_ownerFCEs.Count);
+                    mergedDictionary._ownerFCEs = new WeakReferenceList<FrameworkContentElement>(_ownerFCEs.Count);
                 }
 
-                foreach (object o in _ownerFCEs)
+                foreach (FrameworkContentElement fce in _ownerFCEs)
                 {
-                    FrameworkContentElement fce = o as FrameworkContentElement;
-                    if (fce != null)
-                        mergedDictionary.AddOwner(fce);
+                    mergedDictionary.AddOwner(fce);
                 }
             }
 
@@ -2050,14 +2045,12 @@ namespace System.Windows
 
                 if (mergedDictionary._ownerApps == null)
                 {
-                    mergedDictionary._ownerApps = new WeakReferenceList(_ownerApps.Count);
+                    mergedDictionary._ownerApps = new WeakReferenceList<Application>(_ownerApps.Count);
                 }
 
-                foreach (object o in _ownerApps)
+                foreach (Application app in _ownerApps)
                 {
-                    Application app = o as Application;
-                    if (app != null)
-                        mergedDictionary.AddOwner(app);
+                    mergedDictionary.AddOwner(app);
                 }
             }
         }
@@ -2122,19 +2115,19 @@ namespace System.Windows
 
         // three properties used by ResourceDictionaryDiagnostics
 
-        internal WeakReferenceList FrameworkElementOwners
+        internal WeakReferenceList<FrameworkElement> FrameworkElementOwners
         {
-            get { return _ownerFEs; }
+            get => _ownerFEs;
         }
 
-        internal WeakReferenceList FrameworkContentElementOwners
+        internal WeakReferenceList<FrameworkContentElement> FrameworkContentElementOwners
         {
-            get { return _ownerFCEs; }
+            get => _ownerFCEs;
         }
 
-        internal WeakReferenceList ApplicationOwners
+        internal WeakReferenceList<Application> ApplicationOwners
         {
-            get { return _ownerApps; }
+            get => _ownerApps;
         }
 
         #endregion HelperMethods
@@ -2623,11 +2616,12 @@ namespace System.Windows
 
         #region Data
 
+        private WeakReferenceList<FrameworkElement> _ownerFEs;
+        private WeakReferenceList<FrameworkContentElement> _ownerFCEs;
+        private WeakReferenceList<Application> _ownerApps;
+        private Dictionary<object, WeakReferenceList<DeferredResourceReference>> _weakDeferredResourceReferencesMap;
+
         private Hashtable                                 _baseDictionary = null;
-        private WeakReferenceList                         _ownerFEs = null;
-        private WeakReferenceList                         _ownerFCEs = null;
-        private WeakReferenceList                         _ownerApps = null;
-        private Dictionary<object, WeakReferenceList>     _weakDeferredResourceReferencesMap = null;
         private ObservableCollection<ResourceDictionary>  _mergedDictionaries = null;
         private Uri                                       _source = null;
         private Uri                                       _baseUri = null;
