@@ -1820,7 +1820,6 @@ namespace System.Windows
         /// </summary>
         private void ValidateDeferredResourceReferences(object resourceKey)
         {
-            
             if (_weakDeferredResourceReferencesMap is null)
             {
                 return;
@@ -1828,36 +1827,29 @@ namespace System.Windows
 
             if (resourceKey is null)
             {
-                foreach (var weakDeferredResourceReferences in _weakDeferredResourceReferencesMap.Values)
+                foreach (WeakReferenceList<DeferredResourceReference> weakReferencesList in _weakDeferredResourceReferencesMap.Values)
                 {
-                    foreach (var weakResourceReference in weakDeferredResourceReferences)
+                    foreach (DeferredResourceReference weakReference in weakReferencesList)
                     {
-                        DeferredResourceReference deferredResourceReference = weakResourceReference as DeferredResourceReference;
-
-                        Inflate(deferredResourceReference);
+                        Inflate(weakReference);
                     }
                 }
             }
             else
             {
-                if (_weakDeferredResourceReferencesMap.TryGetValue(resourceKey, out var weakDeferredResourceReferences))
+                if (_weakDeferredResourceReferencesMap.TryGetValue(resourceKey, out WeakReferenceList<DeferredResourceReference> weakReferencesList))
                 {
-                    foreach (var weakResourceReference in weakDeferredResourceReferences)
+                    foreach (DeferredResourceReference weakReference in weakReferencesList)
                     {
-                        DeferredResourceReference deferredResourceReference = weakResourceReference as DeferredResourceReference;
-
-                        Inflate(deferredResourceReference);
+                        Inflate(weakReference);
                     }
                 }
             }
 
-            return;
-
-            void Inflate(DeferredResourceReference deferredResourceReference)
+            static void Inflate(DeferredResourceReference deferredResourceReference)
             {
-                // This will inflate the deferred reference, causing it
-                // to be removed from the list.  The list may also be
-                // purged of dead references.
+                // This will inflate the deferred reference, causing it to be removed from the list.
+                // The list may also be purged of dead references.
                 deferredResourceReference?.GetValue(BaseValueSourceInternal.Unknown);
             }
         }
