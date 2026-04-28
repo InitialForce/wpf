@@ -229,14 +229,14 @@ def test_permissions_contents_read(workflow: dict) -> None:
 # ---------------------------------------------------------------------------
 # 8. arm64 conditional gate
 # ---------------------------------------------------------------------------
-def test_build_wpf_arm64_gate_present(workflow: dict) -> None:
-    """build-wpf job must have an arm64 conditional guard."""
+def test_build_wpf_arm64_in_matrix(workflow: dict) -> None:
+    """build-wpf job's matrix must include both x64 and arm64."""
     jobs = workflow["jobs"]
     build_job = jobs.get("build-wpf", {})
-    job_if = build_job.get("if", "")
-    assert job_if, "build-wpf job must have an 'if' condition for arm64 gating"
-    assert "arm64" in str(job_if), (
-        f"build-wpf 'if' condition must reference arm64; got: {job_if}"
+    matrix = build_job.get("strategy", {}).get("matrix", {})
+    arches = matrix.get("arch", [])
+    assert "x64" in arches and "arm64" in arches, (
+        f"build-wpf matrix.arch must include x64 and arm64; got: {arches}"
     )
 
 
