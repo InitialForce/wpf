@@ -1,0 +1,13 @@
+diff --git a/src/Qux/Baz.cs b/src/Qux/Baz.cs
+index a1b2c3d..e5f6789 100644
+--- a/src/Qux/Baz.cs
++++ b/src/Qux/Baz.cs
+@@ -1,7 +1,7 @@ namespace Qux
+ namespace Qux
+ {
+     public class Baz
+     {
+-        private int _count = 0;
++        private int _count;
+     }
+ }
