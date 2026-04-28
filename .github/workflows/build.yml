@@ -132,8 +132,15 @@ jobs:
         with:
           global-json-file: global.json
 
-      - name: Install Strawberry Perl
-        run: choco install strawberryperl --version=5.28.1.1 -y --no-progress
+      - name: Install Strawberry Perl (idempotent)
+        # windows-latest pre-installs strawberryperl (currently v5.42+).
+        # Skip choco install if perl is already on PATH; otherwise install.
+        run: |
+          if (Get-Command perl -ErrorAction SilentlyContinue) {
+            Write-Host "Strawberry Perl already installed: $(perl --version | Select-String -Pattern 'This is perl')"
+          } else {
+            choco install strawberryperl -y --no-progress
+          }
         shell: powershell
 
       # Placeholder: upstream wpf submodule / dotnet/wpf source checkout.
