@@ -1,0 +1,63 @@
+name: Review Disagreement
+description: >
+  Filed automatically when the two independent Opus reviewers return conflicting verdicts
+  on an upstream PR candidate. A human must resolve before automation can proceed.
+labels:
+  - review-disagreement
+  - needs-human
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue was opened automatically by `pr-review.yml` because reviewer-1 and
+        reviewer-2 returned different verdicts, or at least one reviewer escalated.
+        Resolve by choosing a course of action below, then close this issue.
+
+  - type: input
+    id: pr_number
+    attributes:
+      label: "Upstream PR number"
+      description: "The dotnet/wpf pull request being reviewed."
+      placeholder: "[review-disagreement] PR #"
+    validations:
+      required: true
+
+  - type: input
+    id: head_sha
+    attributes:
+      label: "Pinned head SHA"
+      description: "The head_sha captured at discovery time (from the ledger's `discovered` event)."
+      placeholder: "abc1234..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reviewer_1_verdict
+    attributes:
+      label: "Reviewer-1 verdict"
+      description: "Full verdict and rationale from the first Opus reviewer."
+      placeholder: "Paste reviewer-1 output here."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reviewer_2_verdict
+    attributes:
+      label: "Reviewer-2 verdict"
+      description: "Full verdict and rationale from the second Opus reviewer."
+      placeholder: "Paste reviewer-2 output here."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: suggested_resolution
+    attributes:
+      label: "Suggested resolution"
+      description: "Choose how to proceed with this PR."
+      options:
+        - "accept-1 — accept reviewer-1's verdict as correct"
+        - "accept-2 — accept reviewer-2's verdict as correct"
+        - "re-run — re-run both reviewers with additional context"
+        - "reject-both — reject this PR candidate regardless of verdicts"
+    validations:
+      required: true

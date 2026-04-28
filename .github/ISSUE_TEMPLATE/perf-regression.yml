@@ -1,0 +1,74 @@
+name: Perf Regression
+description: >
+  Filed automatically when a patch candidate triggers a performance regression of 15% or
+  more on one or more BenchmarkDotNet scenarios. Requires human triage before the
+  candidate can be rejected, accepted with a note, or investigated further.
+labels:
+  - perf-regression
+  - needs-human
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue was opened automatically by `pr-ingestion.yml` or `release.yml` because
+        the perf gate detected a regression of 15% or more. Review the numbers below and
+        decide on next steps.
+
+        Threshold reminder: >5% blocks auto-ingestion; >15% auto-rejects and opens this issue.
+
+  - type: input
+    id: pr_sha
+    attributes:
+      label: "PR number and head SHA"
+      description: "The upstream PR number and the pinned head SHA from the ledger."
+      placeholder: "PR #10628 @ abc1234"
+    validations:
+      required: true
+
+  - type: input
+    id: scenario_name
+    attributes:
+      label: "Benchmark scenario name"
+      description: "The BenchmarkDotNet scenario that regressed."
+      placeholder: "e.g. VirtualizingStackPanel_ScrollDown_1000Items"
+    validations:
+      required: true
+
+  - type: input
+    id: baseline
+    attributes:
+      label: "Baseline measurement"
+      description: "The most recent baseline from perf/series.jsonl (include units)."
+      placeholder: "e.g. 12.4 ms (mean)"
+    validations:
+      required: true
+
+  - type: input
+    id: current
+    attributes:
+      label: "Current measurement"
+      description: "The measurement from this run (include units)."
+      placeholder: "e.g. 14.9 ms (mean)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: suspected_cause
+    attributes:
+      label: "Suspected cause"
+      description: "Brief analysis of what in the patch may have caused the regression."
+      placeholder: "Describe what changed and why it might affect this scenario."
+    validations:
+      required: false
+
+  - type: dropdown
+    id: decision
+    attributes:
+      label: "Decision"
+      description: "How should this regression be handled?"
+      options:
+        - "rollback — revert this patch, do not ingest"
+        - "accept-with-note — regression is acceptable; document in DECISION_LOG.md"
+        - "dig-deeper — needs more investigation before deciding"
+    validations:
+      required: true

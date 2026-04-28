@@ -1,0 +1,294 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/InitialForce/wpf/.if-fork/config-schema.json",
+  "title": "InitialForce WPF Fork Config",
+  "description": "JSON Schema for .if-fork/config.yaml — canonical policy file for InitialForce/wpf",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "upstream",
+    "fork",
+    "author_allowlist",
+    "file_denylist",
+    "tier_predicates",
+    "review_hard_fail_patterns",
+    "perf",
+    "human_gate_environments",
+    "conflict_resolution",
+    "stable_adoption",
+    "ledger",
+    "claude_models",
+    "claude_limits",
+    "bot_identity",
+    "autonomy_kill_switches"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "enum": [1],
+      "description": "Schema version for forward compatibility"
+    },
+    "upstream": {
+      "type": "object",
+      "required": ["repo", "tracked_branch", "remote_name"],
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "type": "string",
+          "description": "Upstream GitHub repository in org/repo format",
+          "pattern": "^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$"
+        },
+        "tracked_branch": {
+          "type": "string",
+          "description": "Upstream branch to track"
+        },
+        "remote_name": {
+          "type": "string",
+          "description": "Git remote name for the upstream"
+        }
+      }
+    },
+    "fork": {
+      "type": "object",
+      "required": ["org", "repo", "active_release_branches", "staging_branch", "mirror_branch"],
+      "additionalProperties": false,
+      "properties": {
+        "org": {
+          "type": "string",
+          "description": "GitHub organization name"
+        },
+        "repo": {
+          "type": "string",
+          "description": "GitHub repository name"
+        },
+        "active_release_branches": {
+          "type": "array",
+          "items": {"type": "string"},
+          "minItems": 1,
+          "description": "List of active release branches (e.g. if/release/10.0)"
+        },
+        "staging_branch": {
+          "type": "string",
+          "description": "Integration branch before promotion to release"
+        },
+        "mirror_branch": {
+          "type": "string",
+          "description": "FF-only safety-net mirror branch"
+        }
+      }
+    },
+    "author_allowlist": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "GitHub usernames that receive fast-path prior (NOT auto-merge)"
+    },
+    "file_denylist": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Glob patterns for files that auto-fail conflict resolution"
+    },
+    "tier_predicates": {
+      "type": "object",
+      "required": ["s", "a", "b"],
+      "additionalProperties": false,
+      "description": "Tier routing predicates (not merge gates; 2x review applies to all tiers)",
+      "properties": {
+        "s": {
+          "type": "object",
+          "required": ["max_files_touched", "max_loc_delta", "min_review_confidence", "allowed_categories"],
+          "additionalProperties": false,
+          "properties": {
+            "max_files_touched": {"type": "integer", "minimum": 1},
+            "max_loc_delta": {"type": "integer", "minimum": 0},
+            "min_review_confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            "allowed_categories": {
+              "type": "array",
+              "items": {"type": "string"}
+            }
+          }
+        },
+        "a": {
+          "type": "object",
+          "required": ["max_files_touched", "max_loc_delta", "min_review_confidence"],
+          "additionalProperties": false,
+          "properties": {
+            "max_files_touched": {"type": "integer", "minimum": 1},
+            "max_loc_delta": {"type": "integer", "minimum": 0},
+            "min_review_confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0}
+          }
+        },
+        "b": {
+          "type": "object",
+          "required": ["min_review_confidence"],
+          "additionalProperties": false,
+          "properties": {
+            "min_review_confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0}
+          }
+        }
+      }
+    },
+    "review_hard_fail_patterns": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Regex patterns that trigger auto-unsafe verdict if found in any new patch"
+    },
+    "perf": {
+      "type": "object",
+      "required": ["regression_threshold_pct", "auto_reject_threshold_pct"],
+      "additionalProperties": false,
+      "properties": {
+        "regression_threshold_pct": {
+          "type": "number",
+          "minimum": 0.0,
+          "description": "Percentage regression that triggers a warning"
+        },
+        "auto_reject_threshold_pct": {
+          "type": "number",
+          "minimum": 0.0,
+          "description": "Percentage regression that triggers automatic rejection"
+        }
+      }
+    },
+    "human_gate_environments": {
+      "type": "object",
+      "required": ["release", "branch_promotion", "bot_credentials"],
+      "additionalProperties": false,
+      "properties": {
+        "release": {
+          "type": "string",
+          "description": "GitHub Environment name for the NuGet publish gate"
+        },
+        "branch_promotion": {
+          "type": "string",
+          "description": "GitHub Environment name for branch promotion gate"
+        },
+        "bot_credentials": {
+          "type": "string",
+          "description": "GitHub Environment name that stores Anthropic + GH App keys"
+        }
+      }
+    },
+    "conflict_resolution": {
+      "type": "object",
+      "required": ["max_hunk_count", "max_conflict_lines", "min_confidence", "pause_run_if_escalation_pct_exceeds"],
+      "additionalProperties": false,
+      "properties": {
+        "max_hunk_count": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum number of conflict hunks Claude will attempt to resolve"
+        },
+        "max_conflict_lines": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum number of conflict lines Claude will attempt to resolve"
+        },
+        "min_confidence": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Minimum confidence required to accept Claude's conflict resolution"
+        },
+        "pause_run_if_escalation_pct_exceeds": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 100.0,
+          "description": "Pause the run if escalation percentage exceeds this threshold"
+        }
+      }
+    },
+    "stable_adoption": {
+      "type": "object",
+      "required": ["abort_run_if_escalation_pct_exceeds"],
+      "additionalProperties": false,
+      "properties": {
+        "abort_run_if_escalation_pct_exceeds": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 100.0,
+          "description": "Abort the stable adoption run if escalation percentage exceeds this threshold"
+        }
+      }
+    },
+    "ledger": {
+      "type": "object",
+      "required": ["path", "state_path", "absorbed_manifest_path"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Path to the append-only patch ledger JSONL file"
+        },
+        "state_path": {
+          "type": "string",
+          "description": "Path to the regenerated denormalized state JSON file"
+        },
+        "absorbed_manifest_path": {
+          "type": "string",
+          "description": "Path to the graduation manifest JSON file"
+        }
+      }
+    },
+    "claude_models": {
+      "type": "object",
+      "required": ["triage", "review_1", "review_2", "cherry_pick", "conflict_resolve", "release_notes", "failure_analysis"],
+      "additionalProperties": false,
+      "properties": {
+        "triage": {"type": "string", "description": "Claude model for PR triage"},
+        "review_1": {"type": "string", "description": "Claude model for first review pass"},
+        "review_2": {"type": "string", "description": "Claude model for second review pass"},
+        "cherry_pick": {"type": "string", "description": "Claude model for cherry-pick operations"},
+        "conflict_resolve": {"type": "string", "description": "Claude model for conflict resolution"},
+        "release_notes": {"type": "string", "description": "Claude model for release note generation"},
+        "failure_analysis": {"type": "string", "description": "Claude model for failure analysis"}
+      }
+    },
+    "claude_limits": {
+      "type": "object",
+      "required": [
+        "max_turns_triage",
+        "max_turns_review",
+        "max_turns_cherry_pick",
+        "max_turns_conflict",
+        "daily_token_cap_usd",
+        "monthly_token_cap_usd"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "max_turns_triage": {"type": "integer", "minimum": 1},
+        "max_turns_review": {"type": "integer", "minimum": 1},
+        "max_turns_cherry_pick": {"type": "integer", "minimum": 1},
+        "max_turns_conflict": {"type": "integer", "minimum": 1},
+        "daily_token_cap_usd": {"type": "number", "minimum": 0.0},
+        "monthly_token_cap_usd": {"type": "number", "minimum": 0.0}
+      }
+    },
+    "bot_identity": {
+      "type": "object",
+      "required": ["name", "email", "github_app_id_secret", "github_app_private_key_secret"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "description": "Display name for the bot"},
+        "email": {"type": "string", "format": "email", "description": "Email address for the bot"},
+        "github_app_id_secret": {"type": "string", "description": "Secret name holding the GH App ID"},
+        "github_app_private_key_secret": {"type": "string", "description": "Secret name holding the GH App private key"}
+      }
+    },
+    "autonomy_kill_switches": {
+      "type": "object",
+      "required": ["enabled_var", "automerge_frozen_var"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled_var": {
+          "type": "string",
+          "description": "Repository variable name for the master kill switch"
+        },
+        "automerge_frozen_var": {
+          "type": "string",
+          "description": "Repository variable name to suspend auto-merge"
+        }
+      }
+    }
+  }
+}
