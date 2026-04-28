@@ -1,0 +1,75 @@
+# .github/workflows/autonomy-check.yml
+name: Autonomy Gate Check
+
+on:
+  workflow_call:
+    inputs:
+      requested_action:
+        description: >
+          The action being requested. Known values: claude-invoke, auto-merge,
+          discovery-scan, release-publish. Used to apply action-specific gates
+          (e.g. IF_AUTOMERGE_FROZEN only blocks auto-merge).
+        type: string
+        required: true
+      bypass_for_human_dispatch:
+        description: >
+          When true, allow the action to proceed even if IF_AUTOMERGE_FROZEN is set,
+          provided the triggering event was workflow_dispatch (a human is driving).
+        type: boolean
+        required: false
+        default: false
+    outputs:
+      proceed:
+        description: "'true' if the requested action is allowed to proceed, 'false' otherwise."
+        value: ${{ jobs.gate.outputs.proceed }}
+      reason:
+        description: "Human-readable explanation of why the action was allowed or blocked."
+        value: ${{ jobs.gate.outputs.reason }}
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Check autonomy kill-switch
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+      reason: ${{ steps.check.outputs.reason }}
+    steps:
+      - name: Evaluate autonomy gate
+        id: check
+        run: |
+          AUTONOMY_ENABLED="${{ vars.IF_AUTONOMY_ENABLED }}"
+          AUTOMERGE_FROZEN="${{ vars.IF_AUTOMERGE_FROZEN }}"
+          REQUESTED_ACTION="${{ inputs.requested_action }}"
+          BYPASS="${{ inputs.bypass_for_human_dispatch }}"
+          TRIGGER_EVENT="${{ github.event_name }}"
+
+          # Gate 1: global kill switch
+          if [ "$AUTONOMY_ENABLED" != "true" ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "reason=autonomy disabled by IF_AUTONOMY_ENABLED=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Autonomy gate: IF_AUTONOMY_ENABLED is not 'true'. All Claude jobs will be skipped."
+            exit 0
+          fi
+
+          # Gate 2: auto-merge freeze (applies only to auto-merge action)
+          if [ "$REQUESTED_ACTION" = "auto-merge" ] && [ "$AUTOMERGE_FROZEN" = "true" ]; then
+            # Bypass allowed when a human triggered workflow_dispatch and bypass flag is set
+            if [ "$BYPASS" = "true" ] && [ "$TRIGGER_EVENT" = "workflow_dispatch" ]; then
+              echo "proceed=true" >> "$GITHUB_OUTPUT"
+              echo "reason=ok (auto-merge freeze bypassed for human workflow_dispatch)" >> "$GITHUB_OUTPUT"
+              echo "::notice::Autonomy gate: IF_AUTOMERGE_FROZEN=true bypassed for human workflow_dispatch."
+              exit 0
+            fi
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "reason=auto-merge frozen by IF_AUTOMERGE_FROZEN=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Autonomy gate: auto-merge frozen by IF_AUTOMERGE_FROZEN=true."
+            exit 0
+          fi
+
+          # All gates passed
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+          echo "reason=ok" >> "$GITHUB_OUTPUT"
+          echo "::notice::Autonomy gate: all checks passed for action '$REQUESTED_ACTION'. Proceeding."
