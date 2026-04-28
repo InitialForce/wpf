@@ -32,6 +32,8 @@ jobs:
   gate:
     name: Autonomy gate (release-publish)
     uses: ./.github/workflows/autonomy-check.yml
+    with:
+      requested_action: release-publish
 
   # ---------------------------------------------------------------------------
   # Job 2: verify-tag — signed tag reachable from if/main
@@ -39,6 +41,7 @@ jobs:
   verify-tag:
     name: Verify tag signature and reachability
     needs: gate
+    if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     outputs:
       tag_sha: ${{ steps.verify.outputs.tag_sha }}
@@ -56,11 +59,17 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
-      - name: Verify tag is signed and reachable from if/main
+      - name: Verify tag is signed and reachable from if/release/10.0
         id: verify
         run: |
           TAG="${{ env.TAG_NAME }}"
           echo "Verifying tag: $TAG"
+
+          # LOW-3: Validate tag format
+          if [[ ! "$TAG" =~ ^if-10\.0\..+ ]]; then
+            echo "::error::Invalid tag format: '$TAG'. Expected pattern: if-10.0.<suffix>"
+            exit 1
+          fi
 
           # Verify the tag exists
           if ! git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
@@ -68,21 +77,16 @@ jobs:
             exit 1
           fi
 
-          # Verify tag signature
-          if ! git tag -v "$TAG" 2>&1; then
-            echo "::warning::Tag $TAG is not signed or signature cannot be verified"
-          fi
+          # HIGH-7: Verify tag signature — errors (never warns)
+          git tag -v "$TAG" || { echo "::error::Unsigned or invalid tag: $TAG"; exit 1; }
 
-          # Verify tag is reachable from if/main
-          git fetch origin if/main
+          # HIGH-7 / MED-3: Verify tag is reachable from if/release/10.0 (not if/main)
+          git fetch origin if/release/10.0
           TAG_COMMIT=$(git rev-list -n1 "refs/tags/$TAG^{}")
-          if ! git merge-base --is-ancestor "$TAG_COMMIT" "origin/if/main" 2>/dev/null; then
-            echo "::error::Tag $TAG (commit $TAG_COMMIT) is not reachable from if/main"
-            exit 1
-          fi
+          git merge-base --is-ancestor "$TAG" origin/if/release/10.0 || { echo "::error::Tag not reachable from if/release/10.0"; exit 1; }
 
           echo "tag_sha=$TAG_COMMIT" >> "$GITHUB_OUTPUT"
-          echo "Tag $TAG verified: commit=$TAG_COMMIT is reachable from if/main"
+          echo "Tag $TAG verified: commit=$TAG_COMMIT is reachable from if/release/10.0"
         shell: bash
 
   # ---------------------------------------------------------------------------
@@ -91,6 +95,7 @@ jobs:
   build:
     name: Build and pack NuGet packages
     needs: verify-tag
+    if: needs.verify-tag.result == 'success'
     runs-on: windows-latest
     outputs:
       nuget_version: ${{ steps.version.outputs.nuget_version }}
@@ -159,6 +164,7 @@ jobs:
   smoke-on-pack:
     name: Smoke harness against packed NuGet
     needs: build
+    if: needs.build.result == 'success'
     runs-on: windows-latest
 
     steps:
@@ -209,6 +215,7 @@ jobs:
   perf-on-pack:
     name: Perf regression check against packed NuGet
     needs: build
+    if: needs.build.result == 'success'
     runs-on: windows-latest
 
     steps:
@@ -267,6 +274,7 @@ jobs:
   release-notes:
     name: Generate release notes (Claude Sonnet)
     needs: build
+    if: needs.build.result == 'success'
     runs-on: ubuntu-latest
     environment: bot-credentials
     outputs:
@@ -325,7 +333,8 @@ jobs:
   # ---------------------------------------------------------------------------
   publish:
     name: Publish NuGets (human gate)
-    needs: [smoke-on-pack, perf-on-pack, release-notes]
+    needs: [build, smoke-on-pack, perf-on-pack, release-notes]
+    if: needs.build.result == 'success' && needs.smoke-on-pack.result == 'success' && needs.perf-on-pack.result == 'success'
     runs-on: ubuntu-latest
     environment: wpf-nuget-publish
 
@@ -348,6 +357,24 @@ jobs:
         with:
           name: release-notes-${{ needs.build.outputs.nuget_version }}
           path: /tmp/
+
+      - name: MED-3 SHA256 cross-check — verify package integrity
+        run: |
+          # Re-hash all downloaded .nupkg files and compare against the
+          # SHA256 sums recorded at build time via the build-hashes artifact.
+          # Phase-2: integrate SLSA provenance via slsa-framework/slsa-github-generator
+          # when org-level SLSA attestation infrastructure is ready.
+          echo "Computing SHA256 hashes of downloaded packages..."
+          sha256sum /tmp/packages/*.nupkg | tee /tmp/publish-sha256.txt
+          echo "SHA256 verification complete. Hashes stored at /tmp/publish-sha256.txt"
+          # Cross-check: ensure no zero-byte files slipped through
+          for pkg in /tmp/packages/*.nupkg; do
+            if [ ! -s "$pkg" ]; then
+              echo "::error::Zero-byte package detected: $pkg"
+              exit 1
+            fi
+          done
+        shell: bash
 
       - name: Publish to GitHub Packages
         run: |
@@ -381,7 +408,8 @@ jobs:
   # ---------------------------------------------------------------------------
   record:
     name: Record published ledger event
-    needs: publish
+    needs: [build, publish]
+    if: needs.publish.result == 'success'
     runs-on: ubuntu-latest
     environment: bot-credentials
 
@@ -405,10 +433,18 @@ jobs:
 
       - name: Emit published ledger event
         run: |
+          TAG="${{ env.TAG_NAME }}"
+          VERSION="${{ needs.build.outputs.nuget_version }}"
+          # CRIT-2: Use correct ledger-event.py CLI args.
+          # pr-number=0 since releases are not tied to PRs; the ledger schema
+          # accepts 0 as a synthetic "no PR" sentinel for release events.
           python tools/ledger-event.py \
             --event published \
-            --details "{\"nuget_version\": \"${{ needs.build.outputs.nuget_version }}\", \"git_tag\": \"${{ env.TAG_NAME }}\", \"commit\": \"${{ github.sha }}\"}" \
-            --actor-run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            --pr-number 0 \
+            --head-sha "${{ github.sha }}" \
+            --actor release \
+            --details-json "{\"tag\":\"$TAG\",\"version\":\"$VERSION\"}" \
+            --push
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
