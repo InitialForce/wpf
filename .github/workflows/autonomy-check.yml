@@ -7,8 +7,9 @@ on:
       requested_action:
         description: >
           The action being requested. Known values: claude-invoke, auto-merge,
-          discovery-scan, release-publish. Used to apply action-specific gates
-          (e.g. IF_AUTOMERGE_FROZEN only blocks auto-merge).
+          discovery-scan, release-publish, cherry-pick, upstream-stable-adoption.
+          Unknown values are blocked by default-deny. Action-specific gates
+          apply (e.g. IF_AUTOMERGE_FROZEN only blocks auto-merge).
         type: string
         required: true
       bypass_for_human_dispatch:
@@ -45,6 +46,22 @@ jobs:
           REQUESTED_ACTION="${{ inputs.requested_action }}"
           BYPASS="${{ inputs.bypass_for_human_dispatch }}"
           TRIGGER_EVENT="${{ github.event_name }}"
+
+          # Gate 0: default-deny for unknown requested_action
+          KNOWN_ACTIONS="claude-invoke auto-merge discovery-scan release-publish cherry-pick upstream-stable-adoption"
+          ACTION_KNOWN=false
+          for known in $KNOWN_ACTIONS; do
+            if [ "$REQUESTED_ACTION" = "$known" ]; then
+              ACTION_KNOWN=true
+              break
+            fi
+          done
+          if [ "$ACTION_KNOWN" != "true" ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "reason=unknown requested_action: $REQUESTED_ACTION" >> "$GITHUB_OUTPUT"
+            echo "::error::Autonomy gate: unknown requested_action '$REQUESTED_ACTION'. Blocked by default-deny."
+            exit 0
+          fi
 
           # Gate 1: global kill switch
           if [ "$AUTONOMY_ENABLED" != "true" ]; then
