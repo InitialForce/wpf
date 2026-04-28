@@ -26,14 +26,14 @@
     <RepositoryType>git</RepositoryType>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
-    <!-- Symbols are emitted as .snupkg (portable PDB format). -->
-    <IncludeSymbols>true</IncludeSymbols>
-    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <!-- Disable snupkg: the symbol package generator considers this project
+         empty (NoBuild=true, no compiled output), so it emits NU5017. The
+         portable PDBs already ship inside the .nupkg via the explicit
+         '*.pdb Pack=true' globs below, so a separate symbol package adds
+         no value here. -->
+    <IncludeSymbols>false</IncludeSymbols>
     <!-- Suppress warnings for NoBuild SDK-style packaging. -->
-    <NoWarn>NU5128</NoWarn>
-    <!-- Required so dotnet pack does not emit NU5017 for the snupkg
-         (a symbol package needs at least one piece of content; loose
-         PDBs alone in runtimes/ are not counted). -->
+    <NoWarn>NU5128;NU5128</NoWarn>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
