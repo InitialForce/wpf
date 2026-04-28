@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <OutputType>WinExe</OutputType>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Mirror Swing Catalyst deployment: self-contained, win-x64. -->
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- Explicit entry point so we can add minimal startup logic. -->
+    <StartupObject>InitialForce.WpfHelloWorld.Program</StartupObject>
+    <!-- ApplicationDefinition is handled manually via App.xaml. -->
+    <ApplicationDefinition>App.xaml</ApplicationDefinition>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      The package under test.
+      In CI: resolved from local feed via the -source artifacts/nuget/ flag on dotnet restore.
+      Locally: set InitialForceWpfVersion via Directory.Build.props or pass
+               /p:InitialForceWpfVersion=10.0.4-if.20260427.1
+    -->
+    <PackageReference Include="InitialForce.WPF" Version="$(InitialForceWpfVersion)" />
+  </ItemGroup>
+
+</Project>
