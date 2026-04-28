@@ -178,39 +178,95 @@ jobs:
           }
         shell: powershell
 
-      # Placeholder: upstream wpf submodule / dotnet/wpf source checkout.
-      # TODO (wired by packaging beads): add real submodule reference or
-      # sparse-checkout of upstream source tree.
-      - name: Checkout upstream WPF source (placeholder)
-        run: |
-          echo "Upstream dotnet/wpf source will be wired by packaging beads."
-          echo "Placeholder: no-op in this bead."
-        shell: bash
-
-      # Placeholder: build InitialForce.WPF packaging project.
-      # TODO (wired by packaging beads): replace paths below with real project paths.
-      - name: Build InitialForce.WPF packaging projects (placeholder)
-        run: |
-          echo "Build step placeholder — packaging project paths wired by other beads."
-          echo "Expected commands:"
-          echo "  dotnet build packaging/InitialForce.WPF/InitialForce.WPF.csproj -c Release /p:Platform=${{ matrix.arch }}"
-          echo "  dotnet build packaging/InitialForce.WPF.RuntimeOverride/InitialForce.WPF.RuntimeOverride.csproj -c Release /p:Platform=${{ matrix.arch }}"
-        shell: bash
-
       - name: Validate ledger schema
         run: python tools/ledger-validate.py --ledger .if-fork/patch-ledger.jsonl
         shell: bash
 
-      # Phase-0 placeholder: build step doesn't yet produce real nupkgs.
-      # Emit a sentinel marker so downstream smoke/perf jobs (which gate on
-      # this artifact existing) can run their own placeholder steps end-to-end.
-      # Once real packaging beads land, this block is replaced by the real
-      # nupkg upload above.
-      - name: Emit placeholder build marker
+      # ----- Real upstream WPF build -----
+      # The fork's checkout already contains the full dotnet/wpf source
+      # tree (since this repo IS a fork of dotnet/wpf). Run the standard
+      # arcade build to produce the four managed assemblies that
+      # InitialForce.WPF wraps.
+      - name: Build upstream WPF source
         run: |
-          mkdir -p artifacts/packages
-          echo "phase-0 placeholder build for ${{ matrix.arch }} @ ${{ github.sha }}" > artifacts/packages/PLACEHOLDER-${{ matrix.arch }}.txt
-        shell: bash
+          .\build.cmd -c Release -plat ${{ matrix.arch }} -restore -build -pack /bl:artifacts/log/Release/build.${{ matrix.arch }}.binlog
+        shell: cmd
+        timeout-minutes: 60
+
+      - name: Locate built WPF DLLs
+        id: locate-dlls
+        run: |
+          $names = @("PresentationCore", "PresentationFramework", "WindowsBase", "System.Xaml")
+          $found = @{}
+          foreach ($n in $names) {
+            $hit = Get-ChildItem -Recurse artifacts -Filter "$n.dll" -ErrorAction SilentlyContinue |
+                   Where-Object { $_.FullName -match "Release" -and $_.FullName -notmatch "\\ref\\|\\obj\\" } |
+                   Select-Object -First 1
+            if (-not $hit) {
+              Write-Error "Could not locate $n.dll under artifacts/"
+              Get-ChildItem -Recurse artifacts -Filter "*.dll" | Select-Object -First 30 | Format-Table FullName
+              exit 1
+            }
+            Write-Host "Found $n.dll at $($hit.FullName)"
+            $found[$n] = $hit.FullName
+          }
+          # Persist paths for the next step via env
+          "PRESENTATIONCORE_DLL=$($found.PresentationCore)"   | Out-File -Append $env:GITHUB_ENV
+          "PRESENTATIONFRAMEWORK_DLL=$($found.PresentationFramework)" | Out-File -Append $env:GITHUB_ENV
+          "WINDOWSBASE_DLL=$($found.WindowsBase)"            | Out-File -Append $env:GITHUB_ENV
+          "SYSTEMXAML_DLL=$($found.'System.Xaml')"           | Out-File -Append $env:GITHUB_ENV
+        shell: powershell
+
+      - name: Stage DLLs into InitialForce.WPF runtime tree
+        run: |
+          $rid = if ("${{ matrix.arch }}" -eq "x64") { "win-x64" } else { "win-arm64" }
+          $dest = "packaging\InitialForce.WPF\runtimes\$rid\lib\net10.0-windows"
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+          foreach ($pair in @(
+            @{ name = "PresentationCore";      path = "$env:PRESENTATIONCORE_DLL" },
+            @{ name = "PresentationFramework"; path = "$env:PRESENTATIONFRAMEWORK_DLL" },
+            @{ name = "WindowsBase";           path = "$env:WINDOWSBASE_DLL" },
+            @{ name = "System.Xaml";           path = "$env:SYSTEMXAML_DLL" }
+          )) {
+            Copy-Item $pair.path -Destination $dest
+            $pdb = $pair.path -replace '\.dll$', '.pdb'
+            if (Test-Path $pdb) { Copy-Item $pdb -Destination $dest }
+          }
+          Get-ChildItem $dest | Format-Table Name, Length
+        shell: powershell
+
+      - name: Compute package version
+        id: version
+        run: |
+          # Pre-release version in the form 10.0.0-if.<run_number>+<short_sha>
+          $sha = "${{ github.sha }}".Substring(0, 7)
+          $version = "10.0.0-if.${{ github.run_number }}+$sha"
+          "PKG_VERSION=$version" | Out-File -Append $env:GITHUB_ENV
+          Write-Host "Package version: $version"
+        shell: powershell
+
+      - name: Pack InitialForce.WPF (only on x64 host)
+        if: matrix.arch == 'x64'
+        run: |
+          dotnet pack packaging\InitialForce.WPF\InitialForce.WPF.csproj `
+            -c Release `
+            -p:PackageVersion=$env:PKG_VERSION `
+            --output artifacts\packages
+        shell: powershell
+
+      - name: Pack InitialForce.WPF.RuntimeOverride (only on x64 host)
+        if: matrix.arch == 'x64'
+        run: |
+          dotnet pack packaging\InitialForce.WPF.RuntimeOverride\InitialForce.WPF.RuntimeOverride.csproj `
+            -c Release `
+            -p:PackageVersion=$env:PKG_VERSION `
+            --output artifacts\packages
+        shell: powershell
+
+      - name: List produced packages
+        run: |
+          Get-ChildItem -Recurse artifacts\packages | Format-Table FullName, Length
+        shell: powershell
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -219,7 +275,7 @@ jobs:
           path: |
             artifacts/packages/**/*.nupkg
             artifacts/packages/**/*.snupkg
-            artifacts/packages/PLACEHOLDER-*.txt
+            packaging/InitialForce.WPF/runtimes/**
           if-no-files-found: error
           retention-days: 14
 
