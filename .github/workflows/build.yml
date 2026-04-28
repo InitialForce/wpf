@@ -227,22 +227,28 @@ jobs:
           "SYSTEMXAML_DLL=$($found.'System.Xaml')"           | Out-File -Append $env:GITHUB_ENV
         shell: powershell
 
-      - name: Stage DLLs into InitialForce.WPF runtime tree
+      - name: Stage DLLs into both packaging trees
         run: |
           $rid = if ("${{ matrix.arch }}" -eq "x64") { "win-x64" } else { "win-arm64" }
-          $dest = "packaging\InitialForce.WPF\runtimes\$rid\lib\net10.0"
-          New-Item -ItemType Directory -Path $dest -Force | Out-Null
-          foreach ($pair in @(
-            @{ name = "PresentationCore";      path = "$env:PRESENTATIONCORE_DLL" },
-            @{ name = "PresentationFramework"; path = "$env:PRESENTATIONFRAMEWORK_DLL" },
-            @{ name = "WindowsBase";           path = "$env:WINDOWSBASE_DLL" },
-            @{ name = "System.Xaml";           path = "$env:SYSTEMXAML_DLL" }
-          )) {
-            Copy-Item $pair.path -Destination $dest
-            $pdb = $pair.path -replace '\.dll$', '.pdb'
-            if (Test-Path $pdb) { Copy-Item $pdb -Destination $dest }
+          $destinations = @(
+            "packaging\InitialForce.WPF\runtimes\$rid\lib\net10.0",
+            "packaging\InitialForce.WPF.RuntimeOverride\runtimes\$rid\lib\net10.0"
+          )
+          foreach ($dest in $destinations) {
+            New-Item -ItemType Directory -Path $dest -Force | Out-Null
+            foreach ($pair in @(
+              @{ name = "PresentationCore";      path = "$env:PRESENTATIONCORE_DLL" },
+              @{ name = "PresentationFramework"; path = "$env:PRESENTATIONFRAMEWORK_DLL" },
+              @{ name = "WindowsBase";           path = "$env:WINDOWSBASE_DLL" },
+              @{ name = "System.Xaml";           path = "$env:SYSTEMXAML_DLL" }
+            )) {
+              Copy-Item $pair.path -Destination $dest
+              $pdb = $pair.path -replace '\.dll$', '.pdb'
+              if (Test-Path $pdb) { Copy-Item $pdb -Destination $dest }
+            }
+            Write-Host "==> Staged in $dest"
+            Get-ChildItem $dest | Format-Table Name, Length
           }
-          Get-ChildItem $dest | Format-Table Name, Length
         shell: powershell
 
       - name: Compute package version
