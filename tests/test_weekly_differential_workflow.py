@@ -15,7 +15,7 @@ Structural assertions:
 8.  compare needs both 'build-upstream-clean' and 'build-fork'
 9.  report needs 'compare'
 10. tools/diff-smoke-results.py is referenced in compare job
-11. permissions: contents:read, issues:write, id-token:write
+11. permissions: contents:read, issues:write (id-token:write removed — no OIDC)
 12. concurrency group references 'weekly-diff'
 13. smoke-upstream.xml artifact is uploaded by build-upstream-clean
 14. smoke-fork.xml artifact is uploaded by build-fork
@@ -233,7 +233,7 @@ def test_diff_tool_exists() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 11. Permissions: contents:read, issues:write, id-token:write
+# 11. Permissions: contents:read, issues:write (id-token:write removed)
 # ---------------------------------------------------------------------------
 def test_permissions_contents_read(workflow: dict) -> None:
     """Workflow must grant contents:read."""
@@ -251,11 +251,12 @@ def test_permissions_issues_write(workflow: dict) -> None:
     )
 
 
-def test_permissions_id_token_write(workflow: dict) -> None:
-    """Workflow must grant id-token:write."""
+def test_permissions_no_id_token_write(workflow: dict) -> None:
+    """Workflow must NOT grant id-token:write — no OIDC usage in weekly-differential."""
     perms = workflow.get("permissions", {})
-    assert perms.get("id-token") == "write", (
-        f"permissions.id-token must be 'write'; got: {perms.get('id-token')}"
+    assert perms.get("id-token") != "write", (
+        "permissions.id-token must NOT be 'write' in weekly-differential — no OIDC usage; "
+        f"got: {perms.get('id-token')}"
     )
 
 
