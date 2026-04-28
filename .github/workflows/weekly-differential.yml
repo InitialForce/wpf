@@ -13,7 +13,6 @@ concurrency:
 permissions:
   contents: read
   issues: write
-  id-token: write
 
 env:
   IF_REPO_ROOT: ${{ github.workspace }}
@@ -25,6 +24,8 @@ jobs:
   gate:
     name: Autonomy gate
     uses: ./.github/workflows/autonomy-check.yml
+    with:
+      requested_action: discovery-scan
 
   # ---------------------------------------------------------------------------
   # Job 2: build-upstream-clean
