@@ -41,7 +41,7 @@
     <!-- Path to the patched DLLs inside the expanded package cache.
          $(MSBuildThisFileDirectory) resolves to buildTransitive/; relative path reaches runtimes/. -->
     <_IFWpfRORuntimeDir
-      >$(MSBuildThisFileDirectory)..\runtimes\win-x64\lib\net10.0-windows\</_IFWpfRORuntimeDir>
+      >$(MSBuildThisFileDirectory)..\runtimes\win-x64\lib\net10.0\</_IFWpfRORuntimeDir>
   </PropertyGroup>
 
 </Project>
