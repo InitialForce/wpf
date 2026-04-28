@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Mirror SC's deployment model: self-contained, win-x64. -->
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <OutputType>Exe</OutputType>
+    <!-- NUnit console runner needs a real entry point. -->
+    <StartupObject>InitialForce.WpfSmoke.Program</StartupObject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The package under test. Resolved from local feed in CI via -source flag. -->
+    <PackageReference Include="InitialForce.WPF" Version="$(InitialForceWpfVersion)" />
+
+    <!-- Test framework. -->
+    <PackageReference Include="NUnit" Version="4.*" />
+    <PackageReference Include="NUnit3TestAdapter" Version="4.*" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
+
+    <!-- Benchmarks. -->
+    <PackageReference Include="BenchmarkDotNet" Version="0.14.*" />
+    <PackageReference Include="BenchmarkDotNet.Diagnostics.Windows" Version="0.14.*" />
+  </ItemGroup>
+
+  <!-- Golden images ship alongside the project. -->
+  <ItemGroup>
+    <EmbeddedResource Include="goldens\**\*.png" />
+    <EmbeddedResource Include="goldens\**\*.sha256" />
+  </ItemGroup>
+
+</Project>
