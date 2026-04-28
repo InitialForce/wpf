@@ -15,7 +15,6 @@ Tests that specifically want CI=true semantics opt in via
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator
 
 import pytest
