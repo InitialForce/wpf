@@ -69,7 +69,8 @@ CURRENT=$(gh pr view $PR_URL --json headRefOid -q .headRefOid)
 if [ "$CURRENT" != "$HEAD_SHA" ]; then
   # open escalation issue: "SHA mismatch on PR #$PR_NUMBER: pinned=$HEAD_SHA current=$CURRENT"
   python tools/ledger-event.py --event escalated --pr-number $PR_NUMBER \
-    --details '{"reason":"sha_mismatch"}'
+    --head-sha "$HEAD_SHA" --actor cherry-pick \
+    --details-json '{"reason":"sha_mismatch"}'
   exit 1
 fi
 ```
@@ -83,7 +84,8 @@ git cherry-pick --abort 2>/dev/null || true
 if [ $STATUS -eq 0 ] && git diff --cached --quiet; then
   # empty commit = already merged upstream
   python tools/ledger-event.py --event graduated_upstream --pr-number $PR_NUMBER \
-    --details '{"detection_method":"empty_cherry_pick"}'
+    --head-sha "$HEAD_SHA" --actor cherry-pick \
+    --details-json '{"detection_method":"empty_cherry_pick"}'
   exit 0
 fi
 ```
@@ -101,14 +103,16 @@ if [ $? -ne 0 ]; then
       git cherry-pick --abort
       # open escalation issue using .github/ISSUE_TEMPLATE/rebase-conflict.md
       python tools/ledger-event.py --event escalated --pr-number $PR_NUMBER \
-        --details "{\"reason\":\"conflict_in_denylist\",\"file\":\"$f\"}"
+        --head-sha "$HEAD_SHA" --actor cherry-pick \
+        --details-json "{\"reason\":\"conflict_in_denylist\",\"file\":\"$f\"}"
       exit 1
     fi
   done
   git cherry-pick --abort
   # open escalation issue
   python tools/ledger-event.py --event escalated --pr-number $PR_NUMBER \
-    --details '{"reason":"cherry_pick_conflict"}'
+    --head-sha "$HEAD_SHA" --actor cherry-pick \
+    --details-json '{"reason":"cherry_pick_conflict"}'
   exit 1
 fi
 ```
@@ -126,7 +130,8 @@ dotnet build src/Microsoft.DotNet.Wpf/src /p:Configuration=Debug -warnaserror
 if [ $? -ne 0 ]; then
   git checkout $BASE_BRANCH && git branch -D "$BRANCH"
   python tools/ledger-event.py --event build_failed --pr-number $PR_NUMBER \
-    --details '{"stage":"cherry_pick_branch"}'
+    --head-sha "$HEAD_SHA" --actor cherry-pick \
+    --details-json '{"stage":"cherry_pick_branch"}'
   exit 1
 fi
 ```
@@ -140,7 +145,8 @@ INTERNAL_PR=$(gh pr create --repo InitialForce/wpf \
   --body "Automated cherry-pick of $PR_URL. Pinned SHA: $HEAD_SHA.
 Auto-merge in 24h if CI green and IF_AUTOMERGE_FROZEN=false.")
 python tools/ledger-event.py --event cherry_picked --pr-number $PR_NUMBER \
-  --details "{\"applied_branch\":\"$BRANCH\",\"internal_pr\":\"$INTERNAL_PR\",\"pre_flight_clean\":true}"
+  --head-sha "$HEAD_SHA" --actor cherry-pick \
+  --details-json "{\"applied_branch\":\"$BRANCH\",\"internal_pr\":\"$INTERNAL_PR\",\"pre_flight_clean\":true}"
 ```
 
 ---
