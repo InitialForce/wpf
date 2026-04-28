@@ -132,10 +132,13 @@ class TestTargetsFile:
         assert "CopyFilesToOutputDirectory" in content
 
     def test_win_rid_condition(self):
-        """Targets must be conditioned on win-* RuntimeIdentifier."""
+        """Targets must be conditioned on win-x64 RuntimeIdentifier (HIGH-8: exact RID, not win-*)."""
         content = TARGETS.read_text(encoding="utf-8")
-        # Accept StartsWith('win-') or Contains('win-') or similar win-* checks
-        assert "win-" in content, "No win-* RuntimeIdentifier condition found in targets"
+        assert "win-x64" in content, "No win-x64 RuntimeIdentifier condition found in targets"
+        # Must NOT use the broad win-* / StartsWith('win-') pattern for Remove/Inject targets
+        assert "StartsWith('win-')" not in content, (
+            "Targets must condition on 'win-x64' exactly, not StartsWith('win-') — HIGH-8 fix"
+        )
 
     def test_presentation_core_target_present(self):
         content = TARGETS.read_text(encoding="utf-8")
@@ -169,14 +172,33 @@ class TestTargetsFile:
         assert "ResolvedFileToPublish" in content
 
     def test_remove_and_inject_targets_count(self, root):
-        """There should be at least 8 targets (2 per supported assembly = 8 minimum)."""
+        """There should be at least 12 targets (3 per assembly: Remove + Warn + Inject = 12 minimum)."""
         ns = {"ms": MSBUILD_NS}
         targets = root.findall(".//ms:Target", ns)
         # Fall back to no-namespace search
         if not targets:
             targets = list(root.iter("Target"))
-        assert len(targets) >= 8, (
-            f"Expected at least 8 Target elements (2 per assembly), found {len(targets)}"
+        assert len(targets) >= 12, (
+            f"Expected at least 12 Target elements (3 per assembly: Remove+Warn+Inject), found {len(targets)}"
+        )
+
+    def test_warning_element_for_unsupported_rid(self):
+        """Targets file must contain <Warning> elements for unsupported RIDs (HIGH-8 graceful degrade)."""
+        ns = {"ms": MSBUILD_NS}
+        root = parse_xml(TARGETS)
+        warnings = root.findall(".//ms:Warning", ns)
+        assert warnings, "No <Warning> element found; HIGH-8 requires warnings for unsupported RIDs"
+        warn_texts = [w.get("Text", "") for w in warnings]
+        assert any("no-op" in t or "RuntimeIdentifier" in t or "will not be overridden" in t
+                   for t in warn_texts), (
+            f"<Warning> text should explain the no-op behaviour. Found: {warn_texts}"
+        )
+
+    def test_no_overwrite_readonly_files(self):
+        """No <Copy> task should use OverwriteReadOnlyFiles='true' (LOW-2)."""
+        content = TARGETS.read_text(encoding="utf-8")
+        assert "OverwriteReadOnlyFiles" not in content, (
+            "OverwriteReadOnlyFiles='true' found in RuntimeOverride targets file; LOW-2 requires it be removed"
         )
 
 
