@@ -355,7 +355,9 @@ jobs:
   # -------------------------------------------------------------------------
   build-and-test:
     name: Build and test
-    needs: [gate, denylist-check]
+    # cherry-pick must be in direct needs[] because we read its outputs.branch
+    # below; GitHub Actions does NOT propagate outputs transitively.
+    needs: [gate, cherry-pick, denylist-check]
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     environment: bot-credentials
