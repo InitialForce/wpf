@@ -295,6 +295,36 @@ class TestTargetsStructure:
             "Targets file should condition on $(RuntimeIdentifier) for Windows-only guard"
         )
 
+    def test_remove_runtime_wpf_assets_has_win_x64_condition(self):
+        """RemoveRuntimeWpfAssets must be conditioned on win-x64 only (HIGH-8)."""
+        ns = {"ms": MSBUILD_NS}
+        targets = self.root.findall("ms:Target", ns)
+        remove_target = next(
+            (t for t in targets if t.get("Name") == "RemoveRuntimeWpfAssets"), None
+        )
+        assert remove_target is not None, "RemoveRuntimeWpfAssets target not found"
+        condition = remove_target.get("Condition", "")
+        assert "win-x64" in condition, (
+            f"RemoveRuntimeWpfAssets Condition must restrict to win-x64; got: {condition!r}"
+        )
+
+    def test_error_element_for_unsupported_rid(self):
+        """Targets file must contain an <Error> element for unsupported RIDs (HIGH-8 fail-closed)."""
+        ns = {"ms": MSBUILD_NS}
+        errors = self.root.findall(".//ms:Error", ns)
+        assert errors, "No <Error> element found in targets file; HIGH-8 requires fail-closed error for unsupported RIDs"
+        error_texts = [e.get("Text", "") for e in errors]
+        assert any("win-x64" in t or "RuntimeIdentifier" in t for t in error_texts), (
+            f"<Error> element should reference RuntimeIdentifier or win-x64. Found: {error_texts}"
+        )
+
+    def test_no_overwrite_readonly_files(self):
+        """No <Copy> task should use OverwriteReadOnlyFiles='true' (LOW-2)."""
+        raw = ET.tostring(self.root, encoding="unicode")
+        assert "OverwriteReadOnlyFiles" not in raw, (
+            "OverwriteReadOnlyFiles='true' found in targets file; LOW-2 requires it be removed"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Gate 6: .props file is valid and documents consumer-overridable properties
