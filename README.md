@@ -1,4 +1,5 @@
 > **Initial Force WPF fork** — this is a community fork of `dotnet/wpf` maintained by [Initial Force AS](https://initialforce.com) for our internal use, with additional community PRs cherry-picked under a 2× independent automated review gate. See [`docs/BOOTSTRAP_STATUS.md`](docs/BOOTSTRAP_STATUS.md) and [`NOTICE.md`](NOTICE.md) for details. The upstream README follows.
+> See **[FORK.md](FORK.md)** for a full inventory of differences from upstream.
 
 ---
 
