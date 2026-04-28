@@ -330,3 +330,215 @@ def test_multiple_events_sequence(tmp_path: Path) -> None:
         obj = json.loads(raw)
         assert obj["prev_hash"] == prev
         prev = obj["line_hash"]
+
+
+# ---------------------------------------------------------------------------
+# 18 — merged_verdict is now a valid event type (CRIT-2 fix)
+# ---------------------------------------------------------------------------
+
+def test_merged_verdict_is_valid_event(capsys: pytest.CaptureFixture[str]) -> None:
+    ret = ledger_event.main(_make_argv(event="merged_verdict", dry_run=True))
+    assert ret == 0
+    obj = json.loads(capsys.readouterr().out)
+    assert obj["event"] == "merged_verdict"
+
+
+# ---------------------------------------------------------------------------
+# 19 — --push flag is accepted by parse_args (CRIT-3 fix)
+# ---------------------------------------------------------------------------
+
+def test_push_flag_accepted() -> None:
+    ns = ledger_event.parse_args(_make_argv(dry_run=True) + ["--push"])
+    assert ns.push is True
+
+
+def test_no_push_flag_accepted() -> None:
+    ns = ledger_event.parse_args(_make_argv(dry_run=True) + ["--no-push"])
+    assert ns.push is False
+
+
+def test_push_default_is_none() -> None:
+    ns = ledger_event.parse_args(_make_argv(dry_run=True))
+    assert ns.push is None
+
+
+# ---------------------------------------------------------------------------
+# 20 — Outside CI, --no-push prevents any git push call (CRIT-3 fix)
+# ---------------------------------------------------------------------------
+
+def test_no_push_skips_git_push(tmp_path: Path) -> None:
+    ledger = tmp_path / "patch-ledger.jsonl"
+
+    push_calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:  # type: ignore[type-arg]
+        if "push" in cmd:
+            push_calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        # git add and git commit
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        with patch.dict("os.environ", {"CI": ""}, clear=False):
+            ledger_event.main(_make_argv(ledger=str(ledger)) + ["--no-push"])
+
+    assert push_calls == [], "git push should not be called when --no-push is set"
+
+
+# ---------------------------------------------------------------------------
+# 21 — In CI (CI=true), --push=True causes a git push call (CRIT-3 fix)
+# ---------------------------------------------------------------------------
+
+def test_ci_push_is_called(tmp_path: Path) -> None:
+    ledger = tmp_path / "patch-ledger.jsonl"
+
+    push_calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:  # type: ignore[type-arg]
+        if "push" in cmd:
+            push_calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        with patch.dict("os.environ", {"CI": "true"}):
+            ledger_event.main(_make_argv(ledger=str(ledger)) + ["--push"])
+
+    assert any("push" in call for call in push_calls), "git push should be called in CI"
+
+
+# ---------------------------------------------------------------------------
+# 22 — CI mode: GPG signing failure exits nonzero instead of falling back (HIGH-2)
+# ---------------------------------------------------------------------------
+
+def test_ci_gpg_failure_exits_nonzero(tmp_path: Path) -> None:
+    """In CI mode, a GPG failure must cause exit nonzero (no unsigned fallback)."""
+    ledger = tmp_path / "patch-ledger.jsonl"
+
+    add_ok = subprocess.CompletedProcess(
+        args=["git", "add"], returncode=0, stdout="", stderr=""
+    )
+    signed_fail = subprocess.CompletedProcess(
+        args=["git", "commit", "-S", "-m", "x"],
+        returncode=128,
+        stdout="",
+        stderr="gpg: signing failed: No secret key",
+    )
+
+    call_results = [add_ok, signed_fail]
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:  # type: ignore[type-arg]
+        result = call_results.pop(0) if call_results else subprocess.CompletedProcess(cmd, 0, "", "")
+        if kwargs.get("check") and result.returncode != 0:
+            raise subprocess.CalledProcessError(result.returncode, cmd)
+        return result  # type: ignore[return-value]
+
+    with patch("subprocess.run", side_effect=fake_run):
+        with patch.dict("os.environ", {"CI": "true"}):
+            with pytest.raises(SystemExit) as exc:
+                ledger_event.main(_make_argv(ledger=str(ledger)) + ["--no-push"])
+
+    assert exc.value.code != 0, "CI GPG failure must exit nonzero"
+
+
+# ---------------------------------------------------------------------------
+# 23 — Non-CI mode: GPG signing failure falls back with warning (existing behavior)
+# ---------------------------------------------------------------------------
+
+def test_non_ci_gpg_failure_falls_back(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Outside CI, a GPG failure should fall back to unsigned with a warning."""
+    ledger = tmp_path / "patch-ledger.jsonl"
+
+    add_ok = subprocess.CompletedProcess(args=["git", "add"], returncode=0, stdout="", stderr="")
+    signed_fail = subprocess.CompletedProcess(
+        args=["git", "commit", "-S", "-m", "x"],
+        returncode=128,
+        stdout="",
+        stderr="gpg: signing failed: No secret key",
+    )
+    unsigned_ok = subprocess.CompletedProcess(args=["git", "commit"], returncode=0, stdout="", stderr="")
+
+    call_results = [add_ok, signed_fail, unsigned_ok]
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:  # type: ignore[type-arg]
+        result = call_results.pop(0)
+        if kwargs.get("check") and result.returncode != 0:
+            raise subprocess.CalledProcessError(result.returncode, cmd)
+        return result  # type: ignore[return-value]
+
+    with patch("subprocess.run", side_effect=fake_run):
+        with patch.dict("os.environ", {"CI": ""}, clear=False):
+            ret = ledger_event.main(_make_argv(ledger=str(ledger)) + ["--no-push"])
+
+    assert ret == 0
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# 24 — Commit message includes Ledger-Line-Hash trailer (MED-5 fix)
+# ---------------------------------------------------------------------------
+
+def test_commit_message_includes_line_hash_trailer(tmp_path: Path) -> None:
+    """_git_commit must embed a Ledger-Line-Hash trailer in the commit message."""
+    ledger = tmp_path / "patch-ledger.jsonl"
+    committed_messages: list[str] = []
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:  # type: ignore[type-arg]
+        if "commit" in cmd and "-m" in cmd:
+            idx = cmd.index("-m")
+            committed_messages.append(cmd[idx + 1])
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        with patch.dict("os.environ", {"CI": ""}, clear=False):
+            ledger_event.main(_make_argv(ledger=str(ledger)) + ["--no-push"])
+
+    assert any("Ledger-Line-Hash:" in msg for msg in committed_messages), (
+        "Commit message must contain Ledger-Line-Hash trailer"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 25 — Push retry: non-FF push causes pull/rebase/recompute/retry (CRIT-3 fix)
+# ---------------------------------------------------------------------------
+
+def test_push_retries_on_non_ff(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """When the first push is rejected (non-FF), the tool should retry after rebase."""
+    ledger = tmp_path / "patch-ledger.jsonl"
+
+    push_attempt = [0]
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:  # type: ignore[type-arg]
+        if "push" in cmd:
+            push_attempt[0] += 1
+            if push_attempt[0] == 1:
+                # First push: simulate non-FF rejection
+                result = subprocess.CompletedProcess(
+                    cmd, 1, "", "[rejected] non-fast-forward"
+                )
+            else:
+                # Second push: success
+                result = subprocess.CompletedProcess(cmd, 0, "", "")
+            if kwargs.get("check") and result.returncode != 0:
+                raise subprocess.CalledProcessError(result.returncode, cmd)
+            return result  # type: ignore[return-value]
+        if "rebase" in cmd and "--abort" not in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if "fetch" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if "reset" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if "symbolic-ref" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "main\n", "")
+        # git add / git commit
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        with patch("time.sleep"):  # don't actually sleep
+            ret = ledger_event.main(_make_argv(ledger=str(ledger)) + ["--push"])
+
+    assert ret == 0
+    assert push_attempt[0] == 2, "Expected exactly 2 push attempts (1 fail + 1 success)"
