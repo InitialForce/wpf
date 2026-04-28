@@ -521,7 +521,7 @@ def test_single_review_fast_path_emits_warning_event(workflow):
     """HIGH-1: single-review fast path must emit a warning ledger event."""
     jobs = workflow.get("jobs", {})
     found_warning = False
-    for name, job in jobs.items():
+    for _name, job in jobs.items():
         condition = job.get("if", "") or ""
         if "IF_REVIEW_DOUBLE_REQUIRED" in condition and "== 'false'" in condition:
             steps = job.get("steps", [])
@@ -543,7 +543,9 @@ def test_ledger_event_uses_push_flag(workflow_text):
     """All ledger-event.py invocations must use --push so commits reach origin."""
     import re
     # Find all ledger-event.py invocation blocks
-    invocations = re.findall(r'ledger-event\.py.*?(?=\n\s*(?:env:|GH_TOKEN|$))', workflow_text, re.DOTALL)
+    invocations = re.findall(
+        r'ledger-event\.py.*?(?=\n\s*(?:env:|GH_TOKEN|$))', workflow_text, re.DOTALL
+    )
     assert invocations, "No ledger-event.py invocations found in workflow"
     for inv in invocations:
         assert "--push" in inv, (
@@ -554,7 +556,9 @@ def test_ledger_event_uses_push_flag(workflow_text):
 def test_ledger_event_uses_actor_pr_review(workflow_text):
     """All ledger-event.py invocations in pr-review.yml must use --actor pr-review."""
     import re
-    invocations = re.findall(r'ledger-event\.py.*?(?=\n\s*(?:env:|GH_TOKEN|$))', workflow_text, re.DOTALL)
+    invocations = re.findall(
+        r'ledger-event\.py.*?(?=\n\s*(?:env:|GH_TOKEN|$))', workflow_text, re.DOTALL
+    )
     assert invocations, "No ledger-event.py invocations found in workflow"
     for inv in invocations:
         assert "--actor pr-review" in inv, (
@@ -565,7 +569,9 @@ def test_ledger_event_uses_actor_pr_review(workflow_text):
 def test_ledger_event_uses_head_sha_flag(workflow_text):
     """All ledger-event.py invocations must pass --head-sha."""
     import re
-    invocations = re.findall(r'ledger-event\.py.*?(?=\n\s*(?:env:|GH_TOKEN|$))', workflow_text, re.DOTALL)
+    invocations = re.findall(
+        r'ledger-event\.py.*?(?=\n\s*(?:env:|GH_TOKEN|$))', workflow_text, re.DOTALL
+    )
     assert invocations, "No ledger-event.py invocations found in workflow"
     for inv in invocations:
         assert "--head-sha" in inv, (
