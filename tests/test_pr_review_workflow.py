@@ -420,3 +420,154 @@ def test_actionlint_if_available():
     assert result.returncode == 0, (
         f"actionlint found issues:\n{result.stdout}\n{result.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 17. CRIT-1: kill-switch enforcement — all non-gate jobs guarded by gate output
+# ---------------------------------------------------------------------------
+
+def test_review_1_guarded_by_gate_proceed(workflow):
+    """CRIT-1: review-1 must not run unless gate outputs proceed == 'true'."""
+    review1 = workflow["jobs"]["review-1"]
+    condition = review1.get("if", "") or ""
+    assert "needs.gate.outputs.proceed == 'true'" in condition, (
+        "review-1 must have if: needs.gate.outputs.proceed == 'true'; "
+        f"got: {condition!r}"
+    )
+
+
+def test_review_2_guarded_by_gate_proceed(workflow):
+    """CRIT-1: review-2 must not run unless gate outputs proceed == 'true'."""
+    review2 = workflow["jobs"]["review-2"]
+    condition = review2.get("if", "") or ""
+    assert "needs.gate.outputs.proceed == 'true'" in condition, (
+        "review-2 must have if: needs.gate.outputs.proceed == 'true'; "
+        f"got: {condition!r}"
+    )
+
+
+def test_merge_verdict_guarded_by_gate_proceed(workflow):
+    """CRIT-1: merge-verdict must not run unless gate outputs proceed == 'true'."""
+    mv = workflow["jobs"]["merge-verdict"]
+    condition = mv.get("if", "") or ""
+    assert "needs.gate.outputs.proceed == 'true'" in condition, (
+        "merge-verdict must reference needs.gate.outputs.proceed == 'true' in its if "
+        f"condition; got: {condition!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 18. CRIT-4: merge-verdict must have gate in its needs list
+# ---------------------------------------------------------------------------
+
+def test_merge_verdict_needs_gate(workflow):
+    """CRIT-4: merge-verdict.needs must include gate so gate.outputs are accessible."""
+    mv = workflow["jobs"]["merge-verdict"]
+    needs = mv.get("needs", [])
+    if isinstance(needs, str):
+        needs = [needs]
+    assert "gate" in needs, (
+        "merge-verdict must declare 'needs: gate' so gate outputs are accessible; "
+        f"got needs={needs!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 19. HIGH-1: fail-closed double-review default
+# ---------------------------------------------------------------------------
+
+def test_review_2_skipped_only_when_explicitly_false(workflow):
+    """HIGH-1: review-2 must run by default (when var is unset); skip only when 'false'."""
+    review2 = workflow["jobs"]["review-2"]
+    condition = review2.get("if", "") or ""
+    # Correct fail-closed pattern: skip when == 'false', not when != 'true'
+    assert "!= 'false'" in condition or "== 'false'" not in condition.replace("!= 'false'", ""), (
+        "review-2 must use != 'false' (fail-closed) not != 'true' (fail-open); "
+        f"got: {condition!r}"
+    )
+    assert "!= 'true'" not in condition, (
+        "review-2 must NOT use vars.IF_REVIEW_DOUBLE_REQUIRED != 'true'; "
+        "that pattern skips review-2 when the variable is unset (silent fail-open). "
+        f"Got: {condition!r}"
+    )
+
+
+def test_single_review_fast_path_requires_environment_approval(workflow):
+    """HIGH-1: when fast path is active, a manual approval environment must be enforced."""
+    jobs = workflow.get("jobs", {})
+    # Find any job that is conditional on IF_REVIEW_DOUBLE_REQUIRED == 'false'
+    fast_path_jobs = []
+    for name, job in jobs.items():
+        condition = job.get("if", "") or ""
+        if "IF_REVIEW_DOUBLE_REQUIRED" in condition and "== 'false'" in condition:
+            fast_path_jobs.append((name, job))
+    assert fast_path_jobs, (
+        "No job found that is conditional on IF_REVIEW_DOUBLE_REQUIRED == 'false'. "
+        "The single-review fast path must be explicitly gated."
+    )
+    for name, job in fast_path_jobs:
+        env_val = job.get("environment")
+        if isinstance(env_val, dict):
+            env_name = env_val.get("name", "")
+        else:
+            env_name = env_val or ""
+        assert env_name == "branch-promotion", (
+            f"Job '{name}' is on the single-review fast path but does not use "
+            f"environment: branch-promotion; got environment={env_val!r}"
+        )
+
+
+def test_single_review_fast_path_emits_warning_event(workflow):
+    """HIGH-1: single-review fast path must emit a warning ledger event."""
+    jobs = workflow.get("jobs", {})
+    found_warning = False
+    for name, job in jobs.items():
+        condition = job.get("if", "") or ""
+        if "IF_REVIEW_DOUBLE_REQUIRED" in condition and "== 'false'" in condition:
+            steps = job.get("steps", [])
+            step_runs = " ".join(s.get("run", "") for s in steps)
+            if "review_single_path_warning" in step_runs:
+                found_warning = True
+                break
+    assert found_warning, (
+        "No job on the IF_REVIEW_DOUBLE_REQUIRED == 'false' fast path emits "
+        "'review_single_path_warning' to ledger-event.py"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 20. Canonical ledger-event.py CLI flags: --push and correct --actor usage
+# ---------------------------------------------------------------------------
+
+def test_ledger_event_uses_push_flag(workflow_text):
+    """All ledger-event.py invocations must use --push so commits reach origin."""
+    import re
+    # Find all ledger-event.py invocation blocks
+    invocations = re.findall(r'ledger-event\.py.*?(?=\n\s*(?:env:|GH_TOKEN|$))', workflow_text, re.DOTALL)
+    assert invocations, "No ledger-event.py invocations found in workflow"
+    for inv in invocations:
+        assert "--push" in inv, (
+            f"ledger-event.py invocation missing --push flag:\n{inv}"
+        )
+
+
+def test_ledger_event_uses_actor_pr_review(workflow_text):
+    """All ledger-event.py invocations in pr-review.yml must use --actor pr-review."""
+    import re
+    invocations = re.findall(r'ledger-event\.py.*?(?=\n\s*(?:env:|GH_TOKEN|$))', workflow_text, re.DOTALL)
+    assert invocations, "No ledger-event.py invocations found in workflow"
+    for inv in invocations:
+        assert "--actor pr-review" in inv, (
+            f"ledger-event.py invocation missing '--actor pr-review':\n{inv}"
+        )
+
+
+def test_ledger_event_uses_head_sha_flag(workflow_text):
+    """All ledger-event.py invocations must pass --head-sha."""
+    import re
+    invocations = re.findall(r'ledger-event\.py.*?(?=\n\s*(?:env:|GH_TOKEN|$))', workflow_text, re.DOTALL)
+    assert invocations, "No ledger-event.py invocations found in workflow"
+    for inv in invocations:
+        assert "--head-sha" in inv, (
+            f"ledger-event.py invocation missing --head-sha:\n{inv}"
+        )

@@ -12,10 +12,11 @@
 #                        with review-1 until both are complete)
 #
 # IF_REVIEW_DOUBLE_REQUIRED repo variable:
-#   "true"  (default) → both review-1 AND review-2 must complete before merge-verdict
-#   anything else     → review-2 is SKIPPED (single-review fast path, emergency only).
-#                       A warning ledger event is emitted when the fast path is taken.
-#                       This should never be used in normal operation.
+#   unset / "true" (default) → both review-1 AND review-2 must complete before merge-verdict
+#   "false"                  → review-2 is SKIPPED (single-review fast path, emergency only).
+#                              The fast path additionally requires a manual approval via
+#                              environment: branch-promotion and emits a warning ledger event.
+#                              This should never be used in normal operation.
 #
 # Concurrency: one run per PR number; cancel-in-progress is false so an in-flight
 # review is never silently aborted by a re-trigger.
@@ -115,8 +116,10 @@ jobs:
           python tools/ledger-event.py \
             --event review_1 \
             --pr-number "${{ env.PR_NUMBER }}" \
-            --verdict-file /tmp/review-1.json \
-            --actor-run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            --head-sha "${{ env.HEAD_SHA }}" \
+            --actor pr-review \
+            --details-json '{"verdict_file": "/tmp/review-1.json", "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
+            --push
         env:
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
@@ -132,7 +135,8 @@ jobs:
   # ---------------------------------------------------------------------------
   # Job 3: review-2 — Reviewer 2 (Opus, temperature 0.7, diff + source context)
   # Runs INDEPENDENTLY from review-1 (both need only gate, not each other).
-  # Skipped when IF_REVIEW_DOUBLE_REQUIRED is not "true" (single-review fast path).
+  # Skipped when IF_REVIEW_DOUBLE_REQUIRED is "false" (single-review fast path).
+  # The fast path additionally requires a manual approval via environment: branch-promotion.
   # ---------------------------------------------------------------------------
   review-2:
     name: Reviewer 2 (Opus, temp=0.7, diff+context, isolated)
@@ -140,9 +144,10 @@ jobs:
     # NOTE: review-2 intentionally does NOT need review-1.
     # Independence is the core security property: two reviewers with no shared
     # state before merge-verdict collapses the results.
-    # review-2 is skipped when IF_REVIEW_DOUBLE_REQUIRED != "true" (emergency
+    # review-2 is skipped when IF_REVIEW_DOUBLE_REQUIRED == "false" (emergency
     # single-review fast path). A warning is emitted via merge-verdict in that case.
-    if: needs.gate.outputs.proceed == 'true' && vars.IF_REVIEW_DOUBLE_REQUIRED == 'true'
+    # Default (unset) = require two reviews.
+    if: needs.gate.outputs.proceed == 'true' && vars.IF_REVIEW_DOUBLE_REQUIRED != 'false'
     runs-on: ubuntu-latest
     environment: bot-credentials
     outputs:
@@ -188,8 +193,10 @@ jobs:
           python tools/ledger-event.py \
             --event review_2 \
             --pr-number "${{ env.PR_NUMBER }}" \
-            --verdict-file /tmp/review-2.json \
-            --actor-run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            --head-sha "${{ env.HEAD_SHA }}" \
+            --actor pr-review \
+            --details-json '{"verdict_file": "/tmp/review-2.json", "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
+            --push
         env:
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
@@ -203,17 +210,62 @@ jobs:
           retention-days: 30
 
   # ---------------------------------------------------------------------------
-  # Job 4: merge-verdict — Collapse both reviewer outputs into a final decision
-  # Runs after BOTH review-1 and review-2 complete (or review-2 is skipped).
+  # Job 4: single-review-approval — manual gate when fast path is active
+  # Required only when IF_REVIEW_DOUBLE_REQUIRED == "false".
+  # environment: branch-promotion enforces a human approver before merge-verdict runs.
+  # ---------------------------------------------------------------------------
+  single-review-approval:
+    name: Manual approval (single-review fast path)
+    needs: [gate, review-1]
+    if: needs.gate.outputs.proceed == 'true' && vars.IF_REVIEW_DOUBLE_REQUIRED == 'false'
+    runs-on: ubuntu-latest
+    environment: branch-promotion
+
+    steps:
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Warn and record single-review fast path
+        run: |
+          echo "::warning::IF_REVIEW_DOUBLE_REQUIRED is 'false' — single-review fast path active. This bypasses the two-reviewer independence guarantee. Use only in emergencies."
+          python tools/ledger-event.py \
+            --event review_single_path_warning \
+            --pr-number "${{ env.PR_NUMBER }}" \
+            --head-sha "${{ env.HEAD_SHA }}" \
+            --actor pr-review \
+            --details-json '{"reason": "IF_REVIEW_DOUBLE_REQUIRED_false", "fast_path": true, "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
+            --push
+        env:
+          GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
+          GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  # ---------------------------------------------------------------------------
+  # Job 5: merge-verdict — Collapse both reviewer outputs into a final decision
+  # Runs after BOTH review-1 and review-2 complete (or review-2 is skipped and
+  # single-review-approval has been manually approved).
   # ---------------------------------------------------------------------------
   merge-verdict:
     name: Merge verdicts and emit outcome
-    needs: [review-1, review-2]
-    # Run even when review-2 was skipped (IF_REVIEW_DOUBLE_REQUIRED != "true"),
-    # but not when gate itself failed (gate must have proceeded).
+    needs: [gate, review-1, review-2, single-review-approval]
+    # Run even when review-2 / single-review-approval was skipped, but only when
+    # gate proceeded successfully and review-1 ran to success or failure.
     if: >-
       always() &&
-      needs.gate.result == 'success' &&
+      needs.gate.outputs.proceed == 'true' &&
       needs.review-1.result != 'cancelled' &&
       (needs.review-1.result == 'success' || needs.review-1.result == 'failure')
     runs-on: ubuntu-latest
@@ -235,20 +287,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Warn if single-review fast path was taken
-        if: vars.IF_REVIEW_DOUBLE_REQUIRED != 'true'
-        run: |
-          echo "::warning::IF_REVIEW_DOUBLE_REQUIRED is not 'true' — single-review fast path active. This bypasses the two-reviewer independence guarantee. Use only in emergencies."
-          python tools/ledger-event.py \
-            --event review_single_path_warning \
-            --pr-number "${{ env.PR_NUMBER }}" \
-            --details '{"reason": "IF_REVIEW_DOUBLE_REQUIRED_not_true", "fast_path": true}' \
-            --actor-run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-        env:
-          GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
-          GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Download review artifacts
         uses: actions/download-artifact@v4
@@ -309,8 +347,10 @@ jobs:
           python tools/ledger-event.py \
             --event merged_verdict \
             --pr-number "${{ env.PR_NUMBER }}" \
-            --details "{\"verdict\": \"$VERDICT\", \"run_url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
-            --actor-run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            --head-sha "${{ env.HEAD_SHA }}" \
+            --actor pr-review \
+            --details-json "{\"verdict\": \"$VERDICT\", \"run_url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            --push
         env:
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
