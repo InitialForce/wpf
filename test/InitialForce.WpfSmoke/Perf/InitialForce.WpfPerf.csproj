@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    InitialForce.WpfPerf - standalone BenchmarkDotNet console harness.
+
+    Usage (Windows CI, after package published to local feed):
+      dotnet run -c Release
+        -p:InitialForceWpfVersion=10.0.4-if.20260427.1
+        -source artifacts/nuget/
+        filter "*" exporters json
+
+    The JSON output from BDN is post-processed by perf/check-regression.py
+    which appends a summary record to perf/series.jsonl and checks for
+    regressions against the rolling 10-run baseline.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <OutputType>Exe</OutputType>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Self-contained win-x64 mirrors SC deployment model. -->
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- Release config required for valid BDN measurements. -->
+    <Optimize>true</Optimize>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The package under test. Resolved from local feed in CI via -source flag. -->
+    <PackageReference Include="InitialForce.WPF" Version="$(InitialForceWpfVersion)" />
+
+    <!-- BenchmarkDotNet + Windows memory diagnostics (ETW-based alloc tracking). -->
+    <PackageReference Include="BenchmarkDotNet" Version="0.14.*" />
+    <PackageReference Include="BenchmarkDotNet.Diagnostics.Windows" Version="0.14.*" />
+  </ItemGroup>
+
+  <!--
+    Compile the shared benchmark classes from the sibling directories.
+    This avoids duplicating code between the NUnit project and the perf project.
+    The Smoke/ and Perf/ files are referenced as linked items.
+  -->
+  <ItemGroup>
+    <Compile Include="..\Smoke\SvgPathGenerator.cs" Link="Smoke\SvgPathGenerator.cs" />
+    <Compile Include="..\Smoke\PixelDiffHelper.cs"  Link="Smoke\PixelDiffHelper.cs" />
+    <Compile Include="PerfHarness.cs" />
+    <Compile Include="BenchmarkConfig.cs" />
+    <Compile Include="PerfProgram.cs" />
+  </ItemGroup>
+
+</Project>
