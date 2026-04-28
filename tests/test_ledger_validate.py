@@ -279,16 +279,18 @@ def test_lines_checked_count(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def test_strict_signature_no_git_skips_gracefully(tmp_path: Path) -> None:
-    """When git is not available, strict-signature check should not crash."""
+    """When no commit is found for a line, an error is reported (not a crash)."""
     ledger = tmp_path / "patch-ledger.jsonl"
     line1 = _build_valid_line(event="discovered", prev_hash="")
     _write_ledger(ledger, [line1])
 
-    with patch.object(ledger_validate, "_git_log_for_ledger", return_value=[]):
+    # Simulate git being unavailable / commit not found by returning None
+    with patch.object(ledger_validate, "_find_commit_for_line_hash", return_value=None):
         result = ledger_validate.validate(ledger, strict_signature=True)
 
-    # Without any commit SHAs available, the signature check is simply skipped
-    assert result["valid"] is True
+    # When no commit can be found, validation fails with missing_gpg_signature
+    assert result["valid"] is False
+    assert any(e["kind"] == "missing_gpg_signature" for e in result["errors"])
 
 
 # ---------------------------------------------------------------------------
@@ -303,3 +305,61 @@ def test_output_json_structure() -> None:
     assert isinstance(result["valid"], bool)
     assert isinstance(result["lines_checked"], int)
     assert isinstance(result["errors"], list)
+
+
+# ---------------------------------------------------------------------------
+# 17 — merged_verdict event passes validation (CRIT-2 fix)
+# ---------------------------------------------------------------------------
+
+def test_merged_verdict_event_is_valid(tmp_path: Path) -> None:
+    ledger = tmp_path / "patch-ledger.jsonl"
+    line1 = _build_valid_line(event="merged_verdict", prev_hash="")
+    _write_ledger(ledger, [line1])
+    result = ledger_validate.validate(ledger)
+    assert result["valid"] is True
+    assert result["lines_checked"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 18 — --strict-signature uses _find_commit_for_line_hash, not index (MED-5 fix)
+# ---------------------------------------------------------------------------
+
+def test_strict_signature_uses_line_hash_lookup(tmp_path: Path) -> None:
+    """Strict-signature must call _find_commit_for_line_hash per line, not use index."""
+    ledger = tmp_path / "patch-ledger.jsonl"
+    line1 = _build_valid_line(event="discovered", prev_hash="")
+    _write_ledger(ledger, [line1])
+
+    line1_hash = json.loads(line1)["line_hash"]
+    looked_up_hashes: list[str] = []
+
+    def fake_find(lh: str) -> str | None:
+        looked_up_hashes.append(lh)
+        return "deadbeef" * 5  # fake commit SHA
+
+    with patch.object(ledger_validate, "_find_commit_for_line_hash", side_effect=fake_find):
+        with patch.object(ledger_validate, "_check_gpg_signature", return_value=True):
+            result = ledger_validate.validate(ledger, strict_signature=True)
+
+    # The lookup should have been called with the actual line_hash
+    assert line1_hash in looked_up_hashes, (
+        "strict-signature should look up commit by line_hash, not array index"
+    )
+    assert result["valid"] is True
+
+
+# ---------------------------------------------------------------------------
+# 19 — --strict-signature: commit found but unsigned → missing_gpg_signature error
+# ---------------------------------------------------------------------------
+
+def test_strict_signature_unsigned_commit_fails(tmp_path: Path) -> None:
+    ledger = tmp_path / "patch-ledger.jsonl"
+    line1 = _build_valid_line(event="discovered", prev_hash="")
+    _write_ledger(ledger, [line1])
+
+    with patch.object(ledger_validate, "_find_commit_for_line_hash", return_value="abc123"):
+        with patch.object(ledger_validate, "_check_gpg_signature", return_value=False):
+            result = ledger_validate.validate(ledger, strict_signature=True)
+
+    assert result["valid"] is False
+    assert any(e["kind"] == "missing_gpg_signature" for e in result["errors"])
