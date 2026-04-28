@@ -17,11 +17,13 @@ Usage:
       --current-sha <git-sha> \\
       [--output /tmp/result.json] \\
       [--threshold-warn 5] \\
-      [--threshold-fail 15]
+      [--threshold-fail 15] \\
+      [--strict-new-scenarios] \\
+      [--allow-new-scenarios name1,name2]
 
 Exit codes:
   0 — pass or warning
-  2 — one or more scenarios exceed the fail threshold
+  2 — one or more scenarios exceed the fail threshold, or empty comparison
 
 Output JSON shape:
   {
@@ -34,7 +36,7 @@ Output JSON shape:
         "baseline": <float>,
         "current": <float>,
         "delta_pct": <float>,
-        "verdict": "pass|warning|fail"
+        "verdict": "pass|warning|fail|warning(no_baseline)"
       }
     ]
   }
@@ -63,6 +65,7 @@ class ScenarioResult:
         current: float,
         delta_pct: float,
         verdict: str,
+        reason: str = "",
     ) -> None:
         self.name = name
         self.metric = metric
@@ -70,9 +73,10 @@ class ScenarioResult:
         self.current = current
         self.delta_pct = delta_pct
         self.verdict = verdict
+        self.reason = reason
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "name": self.name,
             "metric": self.metric,
             "baseline": self.baseline,
@@ -80,6 +84,9 @@ class ScenarioResult:
             "delta_pct": round(self.delta_pct, 4),
             "verdict": self.verdict,
         }
+        if self.reason:
+            d["reason"] = self.reason
+        return d
 
 
 # ---------------------------------------------------------------------------
@@ -143,9 +150,16 @@ def extract_benchmarks(data: dict[str, Any]) -> dict[str, dict[str, float]]:
 # ---------------------------------------------------------------------------
 
 def compute_delta_pct(baseline: float, current: float) -> float:
-    """Compute percent change from baseline to current."""
+    """Compute percent change from baseline to current.
+
+    When baseline is zero and current is also zero, no change occurred: return 0.0.
+    When baseline is zero but current is positive, the regression is unbounded:
+    return float('inf') so that threshold checks always produce a 'fail' verdict.
+    """
     if baseline == 0.0:
-        return 0.0
+        if current == 0.0:
+            return 0.0
+        return float("inf")
     return (current - baseline) / baseline * 100.0
 
 
@@ -167,22 +181,53 @@ def compare_benchmarks(
     current_data: dict[str, dict[str, float]],
     threshold_warn: float,
     threshold_fail: float,
+    strict_new_scenarios: bool = False,
+    allow_new_scenarios: set[str] | None = None,
 ) -> list[ScenarioResult]:
     """
     Compare current benchmarks against baseline.
 
     Only scenarios present in the current run are evaluated.
-    Scenarios in current but missing from baseline are skipped (noted).
+    Scenarios in current but missing from baseline are no longer silently skipped;
+    instead each such scenario produces a 'warning' result with reason='no_baseline'
+    (or 'fail' when strict_new_scenarios=True, or 'pass' when the scenario name is
+    in allow_new_scenarios).
     """
+    if allow_new_scenarios is None:
+        allow_new_scenarios = set()
+
     results: list[ScenarioResult] = []
 
     for full_name, current_metrics in current_data.items():
         if full_name not in baseline_data:
-            # Scenario has no baseline — cannot evaluate
+            # Determine the verdict for this new scenario.
+            if full_name in allow_new_scenarios:
+                new_verdict = "pass"
+            elif strict_new_scenarios:
+                new_verdict = "fail"
+            else:
+                new_verdict = "warning"
+
             print(
-                f"  SKIP {full_name}: not found in baseline (new scenario)",
+                f"  NEW  {full_name}: not found in baseline (verdict={new_verdict})",
                 file=sys.stderr,
             )
+            # Emit one result per expected metric so callers can see the scenario.
+            for metric in ("Mean", "Allocated"):
+                current_val = current_metrics.get(metric, 0.0)
+                if metric == "Allocated" and current_val == 0.0:
+                    continue
+                results.append(
+                    ScenarioResult(
+                        name=full_name,
+                        metric=metric,
+                        baseline=0.0,
+                        current=current_val,
+                        delta_pct=float("inf") if current_val > 0.0 else 0.0,
+                        verdict=new_verdict,
+                        reason="no_baseline",
+                    )
+                )
             continue
 
         baseline_metrics = baseline_data[full_name]
@@ -213,7 +258,14 @@ def compare_benchmarks(
 
 
 def aggregate_status(results: list[ScenarioResult]) -> str:
-    """Return 'pass', 'warning', or 'fail' from a list of scenario results."""
+    """Return 'pass', 'warning', or 'fail' from a list of scenario results.
+
+    An empty results list means no scenarios were compared at all, which is
+    treated as 'fail' (empty_comparison) to avoid silently passing on broken
+    runs where no data was produced.
+    """
+    if not results:
+        return "fail"
     has_warning = False
     for r in results:
         if r.verdict == "fail":
@@ -270,6 +322,24 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PCT",
         help="Regression percentage that triggers a fail verdict (default: 15).",
     )
+    parser.add_argument(
+        "--strict-new-scenarios",
+        action="store_true",
+        default=False,
+        help=(
+            "Escalate new scenarios (present in current but absent from baseline) "
+            "from 'warning' to 'fail'."
+        ),
+    )
+    parser.add_argument(
+        "--allow-new-scenarios",
+        metavar="NAMES",
+        default="",
+        help=(
+            "Comma-separated list of scenario names that are explicitly allowed as "
+            "new (verdict=pass instead of warning)."
+        ),
+    )
     return parser
 
 
@@ -280,6 +350,12 @@ def main(argv: list[str] | None = None) -> int:
     threshold_warn: float = args.threshold_warn
     threshold_fail: float = args.threshold_fail
     current_sha: str = args.current_sha
+    strict_new_scenarios: bool = args.strict_new_scenarios
+    allow_new_scenarios: set[str] = (
+        {n.strip() for n in args.allow_new_scenarios.split(",") if n.strip()}
+        if args.allow_new_scenarios
+        else set()
+    )
 
     if threshold_warn >= threshold_fail:
         print(
@@ -315,6 +391,8 @@ def main(argv: list[str] | None = None) -> int:
         current_metrics,
         threshold_warn,
         threshold_fail,
+        strict_new_scenarios=strict_new_scenarios,
+        allow_new_scenarios=allow_new_scenarios,
     )
 
     status = aggregate_status(results)
@@ -324,6 +402,8 @@ def main(argv: list[str] | None = None) -> int:
         "status": status,
         "scenarios": [r.to_dict() for r in results],
     }
+    if status == "fail" and not results:
+        output_doc["reason"] = "empty_comparison"
 
     output_json = json.dumps(output_doc, indent=2)
 
