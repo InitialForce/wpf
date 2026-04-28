@@ -1,0 +1,25 @@
+diff --git a/src/Foo/Bar.cs b/src/Foo/Bar.cs
+index a1b2c3d..e5f6789 100644
+--- a/src/Foo/Bar.cs
++++ b/src/Foo/Bar.cs
+@@ -1,9 +1,8 @@ namespace Foo
+ namespace Foo
+ {
+     public class Bar
+     {
+         private readonly Dictionary<string, object> _cache;
+-        private bool _isInitialized = false;
+
+         public Bar()
+         {
+@@ -12,8 +11,8 @@ namespace Foo
+
+         public void Initialize()
+         {
+-            if (_isInitialized) return;
+             _cache.Clear();
+-            _isInitialized = true;
++            _initialized = true;
+         }
+     }
+ }
