@@ -169,10 +169,12 @@ def test_permissions_pull_requests_read(workflow):
     )
 
 
-def test_permissions_id_token_write(workflow):
+def test_permissions_no_id_token_write(workflow):
+    # id-token: write removed — pr-discovery does not use OIDC.
     perms = workflow.get("permissions", {})
-    assert perms.get("id-token") == "write", (
-        f"permissions.id-token must be 'write'; got {perms.get('id-token')!r}"
+    assert perms.get("id-token") != "write", (
+        "permissions.id-token must NOT be 'write' in pr-discovery — no OIDC usage; "
+        f"got {perms.get('id-token')!r}"
     )
 
 
