@@ -214,31 +214,45 @@ def _git_push(branch: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _git_pull_rebase(branch: str) -> bool:
-    """Fetch and rebase the local branch onto origin/*branch*.
-
-    Returns True on success, False on failure.
-    """
-    fetch = subprocess.run(
+def _fetch_origin(branch: str) -> bool:
+    """Fetch *branch* from origin. Returns True on success."""
+    result = subprocess.run(
         ["git", "fetch", "origin", branch],
         capture_output=True,
         text=True,
     )
-    if fetch.returncode != 0:
-        return False
+    return result.returncode == 0
+
+
+def _try_rebase(branch: str) -> bool:
+    """Attempt to rebase HEAD onto origin/*branch*.
+
+    Returns True if the rebase succeeds cleanly (our commit replays on top).
+    On conflict, aborts the rebase so the repository is left in a clean state,
+    then returns False.
+    """
     rebase = subprocess.run(
         ["git", "rebase", f"origin/{branch}"],
         capture_output=True,
         text=True,
     )
     if rebase.returncode != 0:
-        # Abort the rebase so the repo is not left in a bad state
+        # Abort so the repo is not left mid-rebase
         subprocess.run(
             ["git", "rebase", "--abort"],
             capture_output=True,
         )
         return False
     return True
+
+
+def _reset_to_remote(branch: str) -> None:
+    """Hard-reset HEAD to origin/*branch*, discarding any local commits."""
+    subprocess.run(
+        ["git", "reset", "--hard", f"origin/{branch}"],
+        check=True,
+        capture_output=True,
+    )
 
 
 def _push_with_retry(
@@ -250,8 +264,23 @@ def _push_with_retry(
     details: dict[str, object],
     do_push: bool,
 ) -> None:
-    """Push after commit; on non-FF, pull/rebase, recompute prev_hash, re-append,
-    recommit, and retry.  Caps at MAX_PUSH_RETRIES attempts (CRIT-3 fix).
+    """Push after commit; on non-FF, rebase and retry.
+
+    Algorithm (Review-4 fix):
+      1. Attempt push.
+      2. If push succeeds: done.
+      3. If push rejected (non-FF):
+         a. Fetch + attempt rebase of our commit onto origin/<branch>.
+         b. If rebase succeeds cleanly: our commit is now on top of the
+            remote tip — retry the push directly (no ledger rewrite needed).
+         c. If rebase conflicts: abort rebase, hard-reset to origin/<branch>
+            (which restores the remote ledger state), recompute prev_hash from
+            the remote ledger tip, build a fresh ledger line, append, commit,
+            and retry the push.
+      4. Cap at MAX_PUSH_RETRIES total push attempts.
+
+    This avoids the single-line zeroing bug (we never manually strip the
+    ledger) and the rebase-conflict fatal exit (we recover via reset+recompute).
     """
     if not do_push:
         return
@@ -276,32 +305,23 @@ def _push_with_retry(
                 returncode=push_result.returncode,
             )
 
-        # Non-FF: pull/rebase, regenerate the ledger line with fresh prev_hash
-        if not _git_pull_rebase(branch):
-            die(6, "Failed to rebase after non-fast-forward push rejection")
+        # Non-FF: fetch the latest remote state first
+        if not _fetch_origin(branch):
+            die(6, "Failed to fetch origin after non-fast-forward push rejection")
 
-        # Reset the last commit (our ledger append) without losing the file change
-        subprocess.run(
-            ["git", "reset", "--soft", "HEAD~1"],
-            check=True,
-            capture_output=True,
-        )
+        # Try to rebase our commit cleanly on top of the remote tip.
+        if _try_rebase(branch):
+            # Rebase succeeded — our commit is now on top of the remote tip.
+            # No ledger manipulation needed; just retry the push.
+            time.sleep(1)
+            continue
 
-        # Strip the line we just wrote (it may now have wrong prev_hash)
-        if ledger_path.exists():
-            all_lines = [
-                ln
-                for ln in ledger_path.read_text(encoding="utf-8").splitlines()
-                if ln.strip()
-            ]
-            if all_lines:
-                # Remove last line (our append) and re-write
-                ledger_path.write_text(
-                    "\n".join(all_lines[:-1]) + ("\n" if len(all_lines) > 1 else ""),
-                    encoding="utf-8",
-                )
+        # Rebase conflicted.  Recover by:
+        #   1. Hard-reset to the remote tip (restores the remote ledger state).
+        #   2. Recompute prev_hash from the remote ledger tip.
+        #   3. Build a fresh ledger line and commit it.
+        _reset_to_remote(branch)
 
-        # Recompute prev_hash from the updated tip
         prev_hash = _prev_hash_of_ledger(ledger_path)
         new_line = build_line(
             event=event,
