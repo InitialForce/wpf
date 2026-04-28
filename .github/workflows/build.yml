@@ -24,6 +24,7 @@ permissions:
   pull-requests: read
   checks: write
   id-token: write
+  packages: write
 
 env:
   IF_REPO_ROOT: ${{ github.workspace }}
@@ -282,6 +283,26 @@ jobs:
       - name: List produced packages
         run: |
           Get-ChildItem -Recurse artifacts\packages | Format-Table FullName, Length
+        shell: powershell
+
+      # Publish the just-packed nupkgs to GitHub Packages (org-private feed).
+      # Conditions:
+      #   - Only on push events (skip pull_request) so PRs don't churn the feed
+      #   - Only on if/main (skip if/staging)
+      #   - Only on x64 (matches the existing pack gate)
+      # --skip-duplicate makes the step idempotent if a previous run already
+      # pushed a package with the same exact version.
+      - name: Publish to GitHub Packages
+        if: matrix.arch == 'x64' && github.event_name == 'push' && github.ref == 'refs/heads/if/main'
+        run: |
+          $files = Get-ChildItem artifacts\packages -Filter '*.nupkg'
+          foreach ($f in $files) {
+            Write-Host "Pushing $($f.Name)..."
+            dotnet nuget push $f.FullName `
+              --source "https://nuget.pkg.github.com/InitialForce/index.json" `
+              --api-key "${{ secrets.GITHUB_TOKEN }}" `
+              --skip-duplicate
+          }
         shell: powershell
 
       - name: Upload build artifacts
