@@ -55,7 +55,7 @@ class TestFilesExist:
         assert README.exists(), f"README.md not found: {README}"
 
     def test_placeholder_lib_exists(self):
-        placeholder = PKG_DIR / "lib" / "net10.0-windows" / "_._"
+        placeholder = PKG_DIR / "lib" / "net10.0" / "_._"
         assert placeholder.exists(), f"lib placeholder not found: {placeholder}"
 
 
@@ -83,7 +83,7 @@ class TestCsprojMetadata:
 
     def test_target_framework(self, root):
         tf = csproj_value(root, "TargetFramework")
-        assert tf == "net10.0-windows", f"Expected net10.0-windows, got {tf!r}"
+        assert tf == "net10.0", f"Expected net10.0, got {tf!r}"
 
     def test_include_build_output_false(self, root):
         val = csproj_value(root, "IncludeBuildOutput")
@@ -226,12 +226,12 @@ class TestPropsFile:
         assert "IF_OverrideAssemblies" in content
 
     def test_runtime_dir_property_declared(self):
-        """_IFWpfRORuntimeDir must point to runtimes/win-x64/lib/net10.0-windows/."""
+        """_IFWpfRORuntimeDir must point to runtimes/win-x64/lib/net10.0/."""
         content = PROPS.read_text(encoding="utf-8")
         assert "_IFWpfRORuntimeDir" in content
         assert "runtimes" in content
         assert "win-x64" in content
-        assert "net10.0-windows" in content
+        assert "net10.0" in content
 
 
 # ---------------------------------------------------------------------------
