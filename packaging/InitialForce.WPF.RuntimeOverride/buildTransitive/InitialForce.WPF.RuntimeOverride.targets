@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <!--
+    InitialForce.WPF.RuntimeOverride.targets
+    ==========================================
+    Auto-imported (transitively) into every project referencing this package.
+
+    Design: surgical per-assembly replacement controlled by $(IF_OverrideAssemblies).
+    Consumers list only the assemblies they need to override; all others are left alone
+    and continue to resolve from the installed .NET runtime pack.
+
+    Two targets per listed assembly:
+      RemoveRuntimeWpfAsset_<Name>  — strips the named Microsoft DLL from MSBuild copy lists.
+      InjectIfWpfAssembly_<Name>    — copies our patched DLL at Build+CopyFilesToOutputDirectory.
+
+    Both targets are conditioned on:
+      1. The assembly name appearing in $(IF_OverrideAssemblies), AND
+      2. $(RuntimeIdentifier) matching 'win-*' (our runtimes/ only ships win-x64).
+
+    Same msquic precedent as InitialForce.WPF (InitialForce.App.csproj in SC master):
+      AfterTargets="Build;CopyFilesToOutputDirectory" fires on every F5 inner-loop build.
+  -->
+
+  <!-- ── PresentationCore ──────────────────────────────────────────────────────────── -->
+
+  <Target Name="RemoveRuntimeWpfAsset_PresentationCore"
+          AfterTargets="ResolveRuntimePackAssets;ResolveLockFileCopyLocalFiles"
+          Condition="$(IF_OverrideAssemblies.Contains('PresentationCore'))
+                     and $(RuntimeIdentifier.StartsWith('win-'))">
+    <ItemGroup>
+      <RuntimePackAsset Remove="@(RuntimePackAsset)"
+        Condition="'%(Filename)%(Extension)' == 'PresentationCore.dll'" />
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+        Condition="'%(Filename)%(Extension)' == 'PresentationCore.dll'" />
+      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)"
+        Condition="'%(Filename)%(Extension)' == 'PresentationCore.dll'" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="InjectIfWpfAssembly_PresentationCore"
+          AfterTargets="Build;CopyFilesToOutputDirectory"
+          Condition="$(IF_OverrideAssemblies.Contains('PresentationCore'))
+                     and $(RuntimeIdentifier.StartsWith('win-'))">
+    <Copy SourceFiles="$(_IFWpfRORuntimeDir)PresentationCore.dll"
+          DestinationFolder="$(OutDir)" OverwriteReadOnlyFiles="true" />
+    <ItemGroup>
+      <ResolvedFileToPublish Include="$(_IFWpfRORuntimeDir)PresentationCore.dll">
+        <RelativePath>PresentationCore.dll</RelativePath>
+        <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+    <Message Importance="high"
+             Text="InjectIfWpfAssembly_PresentationCore: replaced with InitialForce.WPF.RuntimeOverride patched DLL in $(OutDir)" />
+  </Target>
+
+  <!-- ── PresentationFramework ─────────────────────────────────────────────────────── -->
+
+  <Target Name="RemoveRuntimeWpfAsset_PresentationFramework"
+          AfterTargets="ResolveRuntimePackAssets;ResolveLockFileCopyLocalFiles"
+          Condition="$(IF_OverrideAssemblies.Contains('PresentationFramework'))
+                     and $(RuntimeIdentifier.StartsWith('win-'))">
+    <ItemGroup>
+      <RuntimePackAsset Remove="@(RuntimePackAsset)"
+        Condition="'%(Filename)%(Extension)' == 'PresentationFramework.dll'" />
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+        Condition="'%(Filename)%(Extension)' == 'PresentationFramework.dll'" />
+      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)"
+        Condition="'%(Filename)%(Extension)' == 'PresentationFramework.dll'" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="InjectIfWpfAssembly_PresentationFramework"
+          AfterTargets="Build;CopyFilesToOutputDirectory"
+          Condition="$(IF_OverrideAssemblies.Contains('PresentationFramework'))
+                     and $(RuntimeIdentifier.StartsWith('win-'))">
+    <Copy SourceFiles="$(_IFWpfRORuntimeDir)PresentationFramework.dll"
+          DestinationFolder="$(OutDir)" OverwriteReadOnlyFiles="true" />
+    <ItemGroup>
+      <ResolvedFileToPublish Include="$(_IFWpfRORuntimeDir)PresentationFramework.dll">
+        <RelativePath>PresentationFramework.dll</RelativePath>
+        <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+    <Message Importance="high"
+             Text="InjectIfWpfAssembly_PresentationFramework: replaced with InitialForce.WPF.RuntimeOverride patched DLL in $(OutDir)" />
+  </Target>
+
+  <!-- ── WindowsBase ───────────────────────────────────────────────────────────────── -->
+
+  <Target Name="RemoveRuntimeWpfAsset_WindowsBase"
+          AfterTargets="ResolveRuntimePackAssets;ResolveLockFileCopyLocalFiles"
+          Condition="$(IF_OverrideAssemblies.Contains('WindowsBase'))
+                     and $(RuntimeIdentifier.StartsWith('win-'))">
+    <ItemGroup>
+      <RuntimePackAsset Remove="@(RuntimePackAsset)"
+        Condition="'%(Filename)%(Extension)' == 'WindowsBase.dll'" />
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+        Condition="'%(Filename)%(Extension)' == 'WindowsBase.dll'" />
+      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)"
+        Condition="'%(Filename)%(Extension)' == 'WindowsBase.dll'" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="InjectIfWpfAssembly_WindowsBase"
+          AfterTargets="Build;CopyFilesToOutputDirectory"
+          Condition="$(IF_OverrideAssemblies.Contains('WindowsBase'))
+                     and $(RuntimeIdentifier.StartsWith('win-'))">
+    <Copy SourceFiles="$(_IFWpfRORuntimeDir)WindowsBase.dll"
+          DestinationFolder="$(OutDir)" OverwriteReadOnlyFiles="true" />
+    <ItemGroup>
+      <ResolvedFileToPublish Include="$(_IFWpfRORuntimeDir)WindowsBase.dll">
+        <RelativePath>WindowsBase.dll</RelativePath>
+        <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+    <Message Importance="high"
+             Text="InjectIfWpfAssembly_WindowsBase: replaced with InitialForce.WPF.RuntimeOverride patched DLL in $(OutDir)" />
+  </Target>
+
+  <!-- ── System.Xaml ───────────────────────────────────────────────────────────────── -->
+
+  <Target Name="RemoveRuntimeWpfAsset_SystemXaml"
+          AfterTargets="ResolveRuntimePackAssets;ResolveLockFileCopyLocalFiles"
+          Condition="$(IF_OverrideAssemblies.Contains('System.Xaml'))
+                     and $(RuntimeIdentifier.StartsWith('win-'))">
+    <ItemGroup>
+      <RuntimePackAsset Remove="@(RuntimePackAsset)"
+        Condition="'%(Filename)%(Extension)' == 'System.Xaml.dll'" />
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+        Condition="'%(Filename)%(Extension)' == 'System.Xaml.dll'" />
+      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)"
+        Condition="'%(Filename)%(Extension)' == 'System.Xaml.dll'" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="InjectIfWpfAssembly_SystemXaml"
+          AfterTargets="Build;CopyFilesToOutputDirectory"
+          Condition="$(IF_OverrideAssemblies.Contains('System.Xaml'))
+                     and $(RuntimeIdentifier.StartsWith('win-'))">
+    <Copy SourceFiles="$(_IFWpfRORuntimeDir)System.Xaml.dll"
+          DestinationFolder="$(OutDir)" OverwriteReadOnlyFiles="true" />
+    <ItemGroup>
+      <ResolvedFileToPublish Include="$(_IFWpfRORuntimeDir)System.Xaml.dll">
+        <RelativePath>System.Xaml.dll</RelativePath>
+        <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+    <Message Importance="high"
+             Text="InjectIfWpfAssembly_SystemXaml: replaced with InitialForce.WPF.RuntimeOverride patched DLL in $(OutDir)" />
+  </Target>
+
+</Project>
