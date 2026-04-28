@@ -61,8 +61,8 @@ jobs:
           set -euo pipefail
           cat > /tmp/gpg-batch <<'EOF'
           %no-protection
-          Key-Type: ed25519
-          Key-Curve: ed25519
+          Key-Type: RSA
+          Key-Length: 2048
           Name-Real: CI Test
           Name-Email: ci-test@example.com
           Expire-Date: 1
