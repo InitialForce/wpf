@@ -16,7 +16,8 @@
 
     Both targets are conditioned on:
       1. The assembly name appearing in $(IF_OverrideAssemblies), AND
-      2. $(RuntimeIdentifier) matching 'win-*' (our runtimes/ only ships win-x64).
+      2. $(RuntimeIdentifier) == 'win-x64' (our runtimes/ only ships win-x64).
+         On other RIDs the injection is a no-op and a Warning is emitted.
 
     Same msquic precedent as InitialForce.WPF (InitialForce.App.csproj in SC master):
       AfterTargets="Build;CopyFilesToOutputDirectory" fires on every F5 inner-loop build.
@@ -27,7 +28,7 @@
   <Target Name="RemoveRuntimeWpfAsset_PresentationCore"
           AfterTargets="ResolveRuntimePackAssets;ResolveLockFileCopyLocalFiles"
           Condition="$(IF_OverrideAssemblies.Contains('PresentationCore'))
-                     and $(RuntimeIdentifier.StartsWith('win-'))">
+                     and '$(RuntimeIdentifier)' == 'win-x64'">
     <ItemGroup>
       <RuntimePackAsset Remove="@(RuntimePackAsset)"
         Condition="'%(Filename)%(Extension)' == 'PresentationCore.dll'" />
@@ -38,12 +39,20 @@
     </ItemGroup>
   </Target>
 
+  <Target Name="WarnIfUnsupportedRid_PresentationCore"
+          AfterTargets="Build;CopyFilesToOutputDirectory"
+          Condition="$(IF_OverrideAssemblies.Contains('PresentationCore'))
+                     and '$(RuntimeIdentifier)' != 'win-x64'
+                     and '$(RuntimeIdentifier)' != ''">
+    <Warning Text="InitialForce.WPF.RuntimeOverride is currently a no-op on RID '$(RuntimeIdentifier)'; PresentationCore will not be overridden." />
+  </Target>
+
   <Target Name="InjectIfWpfAssembly_PresentationCore"
           AfterTargets="Build;CopyFilesToOutputDirectory"
           Condition="$(IF_OverrideAssemblies.Contains('PresentationCore'))
-                     and $(RuntimeIdentifier.StartsWith('win-'))">
+                     and '$(RuntimeIdentifier)' == 'win-x64'">
     <Copy SourceFiles="$(_IFWpfRORuntimeDir)PresentationCore.dll"
-          DestinationFolder="$(OutDir)" OverwriteReadOnlyFiles="true" />
+          DestinationFolder="$(OutDir)" />
     <ItemGroup>
       <ResolvedFileToPublish Include="$(_IFWpfRORuntimeDir)PresentationCore.dll">
         <RelativePath>PresentationCore.dll</RelativePath>
@@ -59,7 +68,7 @@
   <Target Name="RemoveRuntimeWpfAsset_PresentationFramework"
           AfterTargets="ResolveRuntimePackAssets;ResolveLockFileCopyLocalFiles"
           Condition="$(IF_OverrideAssemblies.Contains('PresentationFramework'))
-                     and $(RuntimeIdentifier.StartsWith('win-'))">
+                     and '$(RuntimeIdentifier)' == 'win-x64'">
     <ItemGroup>
       <RuntimePackAsset Remove="@(RuntimePackAsset)"
         Condition="'%(Filename)%(Extension)' == 'PresentationFramework.dll'" />
@@ -70,12 +79,20 @@
     </ItemGroup>
   </Target>
 
+  <Target Name="WarnIfUnsupportedRid_PresentationFramework"
+          AfterTargets="Build;CopyFilesToOutputDirectory"
+          Condition="$(IF_OverrideAssemblies.Contains('PresentationFramework'))
+                     and '$(RuntimeIdentifier)' != 'win-x64'
+                     and '$(RuntimeIdentifier)' != ''">
+    <Warning Text="InitialForce.WPF.RuntimeOverride is currently a no-op on RID '$(RuntimeIdentifier)'; PresentationFramework will not be overridden." />
+  </Target>
+
   <Target Name="InjectIfWpfAssembly_PresentationFramework"
           AfterTargets="Build;CopyFilesToOutputDirectory"
           Condition="$(IF_OverrideAssemblies.Contains('PresentationFramework'))
-                     and $(RuntimeIdentifier.StartsWith('win-'))">
+                     and '$(RuntimeIdentifier)' == 'win-x64'">
     <Copy SourceFiles="$(_IFWpfRORuntimeDir)PresentationFramework.dll"
-          DestinationFolder="$(OutDir)" OverwriteReadOnlyFiles="true" />
+          DestinationFolder="$(OutDir)" />
     <ItemGroup>
       <ResolvedFileToPublish Include="$(_IFWpfRORuntimeDir)PresentationFramework.dll">
         <RelativePath>PresentationFramework.dll</RelativePath>
@@ -91,7 +108,7 @@
   <Target Name="RemoveRuntimeWpfAsset_WindowsBase"
           AfterTargets="ResolveRuntimePackAssets;ResolveLockFileCopyLocalFiles"
           Condition="$(IF_OverrideAssemblies.Contains('WindowsBase'))
-                     and $(RuntimeIdentifier.StartsWith('win-'))">
+                     and '$(RuntimeIdentifier)' == 'win-x64'">
     <ItemGroup>
       <RuntimePackAsset Remove="@(RuntimePackAsset)"
         Condition="'%(Filename)%(Extension)' == 'WindowsBase.dll'" />
@@ -102,12 +119,20 @@
     </ItemGroup>
   </Target>
 
+  <Target Name="WarnIfUnsupportedRid_WindowsBase"
+          AfterTargets="Build;CopyFilesToOutputDirectory"
+          Condition="$(IF_OverrideAssemblies.Contains('WindowsBase'))
+                     and '$(RuntimeIdentifier)' != 'win-x64'
+                     and '$(RuntimeIdentifier)' != ''">
+    <Warning Text="InitialForce.WPF.RuntimeOverride is currently a no-op on RID '$(RuntimeIdentifier)'; WindowsBase will not be overridden." />
+  </Target>
+
   <Target Name="InjectIfWpfAssembly_WindowsBase"
           AfterTargets="Build;CopyFilesToOutputDirectory"
           Condition="$(IF_OverrideAssemblies.Contains('WindowsBase'))
-                     and $(RuntimeIdentifier.StartsWith('win-'))">
+                     and '$(RuntimeIdentifier)' == 'win-x64'">
     <Copy SourceFiles="$(_IFWpfRORuntimeDir)WindowsBase.dll"
-          DestinationFolder="$(OutDir)" OverwriteReadOnlyFiles="true" />
+          DestinationFolder="$(OutDir)" />
     <ItemGroup>
       <ResolvedFileToPublish Include="$(_IFWpfRORuntimeDir)WindowsBase.dll">
         <RelativePath>WindowsBase.dll</RelativePath>
@@ -123,7 +148,7 @@
   <Target Name="RemoveRuntimeWpfAsset_SystemXaml"
           AfterTargets="ResolveRuntimePackAssets;ResolveLockFileCopyLocalFiles"
           Condition="$(IF_OverrideAssemblies.Contains('System.Xaml'))
-                     and $(RuntimeIdentifier.StartsWith('win-'))">
+                     and '$(RuntimeIdentifier)' == 'win-x64'">
     <ItemGroup>
       <RuntimePackAsset Remove="@(RuntimePackAsset)"
         Condition="'%(Filename)%(Extension)' == 'System.Xaml.dll'" />
@@ -134,12 +159,20 @@
     </ItemGroup>
   </Target>
 
+  <Target Name="WarnIfUnsupportedRid_SystemXaml"
+          AfterTargets="Build;CopyFilesToOutputDirectory"
+          Condition="$(IF_OverrideAssemblies.Contains('System.Xaml'))
+                     and '$(RuntimeIdentifier)' != 'win-x64'
+                     and '$(RuntimeIdentifier)' != ''">
+    <Warning Text="InitialForce.WPF.RuntimeOverride is currently a no-op on RID '$(RuntimeIdentifier)'; System.Xaml will not be overridden." />
+  </Target>
+
   <Target Name="InjectIfWpfAssembly_SystemXaml"
           AfterTargets="Build;CopyFilesToOutputDirectory"
           Condition="$(IF_OverrideAssemblies.Contains('System.Xaml'))
-                     and $(RuntimeIdentifier.StartsWith('win-'))">
+                     and '$(RuntimeIdentifier)' == 'win-x64'">
     <Copy SourceFiles="$(_IFWpfRORuntimeDir)System.Xaml.dll"
-          DestinationFolder="$(OutDir)" OverwriteReadOnlyFiles="true" />
+          DestinationFolder="$(OutDir)" />
     <ItemGroup>
       <ResolvedFileToPublish Include="$(_IFWpfRORuntimeDir)System.Xaml.dll">
         <RelativePath>System.Xaml.dll</RelativePath>
