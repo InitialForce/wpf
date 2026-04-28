@@ -112,9 +112,7 @@ jobs:
       matrix:
         arch: [x64, arm64]
 
-    # arm64 cross-compile is supported on windows-latest; gate retained for
-    # future hosted-arm64 runner support.
-    if: matrix.arch != 'arm64' || runner.os == 'Windows'
+    # arm64 cross-compile runs on windows-latest x64 runner; runs-on already pins to Windows.
 
     steps:
       - uses: actions/checkout@v4
