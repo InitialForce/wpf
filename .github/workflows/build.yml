@@ -1,0 +1,353 @@
+# .github/workflows/build.yml
+name: Build
+
+on:
+  pull_request:
+    branches:
+      - if/main
+      - if/staging
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+  push:
+    branches:
+      - if/main
+      - if/staging
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+  id-token: write
+
+env:
+  IF_REPO_ROOT: ${{ github.workspace }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # lint-tools: Python tooling quality gate (ubuntu runner)
+  # ---------------------------------------------------------------------------
+  lint-tools:
+    name: Lint Python tools
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install lint tools
+        run: pip install ruff mypy pytest pyyaml
+
+      - name: ruff check
+        run: ruff check tools/ tests/
+
+      - name: mypy --strict
+        run: mypy --strict tools/ tests/
+
+      - name: pytest tools unit tests
+        run: pytest tests/ -v --tb=short
+
+  # ---------------------------------------------------------------------------
+  # lint-yaml: YAML / actionlint gate (ubuntu runner)
+  # ---------------------------------------------------------------------------
+  lint-yaml:
+    name: Lint YAML / actionlint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python (for PyYAML parse check)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      - name: Validate all workflow YAML parses
+        run: |
+          python - <<'EOF'
+          import sys, glob, yaml
+          errors = []
+          for path in glob.glob(".github/workflows/*.yml"):
+              try:
+                  with open(path) as f:
+                      yaml.safe_load(f)
+                  print(f"OK: {path}")
+              except yaml.YAMLError as e:
+                  errors.append(f"FAIL: {path}: {e}")
+          if errors:
+              for err in errors:
+                  print(err, file=sys.stderr)
+              sys.exit(1)
+          EOF
+
+      - name: actionlint
+        continue-on-error: true
+        run: |
+          if command -v actionlint &>/dev/null; then
+            actionlint .github/workflows/*.yml
+          else
+            echo "actionlint not installed; skipping (install from https://github.com/rhysd/actionlint)"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # build-wpf: Windows matrix build (x64 + arm64)
+  # ---------------------------------------------------------------------------
+  build-wpf:
+    name: Build WPF (${{ matrix.arch }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+
+    # arm64 cross-compile is supported on windows-latest; gate retained for
+    # future hosted-arm64 runner support.
+    if: matrix.arch != 'arm64' || runner.os == 'Windows'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-win-${{ matrix.arch }}-${{ hashFiles('**/packages.lock.json', 'global.json') }}
+          restore-keys: nuget-win-${{ matrix.arch }}-
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Install Strawberry Perl
+        run: choco install strawberryperl --version=5.28.1.1 -y --no-progress
+        shell: powershell
+
+      # Placeholder: upstream wpf submodule / dotnet/wpf source checkout.
+      # TODO (wired by packaging beads): add real submodule reference or
+      # sparse-checkout of upstream source tree.
+      - name: Checkout upstream WPF source (placeholder)
+        run: |
+          echo "Upstream dotnet/wpf source will be wired by packaging beads."
+          echo "Placeholder: no-op in this bead."
+        shell: bash
+
+      # Placeholder: build InitialForce.WPF packaging project.
+      # TODO (wired by packaging beads): replace paths below with real project paths.
+      - name: Build InitialForce.WPF packaging projects (placeholder)
+        run: |
+          echo "Build step placeholder — packaging project paths wired by other beads."
+          echo "Expected commands:"
+          echo "  dotnet build packaging/InitialForce.WPF/InitialForce.WPF.csproj -c Release /p:Platform=${{ matrix.arch }}"
+          echo "  dotnet build packaging/InitialForce.WPF.RuntimeOverride/InitialForce.WPF.RuntimeOverride.csproj -c Release /p:Platform=${{ matrix.arch }}"
+        shell: bash
+
+      - name: Validate ledger schema
+        run: python tools/ledger-validate.py --ledger .if-fork/patch-ledger.jsonl
+        shell: bash
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.arch }}
+          path: |
+            artifacts/packages/**/*.nupkg
+            artifacts/packages/**/*.snupkg
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload binary logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: binlogs-${{ matrix.arch }}
+          path: artifacts/log/**/*.binlog
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # smoke: 22-scenario smoke harness (needs build-wpf)
+  # ---------------------------------------------------------------------------
+  smoke:
+    name: Smoke (${{ matrix.arch }})
+    runs-on: windows-latest
+    needs: build-wpf
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-${{ matrix.arch }}
+          path: artifacts/packages/
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      # Placeholder: run 22-scenario smoke harness.
+      # TODO (wired by smoke-harness beads): replace with real test invocation.
+      - name: Run smoke harness (placeholder)
+        run: |
+          echo "Smoke harness placeholder — test/InitialForce.WpfSmoke/ wired by other beads."
+          echo "Expected command:"
+          echo "  dotnet test test/InitialForce.WpfSmoke/ -c Release --logger trx --results-directory smoke-results/"
+          mkdir -p smoke-results
+          echo '<?xml version="1.0" encoding="UTF-8"?><TestRun id="placeholder"><Results/></TestRun>' > smoke-results/smoke-placeholder.xml
+        shell: bash
+
+      - name: Upload smoke results
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ matrix.arch }}.xml
+          path: smoke-results/
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # perf: BenchmarkDotNet perf gate (needs build-wpf)
+  # ---------------------------------------------------------------------------
+  perf:
+    name: Perf (${{ matrix.arch }})
+    runs-on: windows-latest
+    needs: build-wpf
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-${{ matrix.arch }}
+          path: artifacts/packages/
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      # Placeholder: run BenchmarkDotNet benchmarks.
+      # TODO (wired by perf beads): replace with real benchmark invocation.
+      - name: Run BenchmarkDotNet (placeholder)
+        run: |
+          echo "BenchmarkDotNet placeholder — wired by other beads."
+          echo "Expected command:"
+          echo "  dotnet run --project test/InitialForce.WpfSmoke/ -c Release -- --filter '*Bench*' --exporters json"
+          echo "  python tools/check-regression.py --current-sha ${{ github.sha }} --series perf/series.jsonl"
+        shell: bash
+
+      - name: Upload perf results
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-${{ matrix.arch }}
+          path: BenchmarkDotNet.Artifacts/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # aggregate: diff smoke results, final gate (needs all prior jobs)
+  # ---------------------------------------------------------------------------
+  aggregate:
+    name: Aggregate results
+    runs-on: ubuntu-latest
+    needs: [lint-tools, lint-yaml, smoke, perf]
+    if: always()
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python deps
+        run: pip install pyyaml
+
+      - name: Download smoke x64 results
+        uses: actions/download-artifact@v4
+        with:
+          name: smoke-x64.xml
+          path: /tmp/smoke-results/x64/
+        continue-on-error: true
+
+      - name: Download smoke arm64 results
+        uses: actions/download-artifact@v4
+        with:
+          name: smoke-arm64.xml
+          path: /tmp/smoke-results/arm64/
+        continue-on-error: true
+
+      - name: Download baseline smoke artifact (if available)
+        uses: actions/download-artifact@v4
+        with:
+          name: smoke-baseline
+          path: /tmp/smoke-baseline/
+        continue-on-error: true
+
+      - name: Diff smoke results (if baseline available)
+        run: |
+          if [ -d /tmp/smoke-baseline ] && [ "$(ls -A /tmp/smoke-baseline)" ]; then
+            python tools/diff-smoke-results.py \
+              --upstream /tmp/smoke-baseline/ \
+              --fork /tmp/smoke-results/x64/ \
+              --output /tmp/smoke-diff-report.md
+            echo "Smoke diff report:"
+            cat /tmp/smoke-diff-report.md
+          else
+            echo "No baseline artifact found; skipping diff (first run or baseline not published)."
+          fi
+        shell: bash
+
+      - name: Check all required jobs passed
+        run: |
+          LINT_TOOLS="${{ needs.lint-tools.result }}"
+          LINT_YAML="${{ needs.lint-yaml.result }}"
+          SMOKE="${{ needs.smoke.result }}"
+          PERF="${{ needs.perf.result }}"
+
+          echo "lint-tools: $LINT_TOOLS"
+          echo "lint-yaml:  $LINT_YAML"
+          echo "smoke:      $SMOKE"
+          echo "perf:       $PERF"
+
+          FAILED=0
+          for result in "$LINT_TOOLS" "$LINT_YAML" "$SMOKE" "$PERF"; do
+            if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
+              FAILED=1
+            fi
+          done
+
+          if [ "$FAILED" -eq 1 ]; then
+            echo "::error::One or more required jobs failed. See details above."
+            exit 1
+          fi
+          echo "All required jobs passed."
+        shell: bash
