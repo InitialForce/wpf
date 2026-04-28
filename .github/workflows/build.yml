@@ -45,7 +45,37 @@ jobs:
           python-version: "3.12"
 
       - name: Install lint tools
-        run: pip install ruff mypy pytest pyyaml types-PyYAML
+        # jsonschema is required by tools/check-config-schema.py for full
+        # draft 2020-12 validation (without it the validator falls back to a
+        # type-only stdlib check that misses enum constraints, so e.g.
+        # schema_version=99 would be incorrectly accepted).
+        run: pip install ruff mypy pytest pyyaml types-PyYAML jsonschema
+
+      - name: Set up ephemeral GPG signing key for ledger tests
+        # tools/ledger-event.py fails closed in CI environments when git
+        # commit signing fails (HIGH-2 fix). Tests that exercise the real
+        # ledger-event subprocess therefore need a GPG key on the runner.
+        # Generate an ephemeral throw-away key valid for one day; it never
+        # leaves the runner and is overwritten on every CI run.
+        run: |
+          set -euo pipefail
+          cat > /tmp/gpg-batch <<'EOF'
+          %no-protection
+          Key-Type: ed25519
+          Key-Curve: ed25519
+          Name-Real: CI Test
+          Name-Email: ci-test@example.com
+          Expire-Date: 1
+          %commit
+          EOF
+          gpg --batch --gen-key /tmp/gpg-batch
+          rm /tmp/gpg-batch
+          KEY_ID=$(gpg --list-secret-keys --keyid-format=long ci-test@example.com | awk '/^sec/ {split($2,a,"/"); print a[2]; exit}')
+          echo "GPG key id: $KEY_ID"
+          git config --global user.name "CI Test"
+          git config --global user.email "ci-test@example.com"
+          git config --global user.signingkey "$KEY_ID"
+          git config --global commit.gpgsign true
 
       - name: ruff check
         run: ruff check tools/ tests/
