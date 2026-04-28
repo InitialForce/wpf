@@ -9,8 +9,10 @@ Checks:
   5. line_hash matches the recomputed SHA-256 of the line body.
 
 Optional:
-  --strict-signature  Require a GPG-signed git commit per ledger entry (skipped
-                      when git or gpg is not available in the environment).
+  --strict-signature  Require a GPG-signed git commit per ledger entry.  Commit
+                      lookup is done by searching for the Ledger-Line-Hash trailer
+                      in git log (content-based, not index-based) so this check
+                      is robust to squashes and rebases (MED-5 fix).
 
 Output: JSON on stdout → { "valid": bool, "lines_checked": int, "errors": [...] }
 Exit 0 if valid, 2 if invalid.
@@ -26,33 +28,16 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Ensure the tools directory is importable whether the script is run directly
+# or loaded via importlib from the project root.
+_TOOLS_DIR = Path(__file__).parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
 # ---------------------------------------------------------------------------
-# Event types — must match ledger-event.py exactly
+# Event types — imported from shared schema (LOW-1 fix)
 # ---------------------------------------------------------------------------
-VALID_EVENTS: frozenset[str] = frozenset(
-    [
-        "discovered",
-        "review_1",
-        "review_2",
-        "approved",
-        "escalated",
-        "cherry_picked",
-        "build_failed",
-        "build_passed",
-        "smoke_failed",
-        "smoke_passed",
-        "perf_passed",
-        "perf_failed",
-        "published",
-        "graduated_upstream",
-        "rejected",
-        "reverted",
-        "autonomy_paused",
-        "autonomy_resumed",
-        "automerge_frozen",
-        "automerge_thawed",
-    ]
-)
+from ledger_schema import VALID_EVENTS  # noqa: E402
 
 REQUIRED_FIELDS: tuple[str, ...] = (
     "schema_version",
@@ -105,8 +90,41 @@ def _check_gpg_signature(commit_sha: str) -> bool:
         return False
 
 
+def _find_commit_for_line_hash(line_hash: str) -> str | None:
+    """Look up the git commit that introduced the ledger line with the given hash.
+
+    Uses ``git log -S <line_hash>`` (pickaxe search) to find the commit that
+    added the exact content, which is robust against squashes and rebases.
+    Returns the commit SHA, or None if not found / git unavailable.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "log",
+                "-S",
+                line_hash,
+                "--pretty=format:%H",
+                "-1",
+                "--",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return None
+        sha = result.stdout.strip()
+        return sha if sha else None
+    except FileNotFoundError:
+        return None
+
+
 def _git_log_for_ledger(ledger_path: Path) -> list[str]:
-    """Return the list of commit SHAs that touched *ledger_path* (oldest first)."""
+    """Return the list of commit SHAs that touched *ledger_path* (oldest first).
+
+    Kept for backward compatibility; strict-signature mode now uses
+    _find_commit_for_line_hash instead.
+    """
     try:
         result = subprocess.run(
             ["git", "log", "--follow", "--pretty=format:%H", "--", str(ledger_path)],
@@ -146,11 +164,6 @@ def validate(
 
     if not raw_lines:
         return {"valid": True, "lines_checked": 0, "errors": []}
-
-    # For strict-signature: gather commit SHAs once (best-effort)
-    commit_shas: list[str] = []
-    if strict_signature:
-        commit_shas = _git_log_for_ledger(ledger_path)
 
     prev_hash = ""
     parsed_lines: list[dict[str, Any]] = []
@@ -241,17 +254,27 @@ def validate(
             prev_hash = ""
 
         # --- Check 6 (optional): GPG signature ---
-        if strict_signature and commit_shas:
-            if idx < len(commit_shas):
-                sha = commit_shas[idx]
-                if not _check_gpg_signature(sha):
-                    errors.append(
-                        _err(
-                            line_number,
-                            "missing_gpg_signature",
-                            f"Commit {sha!r} for line {line_number} is not GPG-signed",
-                        )
+        # MED-5 fix: look up the commit by content (line_hash pickaxe search)
+        # rather than correlating by array index.
+        if strict_signature and has_line_hash:
+            stored_hash = obj["line_hash"]
+            commit_sha = _find_commit_for_line_hash(stored_hash)
+            if commit_sha is None:
+                errors.append(
+                    _err(
+                        line_number,
+                        "missing_gpg_signature",
+                        f"No git commit found that introduced line_hash {stored_hash!r}",
                     )
+                )
+            elif not _check_gpg_signature(commit_sha):
+                errors.append(
+                    _err(
+                        line_number,
+                        "missing_gpg_signature",
+                        f"Commit {commit_sha!r} for line {line_number} is not GPG-signed",
+                    )
+                )
 
     result: dict[str, Any] = {
         "valid": len(errors) == 0,
@@ -279,7 +302,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help=(
             "Also verify that every ledger line has a corresponding"
-            " GPG-signed git commit (skipped when git/gpg unavailable)"
+            " GPG-signed git commit. Commit lookup is done via git log -S"
+            " <line_hash> (content-based, not index-based)."
         ),
     )
     return parser.parse_args(argv)
