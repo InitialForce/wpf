@@ -186,10 +186,10 @@ gh issue list --repo InitialForce/wpf --state open \
   --label "security,review-disagreement,rebase-conflict"
 
 # 3. Ledger changes since last visit
-git -C /c/work/wpf log --since=$LAST_VISIT --oneline -- .if-fork/patch-state.json
+git log --since=$LAST_VISIT --oneline -- .if-fork/patch-state.json
 
 # 4. Audit branch summary
-git -C /c/work/wpf log audit --since=$LAST_VISIT --oneline | head -30
+git log audit --since=$LAST_VISIT --oneline | head -30
 
 # 5. Open PRs requiring human action
 gh pr list --repo InitialForce/wpf --label "awaiting-human,review-disagreement"
