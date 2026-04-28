@@ -1,0 +1,168 @@
+{
+  "Title": "BenchmarkRun_InitialForce_WPF",
+  "HostEnvironmentInfo": {
+    "BenchmarkDotNetVersion": "0.14.0",
+    "OsVersion": "Windows 11 (10.0.22621.3958)",
+    "ProcessorName": "Intel Core i7-10700K",
+    "RuntimeVersion": ".NET 10.0",
+    "Architecture": "X64"
+  },
+  "Benchmarks": [
+    {
+      "FullName": "InitialForce.WpfSmoke.GeometryParserBench.ReadNumberBench",
+      "Namespace": "InitialForce.WpfSmoke",
+      "Type": "GeometryParserBench",
+      "Method": "ReadNumberBench",
+      "Parameters": "",
+      "Statistics": {
+        "N": 10,
+        "Min": 44900.0,
+        "LowerFence": 44000.0,
+        "Q1": 45300.0,
+        "Median": 46100.0,
+        "Mean": 46920.0,
+        "Q3": 46900.0,
+        "UpperFence": 48100.0,
+        "Max": 47600.0,
+        "InterquartileRange": 1600.0,
+        "OutlierCount": 0,
+        "StandardError": 125.0,
+        "Variance": 156250.0,
+        "StandardDeviation": 395.28,
+        "Skewness": 0.11,
+        "Kurtosis": 1.82,
+        "ConfidenceInterval": {
+          "N": 10,
+          "Mean": 46920.0,
+          "StandardError": 125.0,
+          "Level": 12,
+          "Margin": 245.0,
+          "Lower": 46675.0,
+          "Upper": 47165.0
+        },
+        "Percentiles": {
+          "P0": 44900.0,
+          "P25": 45300.0,
+          "P50": 46100.0,
+          "P67": 46400.0,
+          "P80": 46800.0,
+          "P85": 47000.0,
+          "P90": 47200.0,
+          "P95": 47400.0,
+          "P100": 47600.0
+        }
+      },
+      "Memory": {
+        "Gen0Collections": 0,
+        "Gen1Collections": 0,
+        "Gen2Collections": 0,
+        "TotalOperations": 10000,
+        "BytesAllocatedPerOperation": 0
+      }
+    },
+    {
+      "FullName": "InitialForce.WpfSmoke.ImageLoadingBench.JpegDecode100",
+      "Namespace": "InitialForce.WpfSmoke",
+      "Type": "ImageLoadingBench",
+      "Method": "JpegDecode100",
+      "Parameters": "",
+      "Statistics": {
+        "N": 10,
+        "Min": 4210000.0,
+        "LowerFence": 4010000.0,
+        "Q1": 4260000.0,
+        "Median": 4310000.0,
+        "Mean": 4386000.0,
+        "Q3": 4360000.0,
+        "UpperFence": 4510000.0,
+        "Max": 4410000.0,
+        "InterquartileRange": 100000.0,
+        "OutlierCount": 0,
+        "StandardError": 16000.0,
+        "Variance": 2560000000.0,
+        "StandardDeviation": 50596.44,
+        "Skewness": 0.04,
+        "Kurtosis": 1.88,
+        "ConfidenceInterval": {
+          "N": 10,
+          "Mean": 4386000.0,
+          "StandardError": 16000.0,
+          "Level": 12,
+          "Margin": 31360.0,
+          "Lower": 4354640.0,
+          "Upper": 4417360.0
+        },
+        "Percentiles": {
+          "P0": 4210000.0,
+          "P25": 4260000.0,
+          "P50": 4310000.0,
+          "P67": 4330000.0,
+          "P80": 4360000.0,
+          "P85": 4370000.0,
+          "P90": 4385000.0,
+          "P95": 4400000.0,
+          "P100": 4410000.0
+        }
+      },
+      "Memory": {
+        "Gen0Collections": 2,
+        "Gen1Collections": 0,
+        "Gen2Collections": 0,
+        "TotalOperations": 100,
+        "BytesAllocatedPerOperation": 8356
+      }
+    },
+    {
+      "FullName": "InitialForce.WpfSmoke.ListCollectionViewBench.SortBench",
+      "Namespace": "InitialForce.WpfSmoke",
+      "Type": "ListCollectionViewBench",
+      "Method": "SortBench",
+      "Parameters": "",
+      "Statistics": {
+        "N": 10,
+        "Min": 181000000.0,
+        "LowerFence": 176000000.0,
+        "Q1": 183000000.0,
+        "Median": 186000000.0,
+        "Mean": 188550000.0,
+        "Q3": 189000000.0,
+        "UpperFence": 196000000.0,
+        "Max": 193000000.0,
+        "InterquartileRange": 6000000.0,
+        "OutlierCount": 0,
+        "StandardError": 720000.0,
+        "Variance": 5184000000000.0,
+        "StandardDeviation": 2276812.0,
+        "Skewness": 0.07,
+        "Kurtosis": 1.73,
+        "ConfidenceInterval": {
+          "N": 10,
+          "Mean": 188550000.0,
+          "StandardError": 720000.0,
+          "Level": 12,
+          "Margin": 1411200.0,
+          "Lower": 187138800.0,
+          "Upper": 189961200.0
+        },
+        "Percentiles": {
+          "P0": 181000000.0,
+          "P25": 183000000.0,
+          "P50": 186000000.0,
+          "P67": 187000000.0,
+          "P80": 189000000.0,
+          "P85": 190000000.0,
+          "P90": 191000000.0,
+          "P95": 192000000.0,
+          "P100": 193000000.0
+        }
+      },
+      "Memory": {
+        "Gen0Collections": 0,
+        "Gen1Collections": 0,
+        "Gen2Collections": 0,
+        "TotalOperations": 1000,
+        "BytesAllocatedPerOperation": 0
+      }
+    }
+  ]
+}
