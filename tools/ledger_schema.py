@@ -33,5 +33,13 @@ VALID_EVENTS: frozenset[str] = frozenset(
         "automerge_thawed",
         # merge-verdict workflow outcome (CRIT-2 fix)
         "merged_verdict",
+        # emitted by nightly-rebase when cherry-pick onto upstream fails
+        "rebase_failed",
+        # emitted by claude-on-failure after root-cause analysis completes
+        "failure_analyzed",
+        # emitted by cherry-pick pre-flight checks when gating conditions are not met
+        "pre_flight_failed",
+        # emitted by pr-review workflow when only a single review path is available
+        "review_single_path_warning",
     ]
 )
