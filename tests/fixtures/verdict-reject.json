@@ -1,0 +1,8 @@
+{
+  "verdict": "unsafe",
+  "confidence": 0.98,
+  "rationale": "The PR replaces a strongly-typed dictionary lookup with a Hashtable cast. While this matches the PR title ('reduce allocations'), the Hashtable is not thread-safe and the call site is reached from the dispatcher thread AND from a background loader. No lock added. Behavioral drift: potential race condition under concurrent document load. No test covers the concurrent path. Revert is clean but the race would be silent in tests.",
+  "hard_fail_pattern": null,
+  "files_reviewed": ["ResourceDictionary.cs", "ResourceDictionary.Tests.cs"],
+  "reviewer_id": "claude-opus-4-7-review-2"
+}

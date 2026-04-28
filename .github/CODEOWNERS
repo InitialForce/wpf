@@ -1,0 +1,32 @@
+# CODEOWNERS — InitialForce/wpf
+#
+# Every sensitive file in the autonomous pipeline requires human review.
+# Rules are evaluated top-to-bottom; the last matching rule wins.
+# The catch-all at the bottom ensures no file is ever unowned.
+
+# Policy file — any change to fork thresholds, allowlists, or denylist requires human sign-off
+/.if-fork/config.yaml @oysteinkrog
+
+# Patch ledger — append-only by design; mid-line edits must be reviewed
+/.if-fork/patch-ledger.jsonl @oysteinkrog
+
+# Publish gate — changes to the release workflow require human review
+/.github/workflows/release.yml @oysteinkrog
+
+# Review workflow — changes to reviewer prompts or gate logic require human review
+/.github/workflows/pr-review.yml @oysteinkrog
+
+# Claude prompt files — only platform-team can edit
+/.if-fork/prompts/** @oysteinkrog
+
+# Ledger signing tool — signing-critical; must not be modified without review
+/tools/ledger-event.py @oysteinkrog
+
+# Legal attribution file
+/NOTICE.md @oysteinkrog
+
+# Architectural decision log
+/docs/DECISION_LOG.md @oysteinkrog
+
+# Catch-all fallback — every file not matched above is owned by oysteinkrog
+* @oysteinkrog
