@@ -4,6 +4,11 @@ Tests for .github/workflows/autonomy-check.yml
 Validates the YAML structure and gating logic references without executing
 the workflow. If actionlint is available it will be called as well; if not,
 the structural assertions below serve as the floor.
+
+Security checks (CRIT-1):
+- Default-deny for unknown requested_action values
+- All 6 known actions enumerated in the gate script
+- Unknown action sets proceed=false and reason contains "unknown requested_action"
 """
 
 from __future__ import annotations
@@ -147,7 +152,74 @@ def test_caller_workflow_structure(caller_workflow: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Case 6: actionlint (skipped gracefully if not installed)
+# Case 6: default-deny for unknown requested_action (CRIT-1)
+# ---------------------------------------------------------------------------
+
+KNOWN_ACTIONS = [
+    "claude-invoke",
+    "auto-merge",
+    "discovery-scan",
+    "release-publish",
+    "cherry-pick",
+    "upstream-stable-adoption",
+]
+
+
+def _gate_combined_script(workflow: dict) -> str:
+    """Return all run scripts from the gate job's steps, joined."""
+    jobs = workflow.get("jobs", {})
+    gate_job = jobs.get("gate", {})
+    steps = gate_job.get("steps", [])
+    return "\n".join(
+        step.get("run", "") for step in steps if isinstance(step, dict)
+    )
+
+
+def test_default_deny_logic_present(workflow: dict) -> None:
+    """Gate script must block unknown requested_action values (default-deny)."""
+    script = _gate_combined_script(workflow)
+    assert "unknown requested_action" in script, (
+        "Gate script must emit 'unknown requested_action: <X>' reason for unknown actions (CRIT-1)"
+    )
+
+
+def test_default_deny_sets_proceed_false(workflow: dict) -> None:
+    """Gate script must set proceed=false for unknown actions."""
+    script = _gate_combined_script(workflow)
+    # Must have both the default-deny block and proceed=false
+    assert "proceed=false" in script, (
+        "Gate script must set proceed=false somewhere (covers unknown action path)"
+    )
+
+
+def test_all_known_actions_enumerated(workflow: dict) -> None:
+    """All 6 known actions must appear in the gate script's allow-list."""
+    script = _gate_combined_script(workflow)
+    for action in KNOWN_ACTIONS:
+        assert action in script, (
+            f"Known action '{action}' is not listed in the gate script's allow-list"
+        )
+
+
+def test_default_deny_is_before_kill_switch(workflow: dict) -> None:
+    """Default-deny (Gate 0) must appear before the global kill switch (Gate 1) in the script."""
+    script = _gate_combined_script(workflow)
+    # Locate the default-deny block via its distinctive reason string
+    idx_deny = script.find("unknown requested_action")
+    # Locate the kill-switch gate logic via its conditional check (not the variable assignment)
+    idx_kill = script.find("autonomy disabled by IF_AUTONOMY_ENABLED")
+    assert idx_deny >= 0, "Default-deny block not found in gate script"
+    assert idx_kill >= 0, (
+        "IF_AUTONOMY_ENABLED kill-switch reason string not found in gate script; "
+        "expected 'autonomy disabled by IF_AUTONOMY_ENABLED'"
+    )
+    assert idx_deny < idx_kill, (
+        "Default-deny (Gate 0) must appear before the IF_AUTONOMY_ENABLED kill-switch (Gate 1)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Case 7: actionlint (skipped gracefully if not installed)
 # ---------------------------------------------------------------------------
 @pytest.mark.skipif(
     shutil.which("actionlint") is None,
