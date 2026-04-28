@@ -235,8 +235,11 @@ jobs:
         run: |
           python tools/ledger-event.py \
             --event failure_analyzed \
-            --details "{\"workflow\": \"${{ env.FAILED_WORKFLOW }}\", \"failed_run_id\": \"${{ env.FAILED_RUN_ID }}\", \"issue_type\": \"${{ needs.analyze.outputs.issue_type }}\", \"run_url\": \"${{ env.FAILED_RUN_URL }}\"}" \
-            --actor-run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            --pr-number 0 \
+            --head-sha "${{ github.sha }}" \
+            --actor claude-on-failure \
+            --details-json "{\"workflow\": \"${{ env.FAILED_WORKFLOW }}\", \"failed_run_id\": \"${{ env.FAILED_RUN_ID }}\", \"issue_type\": \"${{ needs.analyze.outputs.issue_type }}\", \"run_url\": \"${{ env.FAILED_RUN_URL }}\"}" \
+            --push
         env:
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
