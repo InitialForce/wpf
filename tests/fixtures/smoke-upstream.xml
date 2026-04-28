@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<test-run id="1" name="InitialForce.WpfSmoke" total="22" passed="22" failed="0" skipped="0" duration="12.345">
+  <test-suite type="Assembly" name="InitialForce.WpfSmoke.dll">
+    <test-suite type="TestFixture" name="GeometryParserTests">
+      <test-case name="GeometryParserTests.RoundTrip10kPaths" result="Passed" duration="0.820" />
+    </test-suite>
+    <test-suite type="TestFixture" name="GeometryParserBench">
+      <test-case name="GeometryParserBench.ReadNumberBench" result="Passed" duration="0.045" />
+    </test-suite>
+    <test-suite type="TestFixture" name="ListCollectionViewTests">
+      <test-case name="ListCollectionViewTests.SortOf50kItems" result="Passed" duration="0.180" />
+      <test-case name="ListCollectionViewTests.PrepareComparerZeroAllocs" result="Passed" duration="0.060" />
+    </test-suite>
+    <test-suite type="TestFixture" name="FrugalListTests">
+      <test-case name="FrugalListTests.InsertRemoveRoundTrip" result="Passed" duration="0.015" />
+      <test-case name="FrugalListTests.GenericIntNoBoxing" result="Passed" duration="0.010" />
+    </test-suite>
+    <test-suite type="TestFixture" name="WeakReferenceListTests">
+      <test-case name="WeakReferenceListTests.EnumeratorNotBoxed" result="Passed" duration="0.240" />
+    </test-suite>
+    <test-suite type="TestFixture" name="VirtualizingPanelTests">
+      <test-case name="VirtualizingPanelTests.Only30ContainersRealized" result="Passed" duration="1.200" />
+    </test-suite>
+    <test-suite type="TestFixture" name="PixelDiffTests">
+      <test-case name="PixelDiffTests.XamlSceneA" result="Passed" duration="0.350">
+        <properties>
+          <property name="pixel-diff-hash" value="aabbccdd1122334455667788aabbccdd1122334455667788aabbccdd11223344" />
+        </properties>
+      </test-case>
+      <test-case name="PixelDiffTests.DataGrid5Rows" result="Passed" duration="0.410">
+        <properties>
+          <property name="pixel-diff-hash" value="bbccddee2233445566778899bbccddee2233445566778899bbccddee22334455" />
+        </properties>
+      </test-case>
+      <test-case name="PixelDiffTests.FlowDocument" result="Passed" duration="0.390">
+        <properties>
+          <property name="pixel-diff-hash" value="ccddeeff3344556677889900ccddeeff3344556677889900ccddeeff33445566" />
+        </properties>
+      </test-case>
+      <test-case name="PixelDiffTests.RtlText" result="Passed" duration="0.320">
+        <properties>
+          <property name="pixel-diff-hash" value="ddeeff00445566778899aabbddeeff00445566778899aabbddeeff0044556677" />
+        </properties>
+      </test-case>
+    </test-suite>
+    <test-suite type="TestFixture" name="HitTestingTests">
+      <test-case name="HitTestingTests.ThreeRectanglesNinePoints" result="Passed" duration="0.080" />
+    </test-suite>
+    <test-suite type="TestFixture" name="ImageLoadingTests">
+      <test-case name="ImageLoadingTests.DecodeAllFormats" result="Passed" duration="0.450" />
+    </test-suite>
+    <test-suite type="TestFixture" name="ImageLoadingBench">
+      <test-case name="ImageLoadingBench.JpegDecode100" result="Passed" duration="0.003" />
+    </test-suite>
+    <test-suite type="TestFixture" name="DataBindingTests">
+      <test-case name="DataBindingTests.ItemsControlUpdatesOnChange" result="Passed" duration="0.520" />
+      <test-case name="DataBindingTests.MultiBindingConverterChain" result="Passed" duration="0.110" />
+    </test-suite>
+    <test-suite type="TestFixture" name="AnimationTests">
+      <test-case name="AnimationTests.DoubleAnimationReachesTarget" result="Passed" duration="0.510" />
+    </test-suite>
+    <test-suite type="TestFixture" name="StyleTests">
+      <test-case name="StyleTests.ResourceDictionaryAllStylesResolve" result="Passed" duration="0.090" />
+    </test-suite>
+    <test-suite type="TestFixture" name="SortTests">
+      <test-case name="SortTests.ArrayListSortGenericPath" result="Passed" duration="0.040" />
+    </test-suite>
+    <test-suite type="TestFixture" name="PresentationSourceTests">
+      <test-case name="PresentationSourceTests.NoLeakAfter100Windows" result="Passed" duration="1.850" />
+    </test-suite>
+    <test-suite type="TestFixture" name="LifecycleTests">
+      <test-case name="LifecycleTests.AppRunShutdownClean" result="Passed" duration="2.100" />
+    </test-suite>
+  </test-suite>
+</test-run>

@@ -1,0 +1,82 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Target framework must be set for SDK-style pack; no actual compilation. -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <IsPackable>true</IsPackable>
+    <!-- We are packaging pre-built DLLs, not compiling this project. -->
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <NoBuild>true</NoBuild>
+    <NoDefaultExcludes>true</NoDefaultExcludes>
+
+    <!-- Version is injected by release.yml using compute-version.ps1.
+         The script reads the latest if-10.0.* git tag and emits:
+           10.0.4-if.20260427.1
+         This is passed as -p:PackageVersion=... on the dotnet pack command line. -->
+    <PackageId>InitialForce.WPF</PackageId>
+    <Authors>Initial Force AS</Authors>
+    <Description>
+      Patched WPF managed assemblies for Swing Catalyst.
+      Based on dotnet/wpf (MIT). Third-party fork; not endorsed by Microsoft.
+    </Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/InitialForce/wpf</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/InitialForce/wpf</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <!-- GitCommitId and PublishRepositoryUrl require dotnet/sourcelink. -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <!-- Symbols are emitted as .snupkg (portable PDB format). -->
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <!-- Suppress warnings for NoBuild SDK-style packaging. -->
+    <NoWarn>NU5128</NoWarn>
+    <!-- Package icon and readme. -->
+    <PackageIcon>icon.png</PackageIcon>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <!-- GeneratePackageOnBuild is false; we control packing via release.yml. -->
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+  </PropertyGroup>
+
+  <!-- Empty placeholder assembly: makes the package referenceable in projects
+       that check for compile-time assets. The real DLLs are under runtimes/. -->
+  <ItemGroup>
+    <None Include="lib\net10.0-windows\_._" Pack="true"
+          PackagePath="lib/net10.0-windows/_._" />
+  </ItemGroup>
+
+  <!-- The four patched DLLs and their portable PDBs.
+       Populated by release.yml before dotnet pack is called. -->
+  <ItemGroup>
+    <None Include="runtimes\win-x64\lib\net10.0-windows\*.dll" Pack="true"
+          PackagePath="runtimes/win-x64/lib/net10.0-windows/" />
+    <None Include="runtimes\win-x64\lib\net10.0-windows\*.pdb" Pack="true"
+          PackagePath="runtimes/win-x64/lib/net10.0-windows/" />
+  </ItemGroup>
+
+  <!-- MSBuild targets file: injected into every consumer project that references
+       this package (build/ = direct consumers; buildTransitive/ = transitive consumers). -->
+  <ItemGroup>
+    <None Include="buildTransitive\InitialForce.WPF.targets" Pack="true"
+          PackagePath="buildTransitive/InitialForce.WPF.targets" />
+    <None Include="buildTransitive\InitialForce.WPF.props" Pack="true"
+          PackagePath="buildTransitive/InitialForce.WPF.props" />
+    <!-- Also provide in build/ for direct-reference consumers (NuGet < 4.0 compat). -->
+    <None Include="buildTransitive\InitialForce.WPF.targets" Pack="true"
+          PackagePath="build/InitialForce.WPF.targets" />
+    <None Include="buildTransitive\InitialForce.WPF.props" Pack="true"
+          PackagePath="build/InitialForce.WPF.props" />
+  </ItemGroup>
+
+  <!-- Package icon and readme assets. -->
+  <ItemGroup>
+    <None Include="icon.png" Pack="true" PackagePath="icon.png" />
+    <None Include="README.md" Pack="true" PackagePath="README.md" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.*"
+                      PrivateAssets="All" />
+  </ItemGroup>
+
+</Project>
