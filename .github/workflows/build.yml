@@ -188,8 +188,9 @@ jobs:
       # arcade build to produce the four managed assemblies that
       # InitialForce.WPF wraps.
       - name: Build upstream WPF source
+        # build.cmd already passes -restore -build to Build.ps1; do not duplicate.
         run: |
-          .\build.cmd -c Release -plat ${{ matrix.arch }} -restore -build -pack /bl:artifacts/log/Release/build.${{ matrix.arch }}.binlog
+          .\build.cmd -c Release -plat ${{ matrix.arch }} -pack /bl:artifacts/log/Release/build.${{ matrix.arch }}.binlog
         shell: cmd
         timeout-minutes: 60
 
