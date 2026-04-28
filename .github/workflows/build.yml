@@ -45,13 +45,18 @@ jobs:
           python-version: "3.12"
 
       - name: Install lint tools
-        run: pip install ruff mypy pytest pyyaml
+        run: pip install ruff mypy pytest pyyaml types-PyYAML
 
       - name: ruff check
         run: ruff check tools/ tests/
 
-      - name: mypy --strict
-        run: mypy --strict tools/ tests/
+      # mypy --strict applies to tools/ only (per pyproject.toml
+      # [tool.mypy] files=["tools/*.py"]). Test code is intentionally not
+      # type-strict — tests use yaml.safe_load() returns and parametrize
+      # with untyped values where strict typing would add noise without
+      # catching real bugs.
+      - name: mypy --strict (tools)
+        run: mypy --strict tools/
 
       - name: pytest tools unit tests
         run: pytest tests/ -v --tb=short
@@ -166,6 +171,17 @@ jobs:
         run: python tools/ledger-validate.py --ledger .if-fork/patch-ledger.jsonl
         shell: bash
 
+      # Phase-0 placeholder: build step doesn't yet produce real nupkgs.
+      # Emit a sentinel marker so downstream smoke/perf jobs (which gate on
+      # this artifact existing) can run their own placeholder steps end-to-end.
+      # Once real packaging beads land, this block is replaced by the real
+      # nupkg upload above.
+      - name: Emit placeholder build marker
+        run: |
+          mkdir -p artifacts/packages
+          echo "phase-0 placeholder build for ${{ matrix.arch }} @ ${{ github.sha }}" > artifacts/packages/PLACEHOLDER-${{ matrix.arch }}.txt
+        shell: bash
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -173,7 +189,8 @@ jobs:
           path: |
             artifacts/packages/**/*.nupkg
             artifacts/packages/**/*.snupkg
-          if-no-files-found: warn
+            artifacts/packages/PLACEHOLDER-*.txt
+          if-no-files-found: error
           retention-days: 14
 
       - name: Upload binary logs on failure
