@@ -200,12 +200,21 @@ jobs:
           $names = @("PresentationCore", "PresentationFramework", "WindowsBase", "System.Xaml")
           $found = @{}
           foreach ($n in $names) {
-            $hit = Get-ChildItem -Recurse artifacts -Filter "$n.dll" -ErrorAction SilentlyContinue |
-                   Where-Object { $_.FullName -match "Release" -and $_.FullName -notmatch "\\ref\\|\\obj\\" } |
+            # Canonical path: artifacts\bin\<exact-name>\<arch>\Release\<tfm>\<name>.dll
+            # Restrict the search to the assembly's own bin tree so Tests/ref/obj
+            # copies cannot be picked up by accident.
+            $root = "artifacts\bin\$n\${{ matrix.arch }}\Release"
+            if (-not (Test-Path $root)) {
+              Write-Error "Output dir $root does not exist; upstream build did not produce $n"
+              Get-ChildItem -Recurse artifacts\bin -Filter "$n.dll" | Format-Table FullName
+              exit 1
+            }
+            $hit = Get-ChildItem -Recurse $root -Filter "$n.dll" -ErrorAction SilentlyContinue |
+                   Where-Object { $_.FullName -notmatch "\\ref\\|\\obj\\" } |
                    Select-Object -First 1
             if (-not $hit) {
-              Write-Error "Could not locate $n.dll under artifacts/"
-              Get-ChildItem -Recurse artifacts -Filter "*.dll" | Select-Object -First 30 | Format-Table FullName
+              Write-Error "Could not locate $n.dll under $root"
+              Get-ChildItem -Recurse $root -Filter "*.dll" | Format-Table FullName
               exit 1
             }
             Write-Host "Found $n.dll at $($hit.FullName)"
@@ -221,7 +230,7 @@ jobs:
       - name: Stage DLLs into InitialForce.WPF runtime tree
         run: |
           $rid = if ("${{ matrix.arch }}" -eq "x64") { "win-x64" } else { "win-arm64" }
-          $dest = "packaging\InitialForce.WPF\runtimes\$rid\lib\net10.0-windows"
+          $dest = "packaging\InitialForce.WPF\runtimes\$rid\lib\net10.0"
           New-Item -ItemType Directory -Path $dest -Force | Out-Null
           foreach ($pair in @(
             @{ name = "PresentationCore";      path = "$env:PRESENTATIONCORE_DLL" },
