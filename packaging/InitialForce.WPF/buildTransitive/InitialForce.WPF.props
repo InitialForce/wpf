@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <!--
+    InitialForce.WPF.props — auto-imported into every project referencing this package.
+
+    This file is evaluated BEFORE the consuming project's properties, making it the right
+    place for consumer-overridable defaults. Currently a placeholder — add properties here
+    as the need arises.
+
+    Consumer-overridable properties (to be added here when needed):
+      $(InitialForceWpfSkipDllInjection)  — set to 'true' to disable Target 2 entirely.
+      $(InitialForceWpfVerbose)           — set to 'true' for diagnostic MSBuild messages.
+
+    These are intentionally NOT set here so consumers can opt in via their own .props
+    or Directory.Build.props without interference.
+  -->
+
+</Project>
