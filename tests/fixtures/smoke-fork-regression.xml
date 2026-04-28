@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Fork regression fixture: ListCollectionViewTests.PrepareComparerZeroAllocs fails,
+     and PixelDiffTests.XamlSceneA has a different pixel-diff hash (rendering changed). -->
+<test-run id="1" name="InitialForce.WpfSmoke" total="22" passed="20" failed="1" skipped="0" duration="12.560">
+  <test-suite type="Assembly" name="InitialForce.WpfSmoke.dll">
+    <test-suite type="TestFixture" name="GeometryParserTests">
+      <test-case name="GeometryParserTests.RoundTrip10kPaths" result="Passed" duration="0.822" />
+    </test-suite>
+    <test-suite type="TestFixture" name="GeometryParserBench">
+      <test-case name="GeometryParserBench.ReadNumberBench" result="Passed" duration="0.046" />
+    </test-suite>
+    <test-suite type="TestFixture" name="ListCollectionViewTests">
+      <test-case name="ListCollectionViewTests.SortOf50kItems" result="Passed" duration="0.182" />
+      <!-- REGRESSION: delegate allocation reintroduced (PR #6511 regressed) -->
+      <test-case name="ListCollectionViewTests.PrepareComparerZeroAllocs" result="Failed" duration="0.063">
+        <failure>
+          <message>Expected 0 allocated bytes during Refresh(); got 48 bytes. Possible regression of PR #6511 (PrepareComparer delegate allocation).</message>
+        </failure>
+      </test-case>
+    </test-suite>
+    <test-suite type="TestFixture" name="FrugalListTests">
+      <test-case name="FrugalListTests.InsertRemoveRoundTrip" result="Passed" duration="0.016" />
+      <test-case name="FrugalListTests.GenericIntNoBoxing" result="Passed" duration="0.010" />
+    </test-suite>
+    <test-suite type="TestFixture" name="WeakReferenceListTests">
+      <test-case name="WeakReferenceListTests.EnumeratorNotBoxed" result="Passed" duration="0.242" />
+    </test-suite>
+    <test-suite type="TestFixture" name="VirtualizingPanelTests">
+      <test-case name="VirtualizingPanelTests.Only30ContainersRealized" result="Passed" duration="1.205" />
+    </test-suite>
+    <test-suite type="TestFixture" name="PixelDiffTests">
+      <!-- REGRESSION: different pixel-diff hash (rendering changed in fork) -->
+      <test-case name="PixelDiffTests.XamlSceneA" result="Passed" duration="0.352">
+        <properties>
+          <property name="pixel-diff-hash" value="deadbeef1122334455667788deadbeef1122334455667788deadbeef11223344" />
+        </properties>
+      </test-case>
+      <test-case name="PixelDiffTests.DataGrid5Rows" result="Passed" duration="0.411">
+        <properties>
+          <property name="pixel-diff-hash" value="bbccddee2233445566778899bbccddee2233445566778899bbccddee22334455" />
+        </properties>
+      </test-case>
+      <test-case name="PixelDiffTests.FlowDocument" result="Passed" duration="0.391">
+        <properties>
+          <property name="pixel-diff-hash" value="ccddeeff3344556677889900ccddeeff3344556677889900ccddeeff33445566" />
+        </properties>
+      </test-case>
+      <test-case name="PixelDiffTests.RtlText" result="Passed" duration="0.321">
+        <properties>
+          <property name="pixel-diff-hash" value="ddeeff00445566778899aabbddeeff00445566778899aabbddeeff0044556677" />
+        </properties>
+      </test-case>
+    </test-suite>
+    <test-suite type="TestFixture" name="HitTestingTests">
+      <test-case name="HitTestingTests.ThreeRectanglesNinePoints" result="Passed" duration="0.081" />
+    </test-suite>
+    <test-suite type="TestFixture" name="ImageLoadingTests">
+      <test-case name="ImageLoadingTests.DecodeAllFormats" result="Passed" duration="0.452" />
+    </test-suite>
+    <test-suite type="TestFixture" name="ImageLoadingBench">
+      <test-case name="ImageLoadingBench.JpegDecode100" result="Passed" duration="0.003" />
+    </test-suite>
+    <test-suite type="TestFixture" name="DataBindingTests">
+      <test-case name="DataBindingTests.ItemsControlUpdatesOnChange" result="Passed" duration="0.522" />
+      <test-case name="DataBindingTests.MultiBindingConverterChain" result="Passed" duration="0.111" />
+    </test-suite>
+    <test-suite type="TestFixture" name="AnimationTests">
+      <test-case name="AnimationTests.DoubleAnimationReachesTarget" result="Passed" duration="0.512" />
+    </test-suite>
+    <test-suite type="TestFixture" name="StyleTests">
+      <test-case name="StyleTests.ResourceDictionaryAllStylesResolve" result="Passed" duration="0.091" />
+    </test-suite>
+    <test-suite type="TestFixture" name="SortTests">
+      <test-case name="SortTests.ArrayListSortGenericPath" result="Passed" duration="0.041" />
+    </test-suite>
+    <test-suite type="TestFixture" name="PresentationSourceTests">
+      <test-case name="PresentationSourceTests.NoLeakAfter100Windows" result="Passed" duration="1.852" />
+    </test-suite>
+    <test-suite type="TestFixture" name="LifecycleTests">
+      <test-case name="LifecycleTests.AppRunShutdownClean" result="Passed" duration="2.105" />
+    </test-suite>
+  </test-suite>
+</test-run>

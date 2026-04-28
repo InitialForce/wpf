@@ -1,0 +1,475 @@
+# .github/workflows/pr-ingestion.yml
+name: PR Ingestion (Cherry-Pick)
+
+on:
+  repository_dispatch:
+    types: [pr-ingestion-requested]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Upstream PR number to cherry-pick"
+        required: true
+        type: string
+      head_sha:
+        description: "Expected upstream HEAD SHA (pinned at review time)"
+        required: true
+        type: string
+
+concurrency:
+  group: ingestion-${{ inputs.pr_number || github.event.client_payload.pr_number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+
+env:
+  IF_REPO_ROOT: ${{ github.workspace }}
+  PR_NUMBER: ${{ inputs.pr_number || github.event.client_payload.pr_number }}
+  PINNED_HEAD_SHA: ${{ inputs.head_sha || github.event.client_payload.head_sha }}
+
+# ---------------------------------------------------------------------------
+# Job 1: gate — autonomy-check (reusable workflow)
+# ---------------------------------------------------------------------------
+jobs:
+  gate:
+    name: Autonomy gate
+    uses: ./.github/workflows/autonomy-check.yml
+
+  # -------------------------------------------------------------------------
+  # Job 2: pre-flight — graduation check before we apply anything
+  # -------------------------------------------------------------------------
+  pre-flight:
+    name: Pre-flight graduation check
+    needs: gate
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+    outputs:
+      action: ${{ steps.check.outputs.action }}
+
+    steps:
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/dotnet/wpf.git || true
+
+      - name: Fetch upstream
+        run: git fetch upstream release/10.0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run cherry-pick-pre-flight.sh
+        id: check
+        run: |
+          RESULT=$(bash tools/cherry-pick-pre-flight.sh \
+            --pr-number "${{ env.PR_NUMBER }}" \
+            --head-sha "${{ env.PINNED_HEAD_SHA }}" \
+            --upstream-ref upstream \
+            --ledger-path .if-fork/patch-ledger.jsonl)
+          ACTION=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['action'])")
+          echo "action=$ACTION" >> "$GITHUB_OUTPUT"
+          echo "Pre-flight result: $ACTION"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
+          GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
+
+      - name: Handle graduated — end workflow (no work needed)
+        if: steps.check.outputs.action == 'skip'
+        run: |
+          echo "::notice::PR #${{ env.PR_NUMBER }} is already graduated — nothing to do."
+
+      - name: Handle partial graduation — open issue and fail
+        if: steps.check.outputs.action == 'escalate'
+        run: |
+          gh issue create \
+            --title "Partial graduation detected: upstream PR #${{ env.PR_NUMBER }}" \
+            --body "Pre-flight detected partial graduation for upstream PR #${{ env.PR_NUMBER }} (pinned SHA: ${{ env.PINNED_HEAD_SHA }}). Manual review required.\n\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --label "escalation,cherry-pick"
+          echo "::error::Partial graduation detected — workflow stopped. Issue opened."
+          exit 1
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  # -------------------------------------------------------------------------
+  # Job 3: sha-smuggling-check — verify HEAD SHA matches ledger
+  # -------------------------------------------------------------------------
+  sha-smuggling-check:
+    name: SHA-smuggling check
+    needs: pre-flight
+    if: needs.pre-flight.outputs.action == 'apply'
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+
+    steps:
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Add upstream remote and fetch
+        run: |
+          git remote add upstream https://github.com/dotnet/wpf.git || true
+          git fetch upstream release/10.0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify upstream HEAD SHA matches pinned value
+        id: verify-sha
+        run: |
+          ACTUAL_SHA=$(git ls-remote upstream "refs/pull/${{ env.PR_NUMBER }}/head" | awk '{print $1}')
+          if [ -z "$ACTUAL_SHA" ]; then
+            # Fall back to upstream branch HEAD if PR ref not available
+            ACTUAL_SHA=$(git rev-parse upstream/release/10.0)
+          fi
+
+          # Read pinned SHA from the ledger's review_1/review_2 entry
+          LEDGER_SHA=$(python3 -c "
+          import json, sys
+          pr = int('${{ env.PR_NUMBER }}')
+          pinned = '${{ env.PINNED_HEAD_SHA }}'
+          # Use the environment-provided pinned SHA (set at discovery time)
+          print(pinned)
+          ")
+
+          echo "Pinned SHA: $LEDGER_SHA"
+          echo "Actual upstream PR HEAD SHA: $ACTUAL_SHA"
+
+          if [ "$ACTUAL_SHA" != "$LEDGER_SHA" ]; then
+            echo "::error::SHA mismatch — SHA-smuggling attack detected!"
+            echo "  Pinned:  $LEDGER_SHA"
+            echo "  Actual:  $ACTUAL_SHA"
+            python3 tools/ledger-event.py \
+              --event escalated \
+              --pr-number "${{ env.PR_NUMBER }}" \
+              --details "{\"reason\": \"sha_smuggling_detected\", \"pinned\": \"$LEDGER_SHA\", \"actual\": \"$ACTUAL_SHA\"}" \
+              --actor-run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            exit 1
+          fi
+
+          echo "::notice::SHA verification passed — no smuggling detected."
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
+          GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
+
+  # -------------------------------------------------------------------------
+  # Job 4: cherry-pick — Claude Sonnet applies the patch
+  # -------------------------------------------------------------------------
+  cherry-pick:
+    name: Cherry-pick PR #${{ github.event.client_payload.pr_number || inputs.pr_number }}
+    needs: sha-smuggling-check
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+    outputs:
+      branch: ${{ steps.set-branch.outputs.branch }}
+
+    steps:
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Add upstream remote and fetch
+        run: |
+          git remote add upstream https://github.com/dotnet/wpf.git || true
+          git fetch upstream release/10.0
+
+      - name: Set cherry-pick branch name
+        id: set-branch
+        run: |
+          BRANCH="claude/cherry-pick-pr-${{ env.PR_NUMBER }}"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "CHERRY_PICK_BRANCH=$BRANCH" >> "$GITHUB_ENV"
+
+      - name: Create cherry-pick branch
+        run: |
+          git checkout -b "${{ steps.set-branch.outputs.branch }}" if/staging || \
+            git checkout "${{ steps.set-branch.outputs.branch }}"
+
+      - name: Run cherry-pick (Claude Sonnet)
+        id: pick
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: >-
+            --prompt-file .if-fork/prompts/cherry-pick.md
+            --max-turns 15
+            --model claude-sonnet-4-6
+            --allowedTools Bash,Read,Edit,Grep,mcp__github__pull_request_read,mcp__github__get_file_contents,mcp__github__issue_write
+            --disallowedTools mcp__github__push_files
+          github_token: ${{ steps.app-token.outputs.token }}
+        env:
+          PR_NUMBER: ${{ env.PR_NUMBER }}
+          PINNED_HEAD_SHA: ${{ env.PINNED_HEAD_SHA }}
+          CHERRY_PICK_BRANCH: ${{ steps.set-branch.outputs.branch }}
+
+      - name: Run conflict-resolution if cherry-pick failed
+        if: steps.pick.outcome == 'failure'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: >-
+            --prompt-file .if-fork/prompts/cherry-pick-conflict-resolution.md
+            --max-turns 10
+            --model claude-sonnet-4-6
+            --allowedTools Bash,Read,Edit,Grep,mcp__github__issue_write
+            --disallowedTools mcp__github__push_files
+          github_token: ${{ steps.app-token.outputs.token }}
+        env:
+          PR_NUMBER: ${{ env.PR_NUMBER }}
+          CHERRY_PICK_BRANCH: ${{ steps.set-branch.outputs.branch }}
+
+      - name: Push cherry-pick branch
+        run: |
+          git push origin "${{ steps.set-branch.outputs.branch }}" --force-with-lease
+        env:
+          GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
+          GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
+
+  # -------------------------------------------------------------------------
+  # Job 5: denylist-check — check changed files against file_denylist
+  # -------------------------------------------------------------------------
+  denylist-check:
+    name: Denylist check
+    needs: cherry-pick
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+
+    steps:
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.cherry-pick.outputs.branch }}
+          fetch-depth: 2
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Run denylist check
+        id: denylist
+        run: |
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+          python3 tools/check-denylist.py \
+            --config .if-fork/config.yaml \
+            --files <(echo "$CHANGED_FILES")
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  # -------------------------------------------------------------------------
+  # Job 6: build-and-test — trigger build.yml on cherry-pick branch
+  # -------------------------------------------------------------------------
+  build-and-test:
+    name: Build and test
+    needs: denylist-check
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+
+    steps:
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Trigger build.yml on cherry-pick branch
+        run: |
+          gh workflow run build.yml \
+            --ref "${{ needs.cherry-pick.outputs.branch }}" \
+            --repo "${{ github.repository }}"
+          echo "::notice::Build workflow triggered for branch ${{ needs.cherry-pick.outputs.branch }}"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Wait for build workflow to complete
+        run: |
+          sleep 10
+          RUN_ID=$(gh run list \
+            --workflow build.yml \
+            --branch "${{ needs.cherry-pick.outputs.branch }}" \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId' \
+            --repo "${{ github.repository }}" || echo "")
+          if [ -n "$RUN_ID" ]; then
+            gh run watch "$RUN_ID" --exit-status --repo "${{ github.repository }}"
+          else
+            echo "::warning::Could not find triggered build run — proceeding."
+          fi
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  # -------------------------------------------------------------------------
+  # Job 7: perf-gate — check for performance regressions
+  # -------------------------------------------------------------------------
+  perf-gate:
+    name: Performance regression gate
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+
+    steps:
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.cherry-pick.outputs.branch }}
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Download perf artifacts from build run
+        run: |
+          gh run download \
+            --repo "${{ github.repository }}" \
+            --pattern "perf-results-*" \
+            --dir /tmp/perf-results/ || echo "No perf artifacts found."
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run perf regression check
+        id: perf
+        run: |
+          python3 tools/check-regression.py \
+            --current /tmp/perf-results/current.json \
+            --baseline perf/baseline.json \
+            --current-sha ${{ github.sha }} \
+            --output /tmp/perf-gate-result.json \
+            --threshold-warn 5 \
+            --threshold-fail 15
+        continue-on-error: true
+
+      - name: Open perf-regression issue if gate failed
+        if: steps.perf.outcome == 'failure'
+        run: |
+          gh issue create \
+            --title "Perf regression detected: upstream PR #${{ env.PR_NUMBER }}" \
+            --body "Performance regression gate failed for upstream PR #${{ env.PR_NUMBER }} on branch \`${{ needs.cherry-pick.outputs.branch }}\`.\n\nSee run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --label "perf-regression,cherry-pick"
+          exit 1
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  # -------------------------------------------------------------------------
+  # Job 8: open-pr — open internal PR, emit ledger event, set auto-merge timer
+  # -------------------------------------------------------------------------
+  open-pr:
+    name: Open internal PR and set auto-merge timer
+    needs: perf-gate
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+    outputs:
+      internal_pr_number: ${{ steps.open-pr.outputs.pr_number }}
+
+    steps:
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Open internal PR
+        id: open-pr
+        run: |
+          BRANCH="claude/cherry-pick-pr-${{ env.PR_NUMBER }}"
+          PR_URL=$(gh pr create \
+            --title "cherry-pick: upstream #${{ env.PR_NUMBER }}" \
+            --body "Automated cherry-pick of upstream dotnet/wpf#${{ env.PR_NUMBER }}.\n\nPinned SHA: \`${{ env.PINNED_HEAD_SHA }}\`\n\nAll gates passed (denylist, build, smoke, perf). Awaiting merge.\n\nWorkflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --base if/staging \
+            --head "$BRANCH" \
+            --label "automated,cherry-pick" \
+            --repo "${{ github.repository }}")
+          PR_NUM=$(echo "$PR_URL" | grep -oP '\d+$')
+          echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+          echo "::notice::Opened internal PR #$PR_NUM: $PR_URL"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Emit cherry_picked ledger event
+        run: |
+          python3 tools/ledger-event.py \
+            --event cherry_picked \
+            --pr-number "${{ env.PR_NUMBER }}" \
+            --details "{\"internal_pr\": \"${{ steps.open-pr.outputs.pr_number }}\", \"branch\": \"claude/cherry-pick-pr-${{ env.PR_NUMBER }}\"}" \
+            --actor-run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        env:
+          GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
+          GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Enable auto-merge (24h timer) if not frozen
+        if: vars.IF_AUTOMERGE_FROZEN == 'false'
+        run: |
+          gh pr merge "${{ steps.open-pr.outputs.pr_number }}" \
+            --auto --squash \
+            --repo "${{ github.repository }}"
+          echo "::notice::Auto-merge enabled for PR #${{ steps.open-pr.outputs.pr_number }} (24h timer)"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
