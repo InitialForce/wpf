@@ -428,7 +428,9 @@ def test_ci_gpg_failure_exits_nonzero(tmp_path: Path) -> None:
     call_results = [add_ok, signed_fail]
 
     def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:  # type: ignore[type-arg]
-        result = call_results.pop(0) if call_results else subprocess.CompletedProcess(cmd, 0, "", "")
+        result = (
+            call_results.pop(0) if call_results else subprocess.CompletedProcess(cmd, 0, "", "")
+        )
         if kwargs.get("check") and result.returncode != 0:
             raise subprocess.CalledProcessError(result.returncode, cmd)
         return result  # type: ignore[return-value]
@@ -458,7 +460,9 @@ def test_non_ci_gpg_failure_falls_back(
         stdout="",
         stderr="gpg: signing failed: No secret key",
     )
-    unsigned_ok = subprocess.CompletedProcess(args=["git", "commit"], returncode=0, stdout="", stderr="")
+    unsigned_ok = subprocess.CompletedProcess(
+        args=["git", "commit"], returncode=0, stdout="", stderr=""
+    )
 
     call_results = [add_ok, signed_fail, unsigned_ok]
 
