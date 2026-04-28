@@ -488,7 +488,8 @@ def test_publish_needs_includes_build(workflow: dict) -> None:
     jobs = workflow.get("jobs", {})
     needs = _job_needs_list(jobs.get("publish", {}))
     assert "build" in needs, (
-        f"publish job needs must include 'build' so nuget_version output is accessible; got: {needs}"
+        f"publish job needs must include 'build' so nuget_version output is accessible; "
+        f"got: {needs}"
     )
 
 
@@ -513,7 +514,10 @@ def test_verify_tag_errors_on_unsigned(workflow: dict) -> None:
     assert "exit 1" in combined, (
         "verify-tag must call 'exit 1' when tag signature fails (no silent warning fallback)"
     )
-    assert "::warning::Tag" not in combined and "is not signed or signature cannot be verified" not in combined, (
+    assert (
+        "::warning::Tag" not in combined
+        and "is not signed or signature cannot be verified" not in combined
+    ), (
         "verify-tag must not silently warn about unsigned tags — it must error and exit"
     )
 
@@ -536,7 +540,10 @@ def test_verify_tag_validates_format(workflow: dict) -> None:
     jobs = workflow.get("jobs", {})
     verify_job = jobs.get("verify-tag", {})
     combined = _steps_combined_run(verify_job)
-    assert "if-10" in combined and ("=~" in combined or "regex" in combined.lower() or "Invalid tag format" in combined), (
+    assert (
+        "if-10" in combined
+        and ("=~" in combined or "regex" in combined.lower() or "Invalid tag format" in combined)
+    ), (
         "verify-tag must validate tag format (regex check for if-10.0.* pattern)"
     )
 
