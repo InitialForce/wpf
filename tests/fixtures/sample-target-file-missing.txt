@@ -1,0 +1,19 @@
+namespace Foo
+{
+    public class Bar
+    {
+        private readonly Dictionary<string, object> _cache;
+        private bool _isInitialized = false;
+
+        public Bar()
+        {
+        }
+
+        public void Initialize()
+        {
+            if (_isInitialized) return;
+            _cache.Clear();
+            _isInitialized = true;
+        }
+    }
+}
