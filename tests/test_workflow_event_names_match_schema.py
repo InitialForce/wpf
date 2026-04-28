@@ -93,8 +93,24 @@ def test_every_event_in_workflows_is_in_schema() -> None:
 # emits it yet (e.g. operator-only or future-use events), with a brief comment.
 _UNUSED_EVENTS_OK: frozenset[str] = frozenset(
     {
-        # Example:
-        # "some_future_event",  # planned for Q3 operator tooling
+        # Operator-only / manual ops events — emitted by humans via ledger-event.py CLI,
+        # not by any workflow YAML. Documented in docs/operator-runbook.md.
+        "automerge_frozen",       # operator toggles IF_AUTOMERGE_FROZEN repo variable
+        "automerge_thawed",       # operator unfreezes after 4-PR validation passes
+        "autonomy_paused",        # operator/kill-switch pause; unpause emits autonomy_resumed
+        # Future-use: emitted by review/build/perf/smoke gates wired in Phase-0/1
+        # (per Bootstrap Status: wpf-2hh, wpf-1pt, wpf-2xo). Workflows currently
+        # use placeholder steps and don't yet call ledger-event for these.
+        "approved",               # emitted by pr-review.yml after 2x review verdicts merged
+        "rejected",               # emitted by pr-review.yml on review disagreement
+        "build_passed",           # emitted by build.yml per arch (Phase-0 wpf-1pt)
+        "build_failed",           # emitted by build.yml per arch on failure
+        "smoke_passed",           # emitted by smoke job after 22-scenario harness wired
+        "smoke_failed",           # emitted by smoke job on failure
+        "perf_passed",            # emitted by perf job after BenchmarkDotNet wired
+        "perf_failed",            # emitted by perf job on regression
+        "graduated_upstream",     # emitted by upstream-stable-adoption when patch lands
+        "reverted",               # emitted on emergency revert path
     }
 )
 
