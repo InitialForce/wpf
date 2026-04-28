@@ -11,13 +11,15 @@
     Two targets:
       RemoveRuntimeWpfAssets  — strips Microsoft WPF DLLs from all MSBuild copy lists
                                 (RuntimePackAsset, ResolvedFileToPublish, ReferenceCopyLocalPaths).
+                                Conditioned on win-x64 only; for unsupported RIDs an Error
+                                is emitted to fail the build with a clear message.
       InjectIfWpfAssemblies   — copies our patched DLLs at Build+CopyFilesToOutputDirectory,
                                 firing on every F5 inner-loop build (msquic precedent).
 
     Windows-only restriction:
-      This package only ships win-x64 DLLs. On non-Windows or non-x64 RIDs, Target 2
-      emits a warning and skips the Copy tasks. Target 1 still runs unconditionally so
-      that Microsoft's DLLs are not silently doubled.
+      This package only ships win-x64 DLLs. On any other RID (win-arm64, linux-x64, etc.)
+      Target 1 emits a build Error so consumers get an actionable message instead of a
+      silently broken deployment. Either remove the package reference or target win-x64.
 
     $(MSBuildThisFileDirectory) resolves to buildTransitive/ inside the expanded package
     cache. The relative path "..\runtimes\..." reaches the runtimes/ subtree.
@@ -29,10 +31,21 @@
       >$(MSBuildThisFileDirectory)..\runtimes\win-x64\lib\net10.0-windows\</_IFWpfRuntimeDir>
   </PropertyGroup>
 
+  <!-- Guard: fail the build with an actionable message if the consumer is not on a supported RID.
+       An empty $(RuntimeIdentifier) means the project has not set a RID (framework-dependent
+       publish), in which case we also error — WPF DLL replacement requires a concrete RID. -->
+  <Target Name="ErrorIfUnsupportedRid"
+          BeforeTargets="RemoveRuntimeWpfAssets;InjectIfWpfAssemblies"
+          Condition="'$(RuntimeIdentifier)' != 'win-x64' and '$(RuntimeIdentifier)' != ''">
+    <Error Text="InitialForce.WPF only supports win-x64 in v1; either remove the package reference or target win-x64. To use upstream Microsoft WPF for non-x64, do not reference InitialForce.WPF. (Current RuntimeIdentifier='$(RuntimeIdentifier)')" />
+  </Target>
+
   <!-- Target 1: Remove Microsoft WPF DLLs from all MSBuild copy lists (publish + restore paths).
-       Runs unconditionally regardless of RID — we do not want double DLLs on any platform. -->
+       Conditioned on win-x64 only. For unsupported RIDs, the ErrorIfUnsupportedRid target
+       (above) emits a build Error before this target would run. -->
   <Target Name="RemoveRuntimeWpfAssets"
-          AfterTargets="ResolveRuntimePackAssets;ResolveLockFileCopyLocalFiles">
+          AfterTargets="ResolveRuntimePackAssets;ResolveLockFileCopyLocalFiles"
+          Condition="'$(RuntimeIdentifier)' == 'win-x64'">
     <ItemGroup>
       <!-- PresentationCore -->
       <RuntimePackAsset Remove="@(RuntimePackAsset)"
@@ -73,22 +86,18 @@
   <Target Name="InjectIfWpfAssemblies"
           AfterTargets="Build;CopyFilesToOutputDirectory">
 
-    <!-- Warn if consumer is not targeting Windows. -->
-    <Warning Text="InitialForce.WPF: package only ships win-x64 DLLs. Current RuntimeIdentifier='$(RuntimeIdentifier)'. Patched DLLs will NOT be injected on non-Windows or non-x64 targets."
-             Condition="'$(RuntimeIdentifier)' != 'win-x64' and '$(RuntimeIdentifier)' != 'win-arm64' and '$(RuntimeIdentifier)' != ''" />
-
     <!-- Only copy on win-x64 (arm64 support deferred to a future release; see known-limitations.md). -->
     <Copy SourceFiles="$(_IFWpfRuntimeDir)PresentationCore.dll"
-          DestinationFolder="$(OutDir)" OverwriteReadOnlyFiles="true"
+          DestinationFolder="$(OutDir)"
           Condition="'$(RuntimeIdentifier)' == 'win-x64'" />
     <Copy SourceFiles="$(_IFWpfRuntimeDir)PresentationFramework.dll"
-          DestinationFolder="$(OutDir)" OverwriteReadOnlyFiles="true"
+          DestinationFolder="$(OutDir)"
           Condition="'$(RuntimeIdentifier)' == 'win-x64'" />
     <Copy SourceFiles="$(_IFWpfRuntimeDir)WindowsBase.dll"
-          DestinationFolder="$(OutDir)" OverwriteReadOnlyFiles="true"
+          DestinationFolder="$(OutDir)"
           Condition="'$(RuntimeIdentifier)' == 'win-x64'" />
     <Copy SourceFiles="$(_IFWpfRuntimeDir)System.Xaml.dll"
-          DestinationFolder="$(OutDir)" OverwriteReadOnlyFiles="true"
+          DestinationFolder="$(OutDir)"
           Condition="'$(RuntimeIdentifier)' == 'win-x64'" />
 
     <!-- Also ensure they appear in ResolvedFileToPublish for self-contained publish. -->
