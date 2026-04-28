@@ -1,0 +1,43 @@
+name: Operator Follow-Up
+description: >
+  General follow-up task emitted by the autonomous pipeline when a situation requires
+  human attention but is not covered by a more specific issue template. Examples:
+  non-fast-forward rebase detected, unexpected workflow output, policy file inconsistency.
+labels:
+  - operator-followup
+  - needs-human
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue was opened automatically by one of the autonomous pipeline workflows.
+        It requires a human operator to review the situation and take the suggested action.
+
+  - type: input
+    id: trigger_workflow
+    attributes:
+      label: "Triggering workflow"
+      description: "The name of the workflow that opened this issue."
+      placeholder: "e.g. nightly-rebase.yml"
+    validations:
+      required: true
+
+  - type: input
+    id: run_link
+    attributes:
+      label: "Link to workflow run"
+      description: "URL to the specific GitHub Actions run that opened this issue."
+      placeholder: "https://github.com/InitialForce/wpf/actions/runs/..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggested_action
+    attributes:
+      label: "Suggested action"
+      description: >
+        What the workflow recommends the operator do. Read this carefully before acting —
+        the workflow cannot always determine the correct resolution automatically.
+      placeholder: "Describe the situation and what needs to be done."
+    validations:
+      required: true

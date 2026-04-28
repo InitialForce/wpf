@@ -1,0 +1,26 @@
+# Sample config fixture for test_check_denylist.py
+# Mirrors the structure of .if-fork/config.yaml with a representative
+# subset of file_denylist patterns covering all denylist families.
+schema_version: 1
+
+file_denylist:
+  # supply chain
+  - eng/Signing.props
+  - eng/Publishing.props
+  - eng/Versions.props
+  - eng/Version.Details.xml
+  - NuGet.config
+  - global.json
+  - azure-pipelines.yml
+  - azure-pipelines1.yml
+  - .github/**
+  - .if-fork/config.yaml
+  - .if-fork/prompts/**
+  # high-risk WPF source
+  - src/Microsoft.DotNet.Wpf/src/PresentationFramework/System/Windows/Controls/Primitives/ScrollBar.cs
+  - src/Microsoft.DotNet.Wpf/src/PresentationFramework/System/Windows/Controls/Primitives/Track.cs
+  - src/Microsoft.DotNet.Wpf/src/PresentationFramework/System/Windows/Controls/Primitives/Popup.cs
+  - src/Microsoft.DotNet.Wpf/src/PresentationFramework/System/Windows/Controls/Primitives/LayoutInformation.cs
+  - src/Microsoft.DotNet.Wpf/src/PresentationCore/System/Windows/Media/Imaging/**
+  - src/Microsoft.DotNet.Wpf/src/WpfGfx/**
+  - src/Microsoft.DotNet.Wpf/src/PenImc/**
