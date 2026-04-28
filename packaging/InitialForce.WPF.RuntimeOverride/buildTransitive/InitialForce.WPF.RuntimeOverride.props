@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <!--
+    InitialForce.WPF.RuntimeOverride.props
+    =======================================
+    Evaluated early (props phase) to establish default property values.
+
+    Consumers opt in to selective assembly replacement by setting IF_OverrideAssemblies
+    before or after the PackageReference. Example:
+
+        <PropertyGroup>
+          <IF_OverrideAssemblies>PresentationCore;PresentationFramework</IF_OverrideAssemblies>
+        </PropertyGroup>
+        <ItemGroup>
+          <PackageReference Include="InitialForce.WPF.RuntimeOverride" Version="..." />
+        </ItemGroup>
+
+    If IF_OverrideAssemblies is left empty (the default), NO assemblies are replaced.
+    This is intentional: the package is a targeted override tool, not a bulk replacement.
+    Use InitialForce.WPF instead if you want to replace all four WPF DLLs.
+
+    Supported assembly names (case-sensitive):
+      PresentationCore
+      PresentationFramework
+      WindowsBase
+      System.Xaml
+  -->
+
+  <PropertyGroup>
+    <!--
+      IF_OverrideAssemblies — semicolon-separated list of WPF assembly names to replace.
+      Default: empty (no replacements). Set this in your project before the PackageReference
+      or in a Directory.Build.props to opt specific assemblies into override.
+
+      Example:
+        <IF_OverrideAssemblies>PresentationCore;WindowsBase</IF_OverrideAssemblies>
+    -->
+    <IF_OverrideAssemblies Condition="'$(IF_OverrideAssemblies)' == ''"></IF_OverrideAssemblies>
+
+    <!-- Path to the patched DLLs inside the expanded package cache.
+         $(MSBuildThisFileDirectory) resolves to buildTransitive/; relative path reaches runtimes/. -->
+    <_IFWpfRORuntimeDir
+      >$(MSBuildThisFileDirectory)..\runtimes\win-x64\lib\net10.0-windows\</_IFWpfRORuntimeDir>
+  </PropertyGroup>
+
+</Project>
