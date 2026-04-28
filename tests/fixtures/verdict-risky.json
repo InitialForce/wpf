@@ -1,0 +1,8 @@
+{
+  "verdict": "escalate-to-human",
+  "confidence": 0.55,
+  "rationale": "The change alters WeakReference lifetime semantics in an undocumented way. The surrounding code relies on GC pressure to trigger collection, and this refactor may delay or prevent that. No test covers the concurrent path. Cannot confirm safety without deeper WPF GC integration knowledge.",
+  "hard_fail_pattern": null,
+  "files_reviewed": ["WeakEventManager.cs", "WeakEventTable.cs"],
+  "reviewer_id": "claude-opus-4-7-review-2"
+}
