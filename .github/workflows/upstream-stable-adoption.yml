@@ -1,0 +1,266 @@
+# .github/workflows/upstream-stable-adoption.yml
+name: Upstream Stable Adoption
+
+on:
+  repository_dispatch:
+    types: [upstream-stable-released]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream stable tag to adopt (e.g. v10.0.104)"
+        required: true
+        type: string
+
+concurrency:
+  group: release-branch-write
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+env:
+  IF_REPO_ROOT: ${{ github.workspace }}
+  UPSTREAM_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.client_payload.tag }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: autonomy kill-switch gate
+  # ---------------------------------------------------------------------------
+  gate:
+    name: Autonomy Gate
+    uses: ./.github/workflows/autonomy-check.yml
+    with:
+      requested_action: upstream-stable-adoption
+      bypass_for_human_dispatch: true
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Verify the upstream tag exists and is GPG-signed (best-effort)
+  # ---------------------------------------------------------------------------
+  verify-tag:
+    name: Verify upstream tag ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.client_payload.tag }}
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+
+    outputs:
+      tag_sha: ${{ steps.fetch.outputs.tag_sha }}
+      tag_verified: ${{ steps.fetch.outputs.tag_verified }}
+
+    steps:
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Add upstream remote and fetch tag
+        id: fetch
+        run: |
+          git remote add upstream https://github.com/dotnet/wpf.git || true
+          git fetch upstream --tags
+
+          TAG="${{ env.UPSTREAM_TAG }}"
+
+          # Verify tag exists
+          if ! git tag --list "$TAG" | grep -qxF "$TAG"; then
+            echo "::error::Tag '$TAG' does not exist on upstream dotnet/wpf."
+            exit 1
+          fi
+
+          TAG_SHA=$(git rev-list -n 1 "refs/tags/$TAG")
+          echo "tag_sha=$TAG_SHA" >> "$GITHUB_OUTPUT"
+          echo "::notice::Tag '$TAG' found at $TAG_SHA"
+
+          # Attempt GPG signature verification (warn-only if not enforced)
+          TAG_TYPE=$(git cat-file -t "refs/tags/$TAG")
+          if [ "$TAG_TYPE" = "tag" ]; then
+            if git verify-tag "$TAG" 2>&1; then
+              echo "tag_verified=true" >> "$GITHUB_OUTPUT"
+              echo "::notice::Tag '$TAG' GPG signature is valid."
+            else
+              echo "tag_verified=unsigned_or_unverifiable" >> "$GITHUB_OUTPUT"
+              echo "::warning::Tag '$TAG' GPG signature could not be verified (signing may not be enforced for dotnet/wpf tags). Continuing."
+            fi
+          else
+            # Lightweight tag — no signature object
+            echo "tag_verified=lightweight" >> "$GITHUB_OUTPUT"
+            echo "::warning::Tag '$TAG' is a lightweight tag (no GPG signature object). Continuing."
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Fast-forward if/mirror/release/10.0 to the new upstream tag
+  # ---------------------------------------------------------------------------
+  promote-mirror:
+    name: Promote mirror branch to ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.client_payload.tag }}
+    needs: [gate, verify-tag]
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+
+    outputs:
+      mirror_sha: ${{ steps.promote.outputs.mirror_sha }}
+
+    steps:
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Add upstream remote and fetch
+        run: |
+          git remote add upstream https://github.com/dotnet/wpf.git || true
+          git fetch upstream --tags
+
+      - name: Fast-forward mirror branch
+        id: promote
+        run: |
+          TAG="${{ env.UPSTREAM_TAG }}"
+          MIRROR_BRANCH="if/mirror/release/10.0"
+          TAG_SHA="${{ needs.verify-tag.outputs.tag_sha }}"
+
+          # Fetch the mirror branch from origin
+          git fetch origin "$MIRROR_BRANCH" || {
+            echo "::error::Mirror branch '$MIRROR_BRANCH' not found on origin. Cannot promote."
+            exit 1
+          }
+
+          CURRENT_MIRROR_SHA=$(git rev-parse "origin/$MIRROR_BRANCH")
+
+          # Check that the tag is a descendant of the current mirror tip (fast-forward only)
+          if ! git merge-base --is-ancestor "$CURRENT_MIRROR_SHA" "$TAG_SHA"; then
+            echo "::error::Cannot fast-forward '$MIRROR_BRANCH' to '$TAG' ($TAG_SHA)."
+            echo "::error::Current mirror tip ($CURRENT_MIRROR_SHA) is not an ancestor of the tag."
+            echo "::error::This indicates a non-fast-forward condition. Manual intervention required."
+
+            # Open a blocking issue for operator attention
+            gh issue create \
+              --title "BLOCKER: Non-FF condition on $MIRROR_BRANCH for tag $TAG" \
+              --body "## Mirror Promotion Blocked
+
+            The workflow attempting to adopt upstream tag \`$TAG\` detected a **non-fast-forward condition** on \`$MIRROR_BRANCH\`.
+
+            | Field | Value |
+            |-------|-------|
+            | Target tag | \`$TAG\` |
+            | Tag SHA | \`$TAG_SHA\` |
+            | Current mirror tip | \`$CURRENT_MIRROR_SHA\` |
+            | Workflow run | ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} |
+
+            **Action required:** Manually inspect the mirror branch and resolve the divergence before re-running this workflow." \
+              --label "blocker,operator-action-required" \
+              --repo "${{ github.repository }}"
+
+            exit 1
+          fi
+
+          # Perform the fast-forward push
+          git checkout -b "$MIRROR_BRANCH" "origin/$MIRROR_BRANCH"
+          git merge --ff-only "refs/tags/$TAG"
+          git push origin "$MIRROR_BRANCH"
+
+          echo "mirror_sha=$TAG_SHA" >> "$GITHUB_OUTPUT"
+          echo "::notice::Mirror branch '$MIRROR_BRANCH' fast-forwarded to '$TAG' ($TAG_SHA)."
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
+          GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
+
+  # ---------------------------------------------------------------------------
+  # Job 4: Trigger the nightly-rebase workflow against the new mirror
+  # ---------------------------------------------------------------------------
+  trigger-rebase:
+    name: Trigger nightly rebase against ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.client_payload.tag }}
+    needs: [gate, promote-mirror]
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+
+    steps:
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Dispatch nightly-rebase workflow
+        run: |
+          TAG="${{ env.UPSTREAM_TAG }}"
+          gh api repos/${{ github.repository }}/dispatches \
+            --field event_type=nightly-rebase \
+            --field "client_payload[trigger]=upstream-stable-adoption" \
+            --field "client_payload[upstream_tag]=$TAG" \
+            --field "client_payload[mirror_sha]=${{ needs.promote-mirror.outputs.mirror_sha }}"
+          echo "::notice::Dispatched nightly-rebase event for tag '$TAG'."
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  # ---------------------------------------------------------------------------
+  # Job 5: Open an operator-followup issue summarising the version bump
+  # ---------------------------------------------------------------------------
+  notify:
+    name: Open operator follow-up issue
+    needs: [gate, verify-tag, promote-mirror, trigger-rebase]
+    if: always() && needs.gate.outputs.proceed == 'true' && needs.promote-mirror.result == 'success'
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+
+    steps:
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Open operator follow-up issue
+        run: |
+          TAG="${{ env.UPSTREAM_TAG }}"
+          TAG_SHA="${{ needs.verify-tag.outputs.tag_sha }}"
+          TAG_VERIFIED="${{ needs.verify-tag.outputs.tag_verified }}"
+          REBASE_TRIGGERED="${{ needs.trigger-rebase.result }}"
+          MIRROR_SHA="${{ needs.promote-mirror.outputs.mirror_sha }}"
+
+          gh issue create \
+            --title "operator-followup: Upstream tag $TAG adopted — rebase in progress" \
+            --body "## Upstream Version Bump — Operator Summary
+
+          The \`upstream-stable-adoption\` workflow has successfully adopted a new upstream stable tag.
+
+          | Field | Value |
+          |-------|-------|
+          | Upstream tag | \`$TAG\` |
+          | Tag commit SHA | \`$TAG_SHA\` |
+          | Tag GPG status | \`$TAG_VERIFIED\` |
+          | Mirror branch | \`if/mirror/release/10.0\` |
+          | Mirror updated to | \`$MIRROR_SHA\` |
+          | Rebase trigger | \`$REBASE_TRIGGERED\` |
+          | Workflow run | ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} |
+
+          ## Next Steps for Operator
+
+          - [ ] Monitor the \`nightly-rebase\` run triggered by this workflow for conflict-resolution results.
+          - [ ] Review any Claude-authored rebase PRs opened against \`if/release/10.0\`.
+          - [ ] Approve and merge clean rebase PRs once build + smoke gates are green.
+          - [ ] If conflicts were escalated, review the escalation issue and resolve manually.
+          - [ ] After the rebase lands, verify \`perf/series.jsonl\` shows no regressions.
+          - [ ] Close this issue once the fork is stable on \`$TAG\`." \
+            --label "operator-followup,upstream-adoption" \
+            --repo "${{ github.repository }}"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
