@@ -37,6 +37,8 @@ jobs:
   gate:
     name: Autonomy gate
     uses: ./.github/workflows/autonomy-check.yml
+    with:
+      requested_action: cherry-pick
 
   # -------------------------------------------------------------------------
   # Job 2: pre-flight — graduation check before we apply anything
@@ -44,6 +46,7 @@ jobs:
   pre-flight:
     name: Pre-flight graduation check
     needs: gate
+    if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     environment: bot-credentials
     outputs:
@@ -97,6 +100,13 @@ jobs:
       - name: Handle partial graduation — open issue and fail
         if: steps.check.outputs.action == 'escalate'
         run: |
+          python tools/ledger-event.py \
+            --event pre_flight_failed \
+            --pr-number "${{ env.PR_NUMBER }}" \
+            --head-sha "${{ env.PINNED_HEAD_SHA }}" \
+            --actor "${{ github.actor }}" \
+            --details-json '{"reason": "partial_graduation_detected", "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
+            --push
           gh issue create \
             --title "Partial graduation detected: upstream PR #${{ env.PR_NUMBER }}" \
             --body "Pre-flight detected partial graduation for upstream PR #${{ env.PR_NUMBER }} (pinned SHA: ${{ env.PINNED_HEAD_SHA }}). Manual review required.\n\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
@@ -105,6 +115,8 @@ jobs:
           exit 1
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
+          GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
 
   # -------------------------------------------------------------------------
   # Job 3: sha-smuggling-check — verify HEAD SHA matches ledger
@@ -112,7 +124,7 @@ jobs:
   sha-smuggling-check:
     name: SHA-smuggling check
     needs: pre-flight
-    if: needs.pre-flight.outputs.action == 'apply'
+    if: needs.gate.outputs.proceed == 'true' && needs.pre-flight.outputs.action == 'apply'
     runs-on: ubuntu-latest
     environment: bot-credentials
 
@@ -139,40 +151,71 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Verify upstream HEAD SHA matches pinned value
+      - name: Verify upstream HEAD SHA matches ledger
         id: verify-sha
         run: |
-          ACTUAL_SHA=$(git ls-remote upstream "refs/pull/${{ env.PR_NUMBER }}/head" | awk '{print $1}')
-          if [ -z "$ACTUAL_SHA" ]; then
-            # Fall back to upstream branch HEAD if PR ref not available
-            ACTUAL_SHA=$(git rev-parse upstream/release/10.0)
-          fi
-
-          # Read pinned SHA from the ledger's review_1/review_2 entry
-          LEDGER_SHA=$(python3 -c "
+          # Read the most recent review_1 or review_2 entry for this PR from the ledger.
+          # The ledger is a JSONL file at .if-fork/patch-ledger.jsonl.
+          # If there is no review entry, we FAIL — we must not proceed without one.
+          LEDGER_SHA=$(python3 - <<'PYEOF'
           import json, sys
-          pr = int('${{ env.PR_NUMBER }}')
-          pinned = '${{ env.PINNED_HEAD_SHA }}'
-          # Use the environment-provided pinned SHA (set at discovery time)
-          print(pinned)
-          ")
 
-          echo "Pinned SHA: $LEDGER_SHA"
-          echo "Actual upstream PR HEAD SHA: $ACTUAL_SHA"
+          pr = int("${{ env.PR_NUMBER }}")
+          ledger_path = ".if-fork/patch-ledger.jsonl"
 
-          if [ "$ACTUAL_SHA" != "$LEDGER_SHA" ]; then
-            echo "::error::SHA mismatch — SHA-smuggling attack detected!"
-            echo "  Pinned:  $LEDGER_SHA"
-            echo "  Actual:  $ACTUAL_SHA"
-            python3 tools/ledger-event.py \
+          review_sha = None
+          try:
+              with open(ledger_path) as fh:
+                  for line in fh:
+                      line = line.strip()
+                      if not line:
+                          continue
+                      entry = json.loads(line)
+                      if entry.get("pr_number") == pr and entry.get("event") in ("review_1", "review_2"):
+                          review_sha = entry.get("head_sha")
+          except FileNotFoundError:
+              print("ERROR: ledger file not found", file=sys.stderr)
+              sys.exit(1)
+
+          if review_sha is None:
+              print("ERROR: no review_1/review_2 entry found in ledger for PR", pr, file=sys.stderr)
+              sys.exit(2)
+
+          print(review_sha)
+          PYEOF
+          )
+
+          PYEXIT=$?
+          if [ $PYEXIT -ne 0 ]; then
+            echo "::error::Ledger lookup failed (exit $PYEXIT) — no review entry found for PR #${{ env.PR_NUMBER }}. Refusing to proceed."
+            python tools/ledger-event.py \
               --event escalated \
               --pr-number "${{ env.PR_NUMBER }}" \
-              --details "{\"reason\": \"sha_smuggling_detected\", \"pinned\": \"$LEDGER_SHA\", \"actual\": \"$ACTUAL_SHA\"}" \
-              --actor-run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              --head-sha "${{ env.PINNED_HEAD_SHA }}" \
+              --actor "${{ github.actor }}" \
+              --details-json '{"reason": "sha_smuggling_detected", "cause": "no_review_entry_in_ledger"}' \
+              --push
             exit 1
           fi
 
-          echo "::notice::SHA verification passed — no smuggling detected."
+          echo "Ledger SHA: $LEDGER_SHA"
+          echo "Pinned SHA (input): ${{ env.PINNED_HEAD_SHA }}"
+
+          if [ "${{ env.PINNED_HEAD_SHA }}" != "$LEDGER_SHA" ]; then
+            echo "::error::SHA mismatch — SHA-smuggling attack detected!"
+            echo "  Ledger:  $LEDGER_SHA"
+            echo "  Pinned:  ${{ env.PINNED_HEAD_SHA }}"
+            python tools/ledger-event.py \
+              --event escalated \
+              --pr-number "${{ env.PR_NUMBER }}" \
+              --head-sha "${{ env.PINNED_HEAD_SHA }}" \
+              --actor "${{ github.actor }}" \
+              --details-json "{\"reason\": \"sha_smuggling_detected\", \"ledger_sha\": \"$LEDGER_SHA\", \"pinned_sha\": \"${{ env.PINNED_HEAD_SHA }}\"}" \
+              --push
+            exit 1
+          fi
+
+          echo "::notice::SHA verification passed — pinned SHA matches ledger."
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
@@ -184,6 +227,7 @@ jobs:
   cherry-pick:
     name: Cherry-pick PR #${{ github.event.client_payload.pr_number || inputs.pr_number }}
     needs: sha-smuggling-check
+    if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     environment: bot-credentials
     outputs:
@@ -265,6 +309,7 @@ jobs:
   denylist-check:
     name: Denylist check
     needs: cherry-pick
+    if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     environment: bot-credentials
 
@@ -279,8 +324,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.cherry-pick.outputs.branch }}
-          fetch-depth: 2
+          fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
+
+      - name: Fetch staging base
+        run: git fetch origin if/staging
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -293,7 +341,7 @@ jobs:
       - name: Run denylist check
         id: denylist
         run: |
-          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
+          CHANGED_FILES=$(git diff --name-only origin/if/staging...HEAD)
           echo "Changed files:"
           echo "$CHANGED_FILES"
           python3 tools/check-denylist.py \
@@ -308,6 +356,7 @@ jobs:
   build-and-test:
     name: Build and test
     needs: denylist-check
+    if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     environment: bot-credentials
 
@@ -319,30 +368,19 @@ jobs:
           app_id: ${{ secrets.GH_APP_ID }}
           private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
 
-      - name: Trigger build.yml on cherry-pick branch
+      - name: Trigger build.yml and capture run ID
         run: |
-          gh workflow run build.yml \
-            --ref "${{ needs.cherry-pick.outputs.branch }}" \
-            --repo "${{ github.repository }}"
-          echo "::notice::Build workflow triggered for branch ${{ needs.cherry-pick.outputs.branch }}"
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-
-      - name: Wait for build workflow to complete
-        run: |
-          sleep 10
-          RUN_ID=$(gh run list \
-            --workflow build.yml \
-            --branch "${{ needs.cherry-pick.outputs.branch }}" \
-            --limit 1 \
-            --json databaseId \
-            --jq '.[0].databaseId' \
-            --repo "${{ github.repository }}" || echo "")
-          if [ -n "$RUN_ID" ]; then
-            gh run watch "$RUN_ID" --exit-status --repo "${{ github.repository }}"
-          else
-            echo "::warning::Could not find triggered build run — proceeding."
+          BRANCH="${{ needs.cherry-pick.outputs.branch }}"
+          RUN_ID=$(gh workflow run build.yml \
+            --ref "$BRANCH" \
+            --repo "${{ github.repository }}" \
+            --json | python3 -c "import sys, json; print(json.load(sys.stdin)['id'])")
+          if [ -z "$RUN_ID" ]; then
+            echo "::error::Failed to capture build workflow run ID — cannot track build."
+            exit 1
           fi
+          echo "::notice::Build workflow triggered (run ID: $RUN_ID) for branch $BRANCH"
+          gh run watch "$RUN_ID" --exit-status --repo "${{ github.repository }}"
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
@@ -351,7 +389,8 @@ jobs:
   # -------------------------------------------------------------------------
   perf-gate:
     name: Performance regression gate
-    needs: build-and-test
+    needs: [build-and-test, cherry-pick]
+    if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     environment: bot-credentials
 
@@ -411,7 +450,8 @@ jobs:
   # -------------------------------------------------------------------------
   open-pr:
     name: Open internal PR and set auto-merge timer
-    needs: perf-gate
+    needs: [perf-gate, cherry-pick]
+    if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     environment: bot-credentials
     outputs:
@@ -454,18 +494,20 @@ jobs:
 
       - name: Emit cherry_picked ledger event
         run: |
-          python3 tools/ledger-event.py \
+          python tools/ledger-event.py \
             --event cherry_picked \
             --pr-number "${{ env.PR_NUMBER }}" \
-            --details "{\"internal_pr\": \"${{ steps.open-pr.outputs.pr_number }}\", \"branch\": \"claude/cherry-pick-pr-${{ env.PR_NUMBER }}\"}" \
-            --actor-run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            --head-sha "${{ env.PINNED_HEAD_SHA }}" \
+            --actor "${{ github.actor }}" \
+            --details-json "{\"internal_pr\": \"${{ steps.open-pr.outputs.pr_number }}\", \"branch\": \"claude/cherry-pick-pr-${{ env.PR_NUMBER }}\"}" \
+            --push
         env:
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Enable auto-merge (24h timer) if not frozen
-        if: vars.IF_AUTOMERGE_FROZEN == 'false'
+        if: vars.IF_AUTOMERGE_FROZEN != 'true'
         run: |
           gh pr merge "${{ steps.open-pr.outputs.pr_number }}" \
             --auto --squash \
