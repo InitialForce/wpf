@@ -48,7 +48,7 @@ external GitHub admin, nuget.org, or Windows-runner access.
 
 ## Hand-off recipe
 
-1. Push `/c/work/wpf-fork-impl/` to a fresh `InitialForce/wpf` GitHub repo (squash-merge optional; full history is recommended).
+1. (Already complete in commit `958b648`.) The autonomous-fork tooling overlay was pushed onto the fork's `if/main` branch.
 2. Run the Phase-0 human checklist above to set up GitHub App + branches + protection + environments + variables.
 3. Toggle `IF_AUTONOMY_ENABLED=true` once you've manually run `pr-discovery.yml` and `pr-review.yml` once each on a single test PR to validate the Claude wiring.
 4. Toggle `IF_AUTOMERGE_FROZEN=false` only after 4-PR test batch validates the cherry-pick + smoke + perf gates.
