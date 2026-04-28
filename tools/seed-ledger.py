@@ -26,12 +26,7 @@ from typing import Any
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
-_DEFAULT_INPUT = (
-    Path(__file__).parent.parent
-    / "_wpf-fork-plan"
-    / "round-2-factcheck"
-    / "h3xds1nz-all-prs.json"
-)
+_DEFAULT_INPUT = Path(__file__).parent.parent / ".if-fork" / "seed-input.json"
 _DEFAULT_LEDGER = ".if-fork/patch-ledger.jsonl"
 _DEFAULT_ACTOR = "seed-bulk-import"
 _DEFAULT_BATCH_SIZE = 50
