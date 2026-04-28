@@ -1,0 +1,63 @@
+name: Cherry-Pick Failure
+description: >
+  Filed automatically when `pr-ingestion.yml` fails at the cherry-pick, build, smoke,
+  or perf gate step. Requires human triage before the candidate can be retried or rejected.
+labels:
+  - cherry-pick-failure
+  - needs-human
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue was opened automatically by `pr-ingestion.yml` after a failure during
+        ingestion of an approved upstream PR. Review the error details below and decide
+        whether to retry, manually resolve, or reject the candidate.
+
+  - type: input
+    id: pr_number
+    attributes:
+      label: "Upstream PR number"
+      description: "The dotnet/wpf pull request that failed ingestion."
+      placeholder: "e.g. 10628"
+    validations:
+      required: true
+
+  - type: input
+    id: head_sha
+    attributes:
+      label: "Pinned head SHA"
+      description: "The head_sha captured at discovery time (from the ledger's `discovered` event)."
+      placeholder: "abc1234..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: failure_mode
+    attributes:
+      label: "Failure mode"
+      description: "Which stage of ingestion failed?"
+      options:
+        - "conflict — cherry-pick produced a merge conflict"
+        - "build-fail — cherry-picked commit failed to build"
+        - "smoke-fail — smoke harness failed after cherry-pick"
+        - "perf-fail — perf gate exceeded the 15% rejection threshold"
+    validations:
+      required: true
+
+  - type: textarea
+    id: error_excerpt
+    attributes:
+      label: "Error excerpt"
+      description: "Paste the relevant portion of the workflow log or error output here."
+      placeholder: "Paste error output here."
+    validations:
+      required: true
+
+  - type: textarea
+    id: ledger_event
+    attributes:
+      label: "Patch ledger event details (JSON)"
+      description: "The JSON object from patch-ledger.jsonl for this failure event."
+      placeholder: '{"ts": "...", "event": "build_failed", "pr_number": ..., ...}'
+    validations:
+      required: false
