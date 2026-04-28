@@ -28,7 +28,7 @@
   <PropertyGroup>
     <!-- Path to the patched DLLs inside the expanded package cache. -->
     <_IFWpfRuntimeDir
-      >$(MSBuildThisFileDirectory)..\runtimes\win-x64\lib\net10.0-windows\</_IFWpfRuntimeDir>
+      >$(MSBuildThisFileDirectory)..\runtimes\win-x64\lib\net10.0\</_IFWpfRuntimeDir>
   </PropertyGroup>
 
   <!-- Guard: fail the build with an actionable message if the consumer is not on a supported RID.
