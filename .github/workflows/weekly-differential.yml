@@ -1,0 +1,321 @@
+# .github/workflows/weekly-differential.yml
+name: Weekly Differential
+
+on:
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: weekly-diff-${{ github.event.schedule }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+  id-token: write
+
+env:
+  IF_REPO_ROOT: ${{ github.workspace }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: gate — autonomy-check reusable workflow
+  # ---------------------------------------------------------------------------
+  gate:
+    name: Autonomy gate
+    uses: ./.github/workflows/autonomy-check.yml
+
+  # ---------------------------------------------------------------------------
+  # Job 2: build-upstream-clean
+  # Checks out upstream release/10.0 (no fork patches), runs smoke harness,
+  # uploads smoke-upstream.xml artifact.
+  # ---------------------------------------------------------------------------
+  build-upstream-clean:
+    name: Build upstream-clean (release/10.0)
+    needs: gate
+    if: needs.gate.result == 'success'
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/dotnet/wpf.git || true
+        shell: bash
+
+      - name: Fetch upstream release/10.0
+        run: git fetch upstream release/10.0
+        shell: bash
+
+      - name: Checkout upstream clean (no fork patches)
+        run: git checkout upstream/release/10.0
+        shell: bash
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-win-x64-upstream-${{ hashFiles('**/packages.lock.json', 'global.json') }}
+          restore-keys: nuget-win-x64-upstream-
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Build upstream Release x64
+        run: |
+          eng\common\CIBuild.cmd -configuration Release ^
+            /p:Platform=x64 ^
+            /p:OfficialBuildId=0 ^
+            /p:EnableMicrobuild=false ^
+            /p:SignType=None
+        shell: cmd
+
+      - name: Run smoke harness (upstream)
+        # Placeholder: smoke test project invocation. Command is spec-correct;
+        # will fail if test/InitialForce.WpfSmoke/ does not yet exist.
+        run: |
+          dotnet test test/InitialForce.WpfSmoke/ \
+            -c Release \
+            --logger "trx;LogFileName=smoke-upstream.xml" \
+            --results-directory /tmp/smoke-upstream
+        shell: bash
+
+      - name: Upload smoke-upstream artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-upstream
+          path: /tmp/smoke-upstream/smoke-upstream.xml
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Job 3: build-fork
+  # Checks out if/main, runs same smoke harness, uploads smoke-fork.xml artifact.
+  # ---------------------------------------------------------------------------
+  build-fork:
+    name: Build fork (if/main)
+    needs: gate
+    if: needs.gate.result == 'success'
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: if/main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-win-x64-fork-${{ hashFiles('**/packages.lock.json', 'global.json') }}
+          restore-keys: nuget-win-x64-fork-
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Build fork Release x64
+        run: |
+          eng\common\CIBuild.cmd -configuration Release ^
+            /p:Platform=x64 ^
+            /p:OfficialBuildId=0 ^
+            /p:EnableMicrobuild=false ^
+            /p:SignType=None
+        shell: cmd
+
+      - name: Run smoke harness (fork)
+        run: |
+          dotnet test test/InitialForce.WpfSmoke/ \
+            -c Release \
+            --logger "trx;LogFileName=smoke-fork.xml" \
+            --results-directory /tmp/smoke-fork
+        shell: bash
+
+      - name: Upload smoke-fork artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-fork
+          path: /tmp/smoke-fork/smoke-fork.xml
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Job 4: compare
+  # Downloads artifacts, runs diff-smoke-results.py.
+  # Exit 2 (regression) -> opens blocking issue (P1).
+  # Exit 1 (drift) -> opens lower-priority issue (P3).
+  # ---------------------------------------------------------------------------
+  compare:
+    name: Diff upstream vs fork smoke results
+    needs: [build-upstream-clean, build-fork]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download smoke-upstream artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: smoke-upstream
+          path: /tmp/smoke-results/upstream/
+
+      - name: Download smoke-fork artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: smoke-fork
+          path: /tmp/smoke-results/fork/
+
+      - name: Run diff-smoke-results.py
+        id: diff
+        run: |
+          set +e
+          python tools/diff-smoke-results.py \
+            --upstream /tmp/smoke-results/upstream/smoke-upstream.xml \
+            --fork /tmp/smoke-results/fork/smoke-fork.xml \
+            --output /tmp/diff-report.json
+          DIFF_EXIT=$?
+          echo "diff_exit=${DIFF_EXIT}" >> "$GITHUB_OUTPUT"
+          set -e
+          exit 0
+        shell: bash
+
+      - name: Write regression issue body
+        if: steps.diff.outputs.diff_exit == '2'
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          BODY=$(cat /tmp/diff-report.json 2>/dev/null || echo '{}')
+          printf '%s\n' \
+            "## Weekly Differential: Regression Detected" \
+            "" \
+            "Run: ${RUN_URL}" \
+            "" \
+            '```json' \
+            "${BODY}" \
+            '```' \
+            > /tmp/regression-body.md
+        shell: bash
+
+      - name: Open regression issue (exit 2)
+        if: steps.diff.outputs.diff_exit == '2'
+        run: |
+          gh issue create \
+            --title "[Weekly Differential] REGRESSION detected -- $(date -u +%Y-%m-%d)" \
+            --body-file /tmp/regression-body.md \
+            --label "differential,regression,P1"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+
+      - name: Write drift issue body
+        if: steps.diff.outputs.diff_exit == '1'
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          BODY=$(cat /tmp/diff-report.json 2>/dev/null || echo '{}')
+          printf '%s\n' \
+            "## Weekly Differential: Drift Detected" \
+            "" \
+            "Run: ${RUN_URL}" \
+            "" \
+            '```json' \
+            "${BODY}" \
+            '```' \
+            > /tmp/drift-body.md
+        shell: bash
+
+      - name: Open drift issue (exit 1)
+        if: steps.diff.outputs.diff_exit == '1'
+        run: |
+          gh issue create \
+            --title "[Weekly Differential] Drift detected -- $(date -u +%Y-%m-%d)" \
+            --body-file /tmp/drift-body.md \
+            --label "differential,drift,P3"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+
+      - name: Upload diff report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diff-report
+          path: /tmp/diff-report.json
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Job 5: report
+  # Posts operator-followup summary issue with diff results.
+  # Runs regardless of compare outcome (always()).
+  # ---------------------------------------------------------------------------
+  report:
+    name: Post operator-followup summary
+    needs: compare
+    if: always() && needs.compare.result != 'skipped'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download diff report
+        uses: actions/download-artifact@v4
+        with:
+          name: diff-report
+          path: /tmp/
+        continue-on-error: true
+
+      - name: Write operator-followup issue body
+        run: |
+          DIFF_JSON=$(cat /tmp/diff-report.json 2>/dev/null || echo '{"verdict":"unknown","error":"diff-report artifact unavailable"}')
+          VERDICT=$(echo "${DIFF_JSON}" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('verdict','unknown'))" 2>/dev/null || echo "unknown")
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          printf '%s\n' \
+            "## Weekly Differential -- Operator Followup" \
+            "" \
+            "**Date:** ${NOW}" \
+            "**Run:** ${RUN_URL}" \
+            "**Verdict:** \`${VERDICT}\`" \
+            "" \
+            "### Diff Results" \
+            "" \
+            '```json' \
+            "${DIFF_JSON}" \
+            '```' \
+            "" \
+            "### Action required" \
+            "" \
+            "| Verdict | Action |" \
+            "|---------|--------|" \
+            "| \`match\` | No action required. |" \
+            "| \`drift\` | Review new/missing scenarios; update baseline if intentional. |" \
+            "| \`regression\` | Investigate regressions before applying next upstream patch. |" \
+            > /tmp/followup-body.md
+        shell: bash
+
+      - name: Post operator-followup issue
+        run: |
+          DIFF_JSON=$(cat /tmp/diff-report.json 2>/dev/null || echo '{"verdict":"unknown"}')
+          VERDICT=$(echo "${DIFF_JSON}" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('verdict','unknown'))" 2>/dev/null || echo "unknown")
+          gh issue create \
+            --title "[Weekly Differential] Operator followup -- $(date -u +%Y-%m-%d) -- verdict: ${VERDICT}" \
+            --body-file /tmp/followup-body.md \
+            --label "differential,operator-followup,weekly-report"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash

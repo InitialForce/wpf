@@ -1,0 +1,7 @@
+{
+  "verdict": "approved",
+  "pr_number": 6511,
+  "head_sha": "c8742b5c3fa1d2e3f4a5b6c7d8e9f0a1b2c3d4e5",
+  "review_1_summary": "Single-file change replaces delegate closure with static method. No observable behavior change, no API surface affected, no security attributes touched.",
+  "review_2_summary": "Agrees with review-1. Change is purely additive in terms of allocation reduction. Both reviewers verified no concurrent path is touched."
+}
