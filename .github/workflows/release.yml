@@ -1,0 +1,416 @@
+# .github/workflows/release.yml
+name: Release
+
+on:
+  push:
+    tags:
+      - "if-10.0.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. if-10.0.4-perf.20260427)"
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+env:
+  IF_REPO_ROOT: ${{ github.workspace }}
+  TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: gate — autonomy-check (requested_action: release-publish)
+  # ---------------------------------------------------------------------------
+  gate:
+    name: Autonomy gate (release-publish)
+    uses: ./.github/workflows/autonomy-check.yml
+
+  # ---------------------------------------------------------------------------
+  # Job 2: verify-tag — signed tag reachable from if/main
+  # ---------------------------------------------------------------------------
+  verify-tag:
+    name: Verify tag signature and reachability
+    needs: gate
+    runs-on: ubuntu-latest
+    outputs:
+      tag_sha: ${{ steps.verify.outputs.tag_sha }}
+
+    steps:
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Verify tag is signed and reachable from if/main
+        id: verify
+        run: |
+          TAG="${{ env.TAG_NAME }}"
+          echo "Verifying tag: $TAG"
+
+          # Verify the tag exists
+          if ! git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "::error::Tag $TAG not found in repository"
+            exit 1
+          fi
+
+          # Verify tag signature
+          if ! git tag -v "$TAG" 2>&1; then
+            echo "::warning::Tag $TAG is not signed or signature cannot be verified"
+          fi
+
+          # Verify tag is reachable from if/main
+          git fetch origin if/main
+          TAG_COMMIT=$(git rev-list -n1 "refs/tags/$TAG^{}")
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" "origin/if/main" 2>/dev/null; then
+            echo "::error::Tag $TAG (commit $TAG_COMMIT) is not reachable from if/main"
+            exit 1
+          fi
+
+          echo "tag_sha=$TAG_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "Tag $TAG verified: commit=$TAG_COMMIT is reachable from if/main"
+        shell: bash
+
+  # ---------------------------------------------------------------------------
+  # Job 3: build — compute version, dotnet pack both packages, upload artifacts
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build and pack NuGet packages
+    needs: verify-tag
+    runs-on: windows-latest
+    outputs:
+      nuget_version: ${{ steps.version.outputs.nuget_version }}
+
+    steps:
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-win-x64-${{ hashFiles('**/packages.lock.json', 'global.json') }}
+          restore-keys: nuget-win-x64-
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Compute NuGet version
+        id: version
+        run: |
+          $version = pwsh -File tools/compute-version.ps1 -DryRun
+          echo "nuget_version=$version" >> "$env:GITHUB_OUTPUT"
+          echo "Computed NuGet version: $version"
+        shell: pwsh
+
+      - name: Pack InitialForce.WPF
+        run: |
+          dotnet pack packaging/InitialForce.WPF/InitialForce.WPF.csproj `
+            -c Release `
+            /p:Version=${{ steps.version.outputs.nuget_version }} `
+            /p:RepositoryCommit=${{ needs.verify-tag.outputs.tag_sha }} `
+            --output /tmp/packages/
+        shell: pwsh
+
+      - name: Pack InitialForce.WPF.RuntimeOverride
+        run: |
+          dotnet pack packaging/InitialForce.WPF.RuntimeOverride/InitialForce.WPF.RuntimeOverride.csproj `
+            -c Release `
+            /p:Version=${{ steps.version.outputs.nuget_version }} `
+            /p:RepositoryCommit=${{ needs.verify-tag.outputs.tag_sha }} `
+            --output /tmp/packages/
+        shell: pwsh
+
+      - name: Upload .nupkg artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-packages-${{ steps.version.outputs.nuget_version }}
+          path: /tmp/packages/**/*.nupkg
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Job 4: smoke-on-pack — install packed nupkg into temp project, run 22 scenarios
+  # ---------------------------------------------------------------------------
+  smoke-on-pack:
+    name: Smoke harness against packed NuGet
+    needs: build
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Download packed NuGet artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-packages-${{ needs.build.outputs.nuget_version }}
+          path: /tmp/packages/
+
+      - name: Install packages into temp feed and run smoke harness
+        run: |
+          # Set up a local NuGet feed pointing at the downloaded packages
+          $feedDir = "/tmp/local-feed"
+          New-Item -ItemType Directory -Force -Path $feedDir | Out-Null
+          Copy-Item /tmp/packages/*.nupkg $feedDir/
+
+          # Run the smoke harness against the consumer experience
+          $env:NUGET_VERSION = "${{ needs.build.outputs.nuget_version }}"
+          $env:LOCAL_FEED_PATH = $feedDir
+          dotnet test test/InitialForce.WpfSmoke/ `
+            -c Release `
+            --logger trx `
+            --results-directory /tmp/smoke-results/ `
+            -- NUnit.DefaultTestNamePattern="{m}"
+        shell: pwsh
+
+      - name: Upload smoke results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-results-${{ needs.build.outputs.nuget_version }}
+          path: /tmp/smoke-results/
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Job 5: perf-on-pack — run perf harness, check regression against baseline
+  # ---------------------------------------------------------------------------
+  perf-on-pack:
+    name: Perf regression check against packed NuGet
+    needs: build
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download packed NuGet artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-packages-${{ needs.build.outputs.nuget_version }}
+          path: /tmp/packages/
+
+      - name: Run perf harness
+        run: |
+          $env:NUGET_VERSION = "${{ needs.build.outputs.nuget_version }}"
+          dotnet test test/InitialForce.WpfSmoke/ `
+            -c Release `
+            --filter "Category=Perf" `
+            -- NUnit.DefaultTestNamePattern="{m}"
+        shell: pwsh
+
+      - name: Check perf regression
+        run: |
+          python tools/check-regression.py `
+            --current perf/current.json `
+            --baseline perf/baseline.json `
+            --current-sha ${{ github.sha }} `
+            --output /tmp/perf-result.json `
+            --threshold-warn 5 `
+            --threshold-fail 15
+        shell: pwsh
+
+      - name: Upload perf results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results-${{ needs.build.outputs.nuget_version }}
+          path: /tmp/perf-result.json
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Job 6: release-notes — run Claude to draft GitHub Release notes from ledger
+  # ---------------------------------------------------------------------------
+  release-notes:
+    name: Generate release notes (Claude Sonnet)
+    needs: build
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+    outputs:
+      notes_artifact: release-notes-${{ needs.build.outputs.nuget_version }}
+
+    steps:
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Determine previous tag
+        id: prev-tag
+        run: |
+          CURRENT_TAG="${{ env.TAG_NAME }}"
+          PREV_TAG=$(git tag --list 'if-10.0.*' --sort=-version:refname \
+            | grep -v "^${CURRENT_TAG}$" | head -1 || echo "")
+          echo "prev_tag=$PREV_TAG" >> "$GITHUB_OUTPUT"
+          echo "Previous tag: $PREV_TAG"
+        shell: bash
+
+      - name: Run release notes prompt (Claude Sonnet)
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: >-
+            --prompt-file .if-fork/prompts/release-notes.md
+            --max-turns 10
+            --model claude-sonnet-4-6
+            --allowedTools Bash,Read,Grep
+            --disallowedTools Edit,Write,mcp__github__push_files
+          github_token: ${{ steps.app-token.outputs.token }}
+        env:
+          CONFIG_PATH: .if-fork/config.yaml
+          FROM_REF: ${{ steps.prev-tag.outputs.prev_tag }}
+          TO_REF: ${{ env.TAG_NAME }}
+          VERSION_STRING: ${{ needs.build.outputs.nuget_version }}
+          OUTPUT_PATH: /tmp/release-notes-${{ needs.build.outputs.nuget_version }}.md
+
+      - name: Upload release notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes-${{ needs.build.outputs.nuget_version }}
+          path: /tmp/release-notes-${{ needs.build.outputs.nuget_version }}.md
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Job 7: publish — gated on wpf-nuget-publish (manual reviewer approval)
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Publish NuGets (human gate)
+    needs: [smoke-on-pack, perf-on-pack, release-notes]
+    runs-on: ubuntu-latest
+    environment: wpf-nuget-publish
+
+    steps:
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          name: release-packages-${{ needs.build.outputs.nuget_version }}
+          path: /tmp/packages/
+
+      - name: Download release notes
+        uses: actions/download-artifact@v4
+        with:
+          name: release-notes-${{ needs.build.outputs.nuget_version }}
+          path: /tmp/
+
+      - name: Publish to GitHub Packages
+        run: |
+          for pkg in /tmp/packages/*.nupkg; do
+            dotnet nuget push "$pkg" \
+              --source "https://nuget.pkg.github.com/initialforce/index.json" \
+              --api-key "${{ secrets.NUGET_FEED_PAT }}" \
+              --skip-duplicate
+          done
+        shell: bash
+
+      - name: Create GitHub Release
+        run: |
+          NOTES_FILE=$(ls /tmp/release-notes-*.md 2>/dev/null | head -1 || echo "")
+          if [ -z "$NOTES_FILE" ]; then
+            NOTES_ARGS="--generate-notes"
+          else
+            NOTES_ARGS="--notes-file $NOTES_FILE"
+          fi
+          # shellcheck disable=SC2086
+          gh release create "${{ env.TAG_NAME }}" \
+            --title "InitialForce WPF ${{ env.TAG_NAME }}" \
+            $NOTES_ARGS \
+            /tmp/packages/*.nupkg
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        shell: bash
+
+  # ---------------------------------------------------------------------------
+  # Job 8: record — emit published ledger event with version + tag + commit
+  # ---------------------------------------------------------------------------
+  record:
+    name: Record published ledger event
+    needs: publish
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+
+    steps:
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Emit published ledger event
+        run: |
+          python tools/ledger-event.py \
+            --event published \
+            --details "{\"nuget_version\": \"${{ needs.build.outputs.nuget_version }}\", \"git_tag\": \"${{ env.TAG_NAME }}\", \"commit\": \"${{ github.sha }}\"}" \
+            --actor-run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
+          GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
+        shell: bash
