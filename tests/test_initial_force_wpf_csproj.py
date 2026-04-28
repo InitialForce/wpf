@@ -309,10 +309,14 @@ class TestTargetsStructure:
         )
 
     def test_error_element_for_unsupported_rid(self):
-        """Targets file must contain an <Error> element for unsupported RIDs (HIGH-8 fail-closed)."""
+        """Targets file must contain an <Error> element for unsupported RIDs
+        (HIGH-8 fail-closed)."""
         ns = {"ms": MSBUILD_NS}
         errors = self.root.findall(".//ms:Error", ns)
-        assert errors, "No <Error> element found in targets file; HIGH-8 requires fail-closed error for unsupported RIDs"
+        assert errors, (
+            "No <Error> element found in targets file; "
+            "HIGH-8 requires fail-closed error for unsupported RIDs"
+        )
         error_texts = [e.get("Text", "") for e in errors]
         assert any("win-x64" in t or "RuntimeIdentifier" in t for t in error_texts), (
             f"<Error> element should reference RuntimeIdentifier or win-x64. Found: {error_texts}"
