@@ -13,40 +13,28 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+# Ensure the tools directory is importable whether the script is run directly
+# or loaded via importlib from the project root.
+_TOOLS_DIR = Path(__file__).parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
 # ---------------------------------------------------------------------------
-# Event types — verbatim from exec-docs §10.5 event-types table
+# Event types — imported from shared schema (LOW-1 fix)
 # ---------------------------------------------------------------------------
-VALID_EVENTS: frozenset[str] = frozenset(
-    [
-        "discovered",
-        "review_1",
-        "review_2",
-        "approved",
-        "escalated",
-        "cherry_picked",
-        "build_failed",
-        "build_passed",
-        "smoke_failed",
-        "smoke_passed",
-        "perf_passed",
-        "perf_failed",
-        "published",
-        "graduated_upstream",
-        "rejected",
-        "reverted",
-        "autonomy_paused",
-        "autonomy_resumed",
-        "automerge_frozen",
-        "automerge_thawed",
-    ]
-)
+from ledger_schema import VALID_EVENTS  # noqa: E402
 
 DEFAULT_LEDGER_PATH = ".if-fork/patch-ledger.jsonl"
+
+# Maximum number of push retries on non-fast-forward (CRIT-3 fix)
+MAX_PUSH_RETRIES = 3
 
 
 # ---------------------------------------------------------------------------
@@ -126,8 +114,42 @@ def build_line(
 # ---------------------------------------------------------------------------
 # Git helpers
 # ---------------------------------------------------------------------------
-def _git_commit(ledger_path: Path, message: str) -> None:
-    """Stage *ledger_path* and create a signed git commit, falling back to unsigned."""
+def _is_ci() -> bool:
+    """Return True when running inside a CI environment (GitHub Actions etc.)."""
+    return os.environ.get("CI", "").lower() in ("true", "1", "yes")
+
+
+def _current_branch() -> str:
+    """Return the current git branch name, or 'HEAD' if detached."""
+    try:
+        result = subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip() or "HEAD"
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return "HEAD"
+
+
+def _git_commit(ledger_path: Path, message: str, line_hash: str) -> None:
+    """Stage *ledger_path* and create a signed git commit.
+
+    In CI environments (CI=true) a GPG-signing failure is fatal — we do NOT
+    fall back to unsigned commits (HIGH-2 fix).  Outside CI the existing
+    fallback-with-warning behaviour is preserved.
+
+    The commit message includes a ``Ledger-Line-Hash:`` trailer so that
+    ledger-validate.py can later locate each entry's commit by content rather
+    than by array index (MED-5 fix).
+    """
+    # Build the full commit message with trailer
+    full_message = (
+        f"{message}\n\n"
+        f"Ledger-Line-Hash: {line_hash}"
+    )
+
     # Stage the ledger file
     subprocess.run(
         ["git", "add", str(ledger_path)],
@@ -138,21 +160,35 @@ def _git_commit(ledger_path: Path, message: str) -> None:
     # Try signed commit first
     try:
         result = subprocess.run(
-            ["git", "commit", "-S", "-m", message],
+            ["git", "commit", "-S", "-m", full_message],
             capture_output=True,
             text=True,
         )
         if result.returncode == 0:
             return
-        # GPG failure heuristic: exit code 128 with "gpg" in stderr
-        if "gpg" in result.stderr.lower() or "signing" in result.stderr.lower():
+        # GPG failure heuristic: exit code 128 with "gpg" / "signing" in stderr
+        is_gpg_failure = (
+            "gpg" in result.stderr.lower() or "signing" in result.stderr.lower()
+        )
+        if is_gpg_failure:
+            if _is_ci():
+                # HIGH-2 fix: fail closed in CI
+                die(
+                    5,
+                    "GPG signing failed in CI environment; unsigned commits are not "
+                    "permitted in production. Ensure a GPG key is available to the runner.",
+                    stdout=result.stdout,
+                    stderr=result.stderr,
+                    returncode=result.returncode,
+                )
+            # Outside CI: warn and fall back to unsigned
             print(
                 "WARNING: GPG signing failed; falling back to unsigned commit. "
                 "Signed commits are required in production CI.",
                 file=sys.stderr,
             )
             subprocess.run(
-                ["git", "commit", "-m", message],
+                ["git", "commit", "-m", full_message],
                 check=True,
                 capture_output=True,
             )
@@ -167,6 +203,127 @@ def _git_commit(ledger_path: Path, message: str) -> None:
         )
     except FileNotFoundError:
         die(5, "git not found in PATH")
+
+
+def _git_push(branch: str) -> subprocess.CompletedProcess[str]:
+    """Push the current HEAD to *branch* on origin."""
+    return subprocess.run(
+        ["git", "push", "origin", f"HEAD:{branch}"],
+        capture_output=True,
+        text=True,
+    )
+
+
+def _git_pull_rebase(branch: str) -> bool:
+    """Fetch and rebase the local branch onto origin/*branch*.
+
+    Returns True on success, False on failure.
+    """
+    fetch = subprocess.run(
+        ["git", "fetch", "origin", branch],
+        capture_output=True,
+        text=True,
+    )
+    if fetch.returncode != 0:
+        return False
+    rebase = subprocess.run(
+        ["git", "rebase", f"origin/{branch}"],
+        capture_output=True,
+        text=True,
+    )
+    if rebase.returncode != 0:
+        # Abort the rebase so the repo is not left in a bad state
+        subprocess.run(
+            ["git", "rebase", "--abort"],
+            capture_output=True,
+        )
+        return False
+    return True
+
+
+def _push_with_retry(
+    ledger_path: Path,
+    event: str,
+    pr_number: int,
+    head_sha: str,
+    actor: str,
+    details: dict[str, object],
+    do_push: bool,
+) -> None:
+    """Push after commit; on non-FF, pull/rebase, recompute prev_hash, re-append,
+    recommit, and retry.  Caps at MAX_PUSH_RETRIES attempts (CRIT-3 fix).
+    """
+    if not do_push:
+        return
+
+    branch = _current_branch()
+    for attempt in range(1, MAX_PUSH_RETRIES + 1):
+        push_result = _git_push(branch)
+        if push_result.returncode == 0:
+            return
+
+        is_non_ff = (
+            "non-fast-forward" in push_result.stderr.lower()
+            or "rejected" in push_result.stderr.lower()
+            or "[rejected]" in push_result.stdout.lower()
+        )
+        if not is_non_ff or attempt == MAX_PUSH_RETRIES:
+            die(
+                6,
+                f"git push failed after {attempt} attempt(s)",
+                stdout=push_result.stdout,
+                stderr=push_result.stderr,
+                returncode=push_result.returncode,
+            )
+
+        # Non-FF: pull/rebase, regenerate the ledger line with fresh prev_hash
+        if not _git_pull_rebase(branch):
+            die(6, "Failed to rebase after non-fast-forward push rejection")
+
+        # Reset the last commit (our ledger append) without losing the file change
+        subprocess.run(
+            ["git", "reset", "--soft", "HEAD~1"],
+            check=True,
+            capture_output=True,
+        )
+
+        # Strip the line we just wrote (it may now have wrong prev_hash)
+        if ledger_path.exists():
+            all_lines = [
+                ln
+                for ln in ledger_path.read_text(encoding="utf-8").splitlines()
+                if ln.strip()
+            ]
+            if all_lines:
+                # Remove last line (our append) and re-write
+                ledger_path.write_text(
+                    "\n".join(all_lines[:-1]) + ("\n" if len(all_lines) > 1 else ""),
+                    encoding="utf-8",
+                )
+
+        # Recompute prev_hash from the updated tip
+        prev_hash = _prev_hash_of_ledger(ledger_path)
+        new_line = build_line(
+            event=event,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            actor=actor,
+            details=details,
+            prev_hash=prev_hash,
+        )
+
+        with ledger_path.open("a", encoding="utf-8") as fh:
+            fh.write(new_line + "\n")
+
+        new_line_hash = json.loads(new_line)["line_hash"]
+        commit_msg = (
+            f"ledger: {event} pr#{pr_number} actor={actor}\n\n"
+            f"head_sha={head_sha}"
+        )
+        _git_commit(ledger_path, commit_msg, new_line_hash)
+
+        # Small back-off before retrying the push
+        time.sleep(1)
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +365,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "after processing all entries."
         ),
     )
+    parser.add_argument(
+        "--push",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Push the ledger commit to origin after appending. "
+            "Defaults to True in CI (CI=true) and False outside CI. "
+            "Use --no-push to disable explicitly."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -232,6 +399,13 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         die(2, "--details-json must be a JSON object (dict), not an array or scalar")
 
     ledger_path = Path(args.ledger_path)
+
+    # --- Resolve --push default ---
+    # Explicit --push / --no-push wins; otherwise default True in CI, False elsewhere.
+    if args.push is None:
+        do_push = _is_ci()
+    else:
+        do_push = args.push
 
     # --- Compute prev_hash ---
     prev_hash = _prev_hash_of_ledger(ledger_path)
@@ -263,7 +437,19 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
             f"ledger: {args.event} pr#{args.pr_number} actor={args.actor}\n\n"
             f"head_sha={args.head_sha}"
         )
-        _git_commit(ledger_path, commit_msg)
+        line_hash_value = json.loads(line)["line_hash"]
+        _git_commit(ledger_path, commit_msg, line_hash_value)
+
+        # --- Push (CRIT-3 fix) ---
+        _push_with_retry(
+            ledger_path=ledger_path,
+            event=args.event,
+            pr_number=args.pr_number,
+            head_sha=args.head_sha,
+            actor=args.actor,
+            details=details,
+            do_push=do_push,
+        )
 
     # --- Confirm success ---
     parsed_out = json.loads(line)
