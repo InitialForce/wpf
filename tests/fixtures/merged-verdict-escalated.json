@@ -1,0 +1,7 @@
+{
+  "verdict": "escalated",
+  "pr_number": 6502,
+  "head_sha": "81ddc95ac1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+  "review_1_summary": "Change looks safe from allocation perspective but WeakReference semantics are subtle.",
+  "review_2_summary": "Cannot confirm safety — alters WeakReference lifetime in undocumented way. GC pressure path not tested. Requires human review."
+}
