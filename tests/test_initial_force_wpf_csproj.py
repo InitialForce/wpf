@@ -30,7 +30,7 @@ TARGETS = PKG_DIR / "buildTransitive" / "InitialForce.WPF.targets"
 PROPS = PKG_DIR / "buildTransitive" / "InitialForce.WPF.props"
 README = PKG_DIR / "README.md"
 ICON = PKG_DIR / "icon.png"
-LIB_PLACEHOLDER = PKG_DIR / "lib" / "net10.0-windows" / "_._"
+LIB_PLACEHOLDER = PKG_DIR / "lib" / "net10.0" / "_._"
 
 # MSBuild namespace used in SDK-style project files
 MSBUILD_NS = "http://schemas.microsoft.com/developer/msbuild/2003"
@@ -131,7 +131,7 @@ class TestCsprojMetadata:
 
     def test_target_framework(self):
         value = self._pg_text("TargetFramework")
-        assert value == "net10.0-windows", f"TargetFramework is '{value}'"
+        assert value == "net10.0", f"TargetFramework is '{value}'"
 
     def test_package_license_expression(self):
         value = self._pg_text("PackageLicenseExpression")
@@ -200,15 +200,15 @@ class TestCsprojPackItems:
 
     def test_runtime_dlls_included(self):
         paths = self._pack_paths()
-        assert any("runtimes/win-x64/lib/net10.0-windows" in p for p in paths), (
-            "No <None> item packs DLLs from runtimes/win-x64/lib/net10.0-windows/. "
+        assert any("runtimes/win-x64/lib/net10.0" in p for p in paths), (
+            "No <None> item packs DLLs from runtimes/win-x64/lib/net10.0/. "
             f"Found PackagePaths: {paths}"
         )
 
     def test_lib_placeholder_included(self):
         paths = self._pack_paths()
-        assert any("lib/net10.0-windows/_._" in p for p in paths), (
-            "lib/net10.0-windows/_._  placeholder not found in Pack items. "
+        assert any("lib/net10.0/_._" in p for p in paths), (
+            "lib/net10.0/_._  placeholder not found in Pack items. "
             f"Found PackagePaths: {paths}"
         )
 
@@ -358,7 +358,7 @@ class TestReadme:
     def test_has_requirements_section(self):
         lower = self.content.lower()
         assert "requirement" in lower or "net10.0" in lower, (
-            "README.md should mention requirements (net10.0-windows, win-x64)"
+            "README.md should mention requirements (net10.0, win-x64)"
         )
 
     def test_has_win_x64_mention(self):
@@ -423,7 +423,7 @@ class TestDeferredGatesDocumentation:
           1. Create a 'dotnet new wpf' test app.
           2. Add <PackageReference Include="InitialForce.WPF" Version="..." />
           3. dotnet build -r win-x64 --self-contained
-          4. Verify bin/Debug/net10.0-windows/win-x64/PresentationFramework.dll
+          4. Verify bin/Debug/net10.0/win-x64/PresentationFramework.dll
              file hash matches our patched DLL, NOT Microsoft's runtime pack copy.
         See wpf-w3v (msquic-pattern verification bead) for the full smoke-harness spec.
         """
