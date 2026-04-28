@@ -377,11 +377,14 @@ jobs:
         shell: bash
 
       - name: Publish to GitHub Packages
+        # Use the built-in GITHUB_TOKEN. Workflow already grants
+        # packages:write at the top of this file. A PAT (NUGET_FEED_PAT)
+        # is only required if/when we publish to nuget.org.
         run: |
           for pkg in /tmp/packages/*.nupkg; do
             dotnet nuget push "$pkg" \
-              --source "https://nuget.pkg.github.com/initialforce/index.json" \
-              --api-key "${{ secrets.NUGET_FEED_PAT }}" \
+              --source "https://nuget.pkg.github.com/InitialForce/index.json" \
+              --api-key "${{ secrets.GITHUB_TOKEN }}" \
               --skip-duplicate
           done
         shell: bash
