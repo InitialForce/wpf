@@ -1,0 +1,243 @@
+# .github/workflows/claude-on-failure.yml
+name: Claude On Failure
+
+on:
+  workflow_run:
+    workflows:
+      - Build
+      - PR Discovery
+      - PR Review (2x Independent Opus)
+      - PR Ingestion (Cherry-Pick)
+      - Nightly Rebase
+      - Release
+      - Upstream Stable Adoption
+    types: [completed]
+
+# One invocation per failed run — use the workflow_run event id as the concurrency group.
+concurrency:
+  group: claude-on-failure-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  id-token: write
+
+env:
+  IF_REPO_ROOT: ${{ github.workspace }}
+  FAILED_WORKFLOW: ${{ github.event.workflow_run.name }}
+  FAILED_RUN_ID: ${{ github.event.workflow_run.id }}
+  FAILED_RUN_URL: ${{ github.event.workflow_run.html_url }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1 — gate: autonomy kill-switch check
+  # ---------------------------------------------------------------------------
+  gate:
+    name: Autonomy gate (claude-invoke)
+    # Only run at all when the triggering workflow actually failed.
+    if: github.event.workflow_run.conclusion == 'failure'
+    uses: ./.github/workflows/autonomy-check.yml
+    with:
+      requested_action: claude-invoke
+
+  # ---------------------------------------------------------------------------
+  # Job 2 — analyze: download logs, run Claude failure-analysis prompt
+  # ---------------------------------------------------------------------------
+  analyze:
+    name: Analyse failure (${{ github.event.workflow_run.name }})
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+    outputs:
+      verdict: ${{ steps.run-analysis.outputs.verdict }}
+      issue_type: ${{ steps.classify.outputs.issue_type }}
+
+    steps:
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Download failed run artifacts
+        run: |
+          gh run download "${{ env.FAILED_RUN_ID }}" \
+            --repo "${{ github.repository }}" \
+            --dir /tmp/failed-artifacts/ || true
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Download failed run log
+        run: |
+          gh run view "${{ env.FAILED_RUN_ID }}" \
+            --repo "${{ github.repository }}" \
+            --log-failed > /tmp/failed-run.log 2>&1 || true
+          # Also write workflow metadata
+          cat > /tmp/failed-run-meta.json << EOF
+          {
+            "workflow_name": "${{ env.FAILED_WORKFLOW }}",
+            "run_id": "${{ env.FAILED_RUN_ID }}",
+            "run_url": "${{ env.FAILED_RUN_URL }}",
+            "conclusion": "${{ github.event.workflow_run.conclusion }}"
+          }
+          EOF
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Run failure analysis (Claude Sonnet)
+        id: run-analysis
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: >-
+            --prompt-file .if-fork/prompts/failure-analysis.md
+            --max-turns 8
+            --model claude-sonnet-4-6
+            --allowedTools Read,Bash,Grep,mcp__github__issue_write,mcp__github__search_issues
+            --disallowedTools Edit,Write,mcp__github__push_files,mcp__github__create_pull_request
+          github_token: ${{ steps.app-token.outputs.token }}
+        env:
+          CONFIG_PATH: .if-fork/config.yaml
+          LOG_PATH: /tmp/failed-run.log
+          ARTIFACTS_DIR: /tmp/failed-artifacts/
+          FAILED_WORKFLOW_URL: ${{ env.FAILED_RUN_URL }}
+          ESCALATION_ISSUE_PATH: /tmp/failure-analysis-result.md
+          FAILED_WORKFLOW_NAME: ${{ env.FAILED_WORKFLOW }}
+          FAILED_RUN_META: /tmp/failed-run-meta.json
+
+      - name: Classify failure for issue type
+        id: classify
+        run: |
+          WORKFLOW="${{ env.FAILED_WORKFLOW }}"
+          # Default issue type
+          ISSUE_TYPE="operator-followup"
+
+          # Workflow-specific issue types
+          case "$WORKFLOW" in
+            "PR Ingestion (Cherry-Pick)")
+              ISSUE_TYPE="cherry-pick-failure"
+              ;;
+            "Build")
+              # Check if analysis result indicates a perf regression
+              if [ -f /tmp/failure-analysis-result.md ]; then
+                if grep -qi "perf\|regression\|benchmark" /tmp/failure-analysis-result.md; then
+                  ISSUE_TYPE="perf-regression"
+                else
+                  ISSUE_TYPE="operator-followup"
+                fi
+              fi
+              ;;
+            *)
+              ISSUE_TYPE="operator-followup"
+              ;;
+          esac
+
+          echo "issue_type=$ISSUE_TYPE" >> "$GITHUB_OUTPUT"
+          echo "::notice::Failure classified as issue type: $ISSUE_TYPE"
+
+      - name: Upload analysis result artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-analysis-${{ env.FAILED_RUN_ID }}
+          path: /tmp/failure-analysis-result.md
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Job 3 — record: open GitHub issue, emit failure_analyzed ledger event
+  # ---------------------------------------------------------------------------
+  record:
+    name: Record failure and emit ledger event
+    needs: [gate, analyze]
+    if: always() && needs.gate.outputs.proceed == 'true' && needs.analyze.result != 'skipped'
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+
+    steps:
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download analysis artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: failure-analysis-${{ env.FAILED_RUN_ID }}
+          path: /tmp/
+        continue-on-error: true
+
+      - name: Open failure issue
+        id: open-issue
+        run: |
+          ISSUE_TYPE="${{ needs.analyze.outputs.issue_type }}"
+          WORKFLOW="${{ env.FAILED_WORKFLOW }}"
+          RUN_URL="${{ env.FAILED_RUN_URL }}"
+
+          # Compose issue body
+          if [ -f /tmp/failure-analysis-result.md ]; then
+            BODY_FILE=/tmp/failure-analysis-result.md
+          else
+            # Fallback minimal body
+            cat > /tmp/failure-analysis-fallback.md << EOF
+          ## CI Failure: $WORKFLOW
+
+          **Run URL:** $RUN_URL
+          **Issue type:** $ISSUE_TYPE
+
+          Failure analysis did not produce a detailed report. Please investigate the run directly.
+          EOF
+            BODY_FILE=/tmp/failure-analysis-fallback.md
+          fi
+
+          # Map issue type to labels
+          case "$ISSUE_TYPE" in
+            "cherry-pick-failure")
+              LABELS="operator-followup,cherry-pick-failure,ci-failure"
+              ;;
+            "perf-regression")
+              LABELS="operator-followup,perf-regression,ci-failure"
+              ;;
+            *)
+              LABELS="operator-followup,ci-failure"
+              ;;
+          esac
+
+          ISSUE_TITLE="CI failure [$ISSUE_TYPE]: $WORKFLOW — $(date -u +%Y-%m-%d)"
+
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --title "$ISSUE_TITLE" \
+            --body-file "$BODY_FILE" \
+            --label "$LABELS"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Emit failure_analyzed ledger event
+        run: |
+          python tools/ledger-event.py \
+            --event failure_analyzed \
+            --details "{\"workflow\": \"${{ env.FAILED_WORKFLOW }}\", \"failed_run_id\": \"${{ env.FAILED_RUN_ID }}\", \"issue_type\": \"${{ needs.analyze.outputs.issue_type }}\", \"run_url\": \"${{ env.FAILED_RUN_URL }}\"}" \
+            --actor-run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        env:
+          GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
+          GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
