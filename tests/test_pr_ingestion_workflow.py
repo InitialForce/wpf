@@ -4,23 +4,30 @@ Tests for .github/workflows/pr-ingestion.yml
 Validates YAML structure, job dependencies, gate conditions, and
 security invariants — without executing the workflow.
 
-Structural assertions (≥ 12):
-  1. YAML parses cleanly
-  2. repository_dispatch trigger with correct type
-  3. workflow_dispatch trigger with pr_number and head_sha inputs
-  4. All 8 jobs present
-  5. Needs chain is correct (gate → pre-flight → sha-smuggling-check → cherry-pick
-     → denylist-check → build-and-test → perf-gate → open-pr)
-  6. sha-smuggling-check is NOT a direct dependency of cherry-pick (it must come BEFORE)
-  7. SHA-smuggling check job exists and references ledger-event.py
-  8. tools/cherry-pick-pre-flight.sh is referenced
-  9. tools/check-denylist.py is referenced
+Structural assertions (>= 18):
+  1.  YAML parses cleanly
+  2.  repository_dispatch trigger with correct type
+  3.  workflow_dispatch trigger with pr_number and head_sha inputs
+  4.  All 8 jobs present
+  5.  Needs chain is correct (gate → pre-flight → sha-smuggling-check → cherry-pick
+      → denylist-check → build-and-test → perf-gate → open-pr)
+  6.  sha-smuggling-check is NOT a direct dependency of cherry-pick (it must come BEFORE)
+  7.  SHA-smuggling check job exists and references ledger-event.py
+  8.  tools/cherry-pick-pre-flight.sh is referenced
+  9.  tools/check-denylist.py is referenced
   10. tools/check-regression.py is referenced with --current-sha flag
-  11. Auto-merge step is gated on vars.IF_AUTOMERGE_FROZEN == 'false'
+  11. Auto-merge step is gated on IF_AUTOMERGE_FROZEN != 'true' (MED-6)
   12. No reference to secrets.GH_APP_TOKEN (must use GH App inline token)
   13. Concurrency group references pr_number
   14. Permissions include contents:write, pull-requests:write, issues:write, id-token:write
   15. cherry_picked ledger event is emitted in open-pr job
+  16. gate job passes requested_action: cherry-pick (CRIT-1)
+  17. All downstream jobs guard on needs.gate.outputs.proceed == 'true' (CRIT-1)
+  18. SHA-smuggling check reads from patch-ledger.jsonl (HIGH-3)
+  19. Denylist check uses full diff range origin/if/staging...HEAD (HIGH-4)
+  20. perf-gate and open-pr both declare cherry-pick in needs (HIGH-5)
+  21. build-and-test uses gh run watch (HIGH-6)
+  22. Canonical ledger CLI args (--head-sha, --actor, --details-json, --push) are used (CRIT-2)
 """
 
 from __future__ import annotations
@@ -57,6 +64,17 @@ EXPECTED_NEEDS: dict[str, set[str]] = {
     "build-and-test": {"denylist-check"},
     "perf-gate": {"build-and-test"},
     "open-pr": {"perf-gate"},
+}
+
+# Jobs that must guard on the gate proceed output (all downstream jobs)
+PROCEED_GUARDED_JOBS = {
+    "pre-flight",
+    "sha-smuggling-check",
+    "cherry-pick",
+    "denylist-check",
+    "build-and-test",
+    "perf-gate",
+    "open-pr",
 }
 
 
@@ -243,18 +261,18 @@ def test_check_regression_referenced_with_current_sha() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 11. Auto-merge step is gated on IF_AUTOMERGE_FROZEN == 'false'
+# 11. Auto-merge step is gated on IF_AUTOMERGE_FROZEN != 'true' (MED-6)
 # ---------------------------------------------------------------------------
 
-def test_automerge_gated_on_frozen_var() -> None:
-    """Auto-merge step must be conditional on IF_AUTOMERGE_FROZEN == 'false'."""
+def test_automerge_gated_on_frozen_var_not_true() -> None:
+    """Auto-merge step must use != 'true' so unset var defaults to enabled (MED-6)."""
     raw = _raw_text()
     assert "IF_AUTOMERGE_FROZEN" in raw, (
         "Workflow must reference vars.IF_AUTOMERGE_FROZEN"
     )
-    # The condition must compare to 'false'
-    assert re.search(r"IF_AUTOMERGE_FROZEN\s*==\s*['\"]false['\"]", raw), (
-        "Auto-merge condition must check IF_AUTOMERGE_FROZEN == 'false'"
+    # The condition must use != 'true' (not == 'false') so unset var defaults correctly
+    assert re.search(r"IF_AUTOMERGE_FROZEN\s*!=\s*['\"]true['\"]", raw), (
+        "Auto-merge condition must check IF_AUTOMERGE_FROZEN != 'true' (MED-6: correct default for unset var)"
     )
 
 
@@ -310,6 +328,124 @@ def test_cherry_picked_event_emitted() -> None:
     raw = _raw_text()
     assert "cherry_picked" in raw, (
         "Workflow must emit a 'cherry_picked' ledger event in the open-pr job"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 16. gate job passes requested_action: cherry-pick (CRIT-1)
+# ---------------------------------------------------------------------------
+
+def test_gate_passes_requested_action(workflow: dict) -> None:
+    """gate job must pass requested_action: cherry-pick to autonomy-check (CRIT-1)."""
+    jobs = workflow.get("jobs", {})
+    gate = jobs.get("gate", {})
+    gate_with = gate.get("with", {}) or {}
+    assert gate_with.get("requested_action") == "cherry-pick", (
+        f"gate job must pass 'requested_action: cherry-pick' in 'with'; got: {gate_with!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 17. All downstream jobs guard on needs.gate.outputs.proceed == 'true' (CRIT-1)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("job_name", sorted(PROCEED_GUARDED_JOBS))
+def test_downstream_jobs_check_proceed(workflow: dict, job_name: str) -> None:
+    """Every downstream job must guard on needs.gate.outputs.proceed == 'true' (CRIT-1)."""
+    jobs = workflow.get("jobs", {})
+    assert job_name in jobs, f"Job '{job_name}' not found"
+    job_if = str(jobs[job_name].get("if", ""))
+    assert "needs.gate.outputs.proceed" in job_if, (
+        f"Job '{job_name}' must check needs.gate.outputs.proceed in its 'if' condition; got: {job_if!r}"
+    )
+    assert "proceed" in job_if and "'true'" in job_if, (
+        f"Job '{job_name}' proceed condition must compare to 'true'; got: {job_if!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 18. SHA-smuggling check reads from patch-ledger.jsonl (HIGH-3)
+# ---------------------------------------------------------------------------
+
+def test_sha_smuggling_reads_ledger_file() -> None:
+    """SHA-smuggling check must read from .if-fork/patch-ledger.jsonl (HIGH-3)."""
+    raw = _raw_text()
+    assert "patch-ledger.jsonl" in raw, (
+        "SHA-smuggling check must read from .if-fork/patch-ledger.jsonl ledger file (HIGH-3)"
+    )
+    # Must check for review_1 or review_2 event type in ledger
+    assert "review_1" in raw or "review_2" in raw, (
+        "SHA-smuggling check must look for review_1/review_2 entries in the ledger (HIGH-3)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 19. Denylist check uses full diff range origin/if/staging...HEAD (HIGH-4)
+# ---------------------------------------------------------------------------
+
+def test_denylist_uses_full_diff_range() -> None:
+    """Denylist check must use origin/if/staging...HEAD to catch all cherry-pick commits (HIGH-4)."""
+    raw = _raw_text()
+    assert "origin/if/staging...HEAD" in raw, (
+        "Denylist check must use 'origin/if/staging...HEAD' diff range to cover all commits (HIGH-4)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 20. perf-gate and open-pr both declare cherry-pick in needs (HIGH-5)
+# ---------------------------------------------------------------------------
+
+def test_perf_gate_needs_cherry_pick(workflow: dict) -> None:
+    """perf-gate must declare cherry-pick in its needs to access branch output (HIGH-5)."""
+    jobs = workflow.get("jobs", {})
+    perf_needs = _normalize_needs(jobs.get("perf-gate", {}).get("needs"))
+    assert "cherry-pick" in perf_needs, (
+        f"perf-gate must need 'cherry-pick' to access branch output; got needs={perf_needs!r}"
+    )
+
+
+def test_open_pr_needs_cherry_pick(workflow: dict) -> None:
+    """open-pr must declare cherry-pick in its needs to access branch output (HIGH-5)."""
+    jobs = workflow.get("jobs", {})
+    open_pr_needs = _normalize_needs(jobs.get("open-pr", {}).get("needs"))
+    assert "cherry-pick" in open_pr_needs, (
+        f"open-pr must need 'cherry-pick' to access branch output; got needs={open_pr_needs!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 21. build-and-test uses gh run watch (HIGH-6)
+# ---------------------------------------------------------------------------
+
+def test_build_and_test_uses_gh_run_watch() -> None:
+    """build-and-test must use 'gh run watch' (not racy gh run list --limit 1) (HIGH-6)."""
+    raw = _raw_text()
+    assert "gh run watch" in raw, (
+        "build-and-test must use 'gh run watch' to track the build run (HIGH-6)"
+    )
+    assert "gh run list --limit 1" not in raw, (
+        "build-and-test must NOT use 'gh run list --limit 1' — race condition (HIGH-6)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 22. Canonical ledger CLI args used (CRIT-2)
+# ---------------------------------------------------------------------------
+
+def test_ledger_event_canonical_cli_args() -> None:
+    """All ledger-event.py calls must use canonical CLI args: --head-sha, --actor, --details-json, --push (CRIT-2)."""
+    raw = _raw_text()
+    assert "--head-sha" in raw, (
+        "ledger-event.py calls must include --head-sha (CRIT-2)"
+    )
+    assert "--actor" in raw, (
+        "ledger-event.py calls must include --actor (CRIT-2)"
+    )
+    assert "--details-json" in raw, (
+        "ledger-event.py calls must include --details-json (CRIT-2)"
+    )
+    assert "--push" in raw, (
+        "ledger-event.py calls must include --push (CRIT-2)"
     )
 
 
