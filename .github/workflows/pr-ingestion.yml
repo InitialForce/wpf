@@ -123,7 +123,7 @@ jobs:
   # -------------------------------------------------------------------------
   sha-smuggling-check:
     name: SHA-smuggling check
-    needs: pre-flight
+    needs: [gate, pre-flight]
     if: needs.gate.outputs.proceed == 'true' && needs.pre-flight.outputs.action == 'apply'
     runs-on: ubuntu-latest
     environment: bot-credentials
@@ -226,7 +226,7 @@ jobs:
   # -------------------------------------------------------------------------
   cherry-pick:
     name: Cherry-pick PR #${{ github.event.client_payload.pr_number || inputs.pr_number }}
-    needs: sha-smuggling-check
+    needs: [gate, sha-smuggling-check]
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     environment: bot-credentials
@@ -308,7 +308,7 @@ jobs:
   # -------------------------------------------------------------------------
   denylist-check:
     name: Denylist check
-    needs: cherry-pick
+    needs: [gate, cherry-pick]
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     environment: bot-credentials
@@ -355,7 +355,7 @@ jobs:
   # -------------------------------------------------------------------------
   build-and-test:
     name: Build and test
-    needs: denylist-check
+    needs: [gate, denylist-check]
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     environment: bot-credentials
@@ -371,12 +371,27 @@ jobs:
       - name: Trigger build.yml and capture run ID
         run: |
           BRANCH="${{ needs.cherry-pick.outputs.branch }}"
-          RUN_ID=$(gh workflow run build.yml \
+          DISPATCH_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          gh workflow run build.yml \
             --ref "$BRANCH" \
-            --repo "${{ github.repository }}" \
-            --json | python3 -c "import sys, json; print(json.load(sys.stdin)['id'])")
+            --repo "${{ github.repository }}"
+          # Wait briefly for run to appear (gh workflow run is async HTTP 204)
+          RUN_ID=""
+          for i in {1..10}; do
+            RUN_ID=$(gh run list \
+              --workflow=build.yml \
+              --branch="$BRANCH" \
+              --event=workflow_dispatch \
+              --limit=5 \
+              --created=">=$DISPATCH_TS" \
+              --json databaseId,createdAt \
+              --jq '.[0].databaseId // empty' \
+              --repo "${{ github.repository }}" 2>/dev/null || true)
+            [ -n "$RUN_ID" ] && break
+            sleep 5
+          done
           if [ -z "$RUN_ID" ]; then
-            echo "::error::Failed to capture build workflow run ID — cannot track build."
+            echo "::error::Could not capture build run ID after 10 attempts — cannot track build."
             exit 1
           fi
           echo "::notice::Build workflow triggered (run ID: $RUN_ID) for branch $BRANCH"
@@ -389,7 +404,7 @@ jobs:
   # -------------------------------------------------------------------------
   perf-gate:
     name: Performance regression gate
-    needs: [build-and-test, cherry-pick]
+    needs: [gate, build-and-test, cherry-pick]
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     environment: bot-credentials
@@ -450,7 +465,7 @@ jobs:
   # -------------------------------------------------------------------------
   open-pr:
     name: Open internal PR and set auto-merge timer
-    needs: [perf-gate, cherry-pick]
+    needs: [gate, perf-gate, cherry-pick]
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     environment: bot-credentials
