@@ -272,7 +272,8 @@ def test_automerge_gated_on_frozen_var_not_true() -> None:
     )
     # The condition must use != 'true' (not == 'false') so unset var defaults correctly
     assert re.search(r"IF_AUTOMERGE_FROZEN\s*!=\s*['\"]true['\"]", raw), (
-        "Auto-merge condition must check IF_AUTOMERGE_FROZEN != 'true' (MED-6: correct default for unset var)"
+        "Auto-merge condition must check IF_AUTOMERGE_FROZEN != 'true' "
+        "(MED-6: correct default for unset var)"
     )
 
 
@@ -356,7 +357,8 @@ def test_downstream_jobs_check_proceed(workflow: dict, job_name: str) -> None:
     assert job_name in jobs, f"Job '{job_name}' not found"
     job_if = str(jobs[job_name].get("if", ""))
     assert "needs.gate.outputs.proceed" in job_if, (
-        f"Job '{job_name}' must check needs.gate.outputs.proceed in its 'if' condition; got: {job_if!r}"
+        f"Job '{job_name}' must check needs.gate.outputs.proceed in its 'if' condition; "
+        f"got: {job_if!r}"
     )
     assert "proceed" in job_if and "'true'" in job_if, (
         f"Job '{job_name}' proceed condition must compare to 'true'; got: {job_if!r}"
@@ -384,10 +386,12 @@ def test_sha_smuggling_reads_ledger_file() -> None:
 # ---------------------------------------------------------------------------
 
 def test_denylist_uses_full_diff_range() -> None:
-    """Denylist check must use origin/if/staging...HEAD to catch all cherry-pick commits (HIGH-4)."""
+    """Denylist check must use origin/if/staging...HEAD to catch all cherry-pick commits
+    (HIGH-4)."""
     raw = _raw_text()
     assert "origin/if/staging...HEAD" in raw, (
-        "Denylist check must use 'origin/if/staging...HEAD' diff range to cover all commits (HIGH-4)"
+        "Denylist check must use 'origin/if/staging...HEAD' diff range "
+        "to cover all commits (HIGH-4)"
     )
 
 
@@ -433,7 +437,8 @@ def test_build_and_test_uses_gh_run_watch() -> None:
 # ---------------------------------------------------------------------------
 
 def test_ledger_event_canonical_cli_args() -> None:
-    """All ledger-event.py calls must use canonical CLI args: --head-sha, --actor, --details-json, --push (CRIT-2)."""
+    """All ledger-event.py calls must use canonical CLI args:
+    --head-sha, --actor, --details-json, --push (CRIT-2)."""
     raw = _raw_text()
     assert "--head-sha" in raw, (
         "ledger-event.py calls must include --head-sha (CRIT-2)"
