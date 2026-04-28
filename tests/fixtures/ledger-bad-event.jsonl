@@ -1,0 +1,2 @@
+{"actor":"claude-wpf-bot","details":{},"event":"discovered","head_sha":"abc1234567890abcdef","line_hash":"ef0b4f4daed1a4a255669b3d39e67c790d600a8532f30e9e74aea043b215e37e","pr_number":10628,"prev_hash":"","schema_version":1,"ts":"2026-04-27T12:00:00Z"}
+{"actor":"claude-wpf-bot","details":{},"event":"INVALID_EVENT_TYPE","head_sha":"abc1234567890abcdef","line_hash":"1258fadd3a0d49c51105a4d60d88baf4229b072ebe6c9d01a8bab029d0ab8a65","pr_number":10628,"prev_hash":"ef0b4f4daed1a4a255669b3d39e67c790d600a8532f30e9e74aea043b215e37e","schema_version":1,"ts":"2026-04-27T13:00:00Z"}
