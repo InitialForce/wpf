@@ -132,7 +132,8 @@ class TestTargetsFile:
         assert "CopyFilesToOutputDirectory" in content
 
     def test_win_rid_condition(self):
-        """Targets must be conditioned on win-x64 RuntimeIdentifier (HIGH-8: exact RID, not win-*)."""
+        """Targets must be conditioned on win-x64 RuntimeIdentifier
+        (HIGH-8: exact RID, not win-*)."""
         content = TARGETS.read_text(encoding="utf-8")
         assert "win-x64" in content, "No win-x64 RuntimeIdentifier condition found in targets"
         # Must NOT use the broad win-* / StartsWith('win-') pattern for Remove/Inject targets
@@ -172,18 +173,21 @@ class TestTargetsFile:
         assert "ResolvedFileToPublish" in content
 
     def test_remove_and_inject_targets_count(self, root):
-        """There should be at least 12 targets (3 per assembly: Remove + Warn + Inject = 12 minimum)."""
+        """There should be at least 12 targets
+        (3 per assembly: Remove + Warn + Inject = 12 minimum)."""
         ns = {"ms": MSBUILD_NS}
         targets = root.findall(".//ms:Target", ns)
         # Fall back to no-namespace search
         if not targets:
             targets = list(root.iter("Target"))
         assert len(targets) >= 12, (
-            f"Expected at least 12 Target elements (3 per assembly: Remove+Warn+Inject), found {len(targets)}"
+            f"Expected at least 12 Target elements (3 per assembly: Remove+Warn+Inject), "
+            f"found {len(targets)}"
         )
 
     def test_warning_element_for_unsupported_rid(self):
-        """Targets file must contain <Warning> elements for unsupported RIDs (HIGH-8 graceful degrade)."""
+        """Targets file must contain <Warning> elements for unsupported RIDs
+        (HIGH-8 graceful degrade)."""
         ns = {"ms": MSBUILD_NS}
         root = parse_xml(TARGETS)
         warnings = root.findall(".//ms:Warning", ns)
@@ -198,7 +202,8 @@ class TestTargetsFile:
         """No <Copy> task should use OverwriteReadOnlyFiles='true' (LOW-2)."""
         content = TARGETS.read_text(encoding="utf-8")
         assert "OverwriteReadOnlyFiles" not in content, (
-            "OverwriteReadOnlyFiles='true' found in RuntimeOverride targets file; LOW-2 requires it be removed"
+            "OverwriteReadOnlyFiles='true' found in RuntimeOverride targets file; "
+            "LOW-2 requires it be removed"
         )
 
 
