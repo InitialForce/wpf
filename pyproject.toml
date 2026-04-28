@@ -1,0 +1,20 @@
+[project]
+name = "wpf-fork-tools"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4"]
+ignore = []
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["tools/*.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
