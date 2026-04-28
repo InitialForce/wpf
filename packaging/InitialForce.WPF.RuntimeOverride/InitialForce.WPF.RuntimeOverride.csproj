@@ -1,0 +1,66 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Target framework must be set for SDK-style pack; no actual compilation. -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <IsPackable>true</IsPackable>
+    <!-- We are packaging pre-built DLLs, not compiling this project. -->
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <NoBuild>true</NoBuild>
+    <NoDefaultExcludes>true</NoDefaultExcludes>
+
+    <!-- Version is injected by release.yml using compute-version.ps1.
+         Passed as -p:PackageVersion=... on the dotnet pack command line. -->
+    <PackageId>InitialForce.WPF.RuntimeOverride</PackageId>
+    <Authors>Initial Force AS</Authors>
+    <Description>
+      Surgical per-assembly WPF override package for consumers who cannot use the full
+      InitialForce.WPF package. Set IF_OverrideAssemblies to a semicolon-separated list
+      of assembly names (e.g. PresentationCore;PresentationFramework) to selectively
+      replace only the specified WPF DLLs with InitialForce-patched versions.
+      Based on dotnet/wpf (MIT). Third-party fork; not endorsed by Microsoft.
+    </Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/InitialForce/wpf</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/InitialForce/wpf</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <!-- Symbols are emitted as .snupkg (portable PDB format). -->
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <!-- Suppress warnings for NoBuild SDK-style packaging. -->
+    <NoWarn>NU5128</NoWarn>
+  </PropertyGroup>
+
+  <!-- Empty placeholder assembly: makes the package referenceable in projects
+       that check for compile-time assets. The real DLLs are under runtimes/. -->
+  <ItemGroup>
+    <None Include="lib\net10.0-windows\_._" Pack="true"
+          PackagePath="lib/net10.0-windows/_._" />
+  </ItemGroup>
+
+  <!-- The four patched DLLs and their portable PDBs.
+       Populated by release.yml before dotnet pack is called. -->
+  <ItemGroup>
+    <None Include="runtimes\win-x64\lib\net10.0-windows\*.dll" Pack="true"
+          PackagePath="runtimes/win-x64/lib/net10.0-windows/" />
+    <None Include="runtimes\win-x64\lib\net10.0-windows\*.pdb" Pack="true"
+          PackagePath="runtimes/win-x64/lib/net10.0-windows/" />
+  </ItemGroup>
+
+  <!-- MSBuild targets and props files: injected transitively into all consuming projects.
+       buildTransitive/ ensures injection propagates through project-to-project references. -->
+  <ItemGroup>
+    <None Include="buildTransitive\InitialForce.WPF.RuntimeOverride.targets" Pack="true"
+          PackagePath="buildTransitive/InitialForce.WPF.RuntimeOverride.targets" />
+    <None Include="buildTransitive\InitialForce.WPF.RuntimeOverride.props" Pack="true"
+          PackagePath="buildTransitive/InitialForce.WPF.RuntimeOverride.props" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.*"
+                      PrivateAssets="All" />
+  </ItemGroup>
+
+</Project>

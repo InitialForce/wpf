@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <!--
+    InitialForce.WPF.targets — auto-imported into every project referencing this package.
+
+    This file implements the msquic precedent from InitialForce.App.csproj (master branch,
+    verified 2026-04-27): two targets cooperate to replace Microsoft's runtime-pack WPF
+    DLLs with our patched versions.
+
+    Two targets:
+      RemoveRuntimeWpfAssets  — strips Microsoft WPF DLLs from all MSBuild copy lists
+                                (RuntimePackAsset, ResolvedFileToPublish, ReferenceCopyLocalPaths).
+      InjectIfWpfAssemblies   — copies our patched DLLs at Build+CopyFilesToOutputDirectory,
+                                firing on every F5 inner-loop build (msquic precedent).
+
+    Windows-only restriction:
+      This package only ships win-x64 DLLs. On non-Windows or non-x64 RIDs, Target 2
+      emits a warning and skips the Copy tasks. Target 1 still runs unconditionally so
+      that Microsoft's DLLs are not silently doubled.
+
+    $(MSBuildThisFileDirectory) resolves to buildTransitive/ inside the expanded package
+    cache. The relative path "..\runtimes\..." reaches the runtimes/ subtree.
+  -->
+
+  <PropertyGroup>
+    <!-- Path to the patched DLLs inside the expanded package cache. -->
+    <_IFWpfRuntimeDir
+      >$(MSBuildThisFileDirectory)..\runtimes\win-x64\lib\net10.0-windows\</_IFWpfRuntimeDir>
+  </PropertyGroup>
+
+  <!-- Target 1: Remove Microsoft WPF DLLs from all MSBuild copy lists (publish + restore paths).
+       Runs unconditionally regardless of RID — we do not want double DLLs on any platform. -->
+  <Target Name="RemoveRuntimeWpfAssets"
+          AfterTargets="ResolveRuntimePackAssets;ResolveLockFileCopyLocalFiles">
+    <ItemGroup>
+      <!-- PresentationCore -->
+      <RuntimePackAsset Remove="@(RuntimePackAsset)"
+        Condition="'%(Filename)%(Extension)' == 'PresentationCore.dll'" />
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+        Condition="'%(Filename)%(Extension)' == 'PresentationCore.dll'" />
+      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)"
+        Condition="'%(Filename)%(Extension)' == 'PresentationCore.dll'" />
+
+      <!-- PresentationFramework -->
+      <RuntimePackAsset Remove="@(RuntimePackAsset)"
+        Condition="'%(Filename)%(Extension)' == 'PresentationFramework.dll'" />
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+        Condition="'%(Filename)%(Extension)' == 'PresentationFramework.dll'" />
+      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)"
+        Condition="'%(Filename)%(Extension)' == 'PresentationFramework.dll'" />
+
+      <!-- WindowsBase -->
+      <RuntimePackAsset Remove="@(RuntimePackAsset)"
+        Condition="'%(Filename)%(Extension)' == 'WindowsBase.dll'" />
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+        Condition="'%(Filename)%(Extension)' == 'WindowsBase.dll'" />
+      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)"
+        Condition="'%(Filename)%(Extension)' == 'WindowsBase.dll'" />
+
+      <!-- System.Xaml -->
+      <RuntimePackAsset Remove="@(RuntimePackAsset)"
+        Condition="'%(Filename)%(Extension)' == 'System.Xaml.dll'" />
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+        Condition="'%(Filename)%(Extension)' == 'System.Xaml.dll'" />
+      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)"
+        Condition="'%(Filename)%(Extension)' == 'System.Xaml.dll'" />
+    </ItemGroup>
+  </Target>
+
+  <!-- Target 2: Copy our DLLs on Build+CopyFilesToOutputDirectory (inner-loop + publish).
+       Conditional on win-x64 or win-arm64 RID; warns and skips on other platforms. -->
+  <Target Name="InjectIfWpfAssemblies"
+          AfterTargets="Build;CopyFilesToOutputDirectory">
+
+    <!-- Warn if consumer is not targeting Windows. -->
+    <Warning Text="InitialForce.WPF: package only ships win-x64 DLLs. Current RuntimeIdentifier='$(RuntimeIdentifier)'. Patched DLLs will NOT be injected on non-Windows or non-x64 targets."
+             Condition="'$(RuntimeIdentifier)' != 'win-x64' and '$(RuntimeIdentifier)' != 'win-arm64' and '$(RuntimeIdentifier)' != ''" />
+
+    <!-- Only copy on win-x64 (arm64 support deferred to a future release; see known-limitations.md). -->
+    <Copy SourceFiles="$(_IFWpfRuntimeDir)PresentationCore.dll"
+          DestinationFolder="$(OutDir)" OverwriteReadOnlyFiles="true"
+          Condition="'$(RuntimeIdentifier)' == 'win-x64'" />
+    <Copy SourceFiles="$(_IFWpfRuntimeDir)PresentationFramework.dll"
+          DestinationFolder="$(OutDir)" OverwriteReadOnlyFiles="true"
+          Condition="'$(RuntimeIdentifier)' == 'win-x64'" />
+    <Copy SourceFiles="$(_IFWpfRuntimeDir)WindowsBase.dll"
+          DestinationFolder="$(OutDir)" OverwriteReadOnlyFiles="true"
+          Condition="'$(RuntimeIdentifier)' == 'win-x64'" />
+    <Copy SourceFiles="$(_IFWpfRuntimeDir)System.Xaml.dll"
+          DestinationFolder="$(OutDir)" OverwriteReadOnlyFiles="true"
+          Condition="'$(RuntimeIdentifier)' == 'win-x64'" />
+
+    <!-- Also ensure they appear in ResolvedFileToPublish for self-contained publish. -->
+    <ItemGroup Condition="'$(RuntimeIdentifier)' == 'win-x64'">
+      <ResolvedFileToPublish Include="$(_IFWpfRuntimeDir)PresentationCore.dll">
+        <RelativePath>PresentationCore.dll</RelativePath>
+        <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+      <ResolvedFileToPublish Include="$(_IFWpfRuntimeDir)PresentationFramework.dll">
+        <RelativePath>PresentationFramework.dll</RelativePath>
+        <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+      <ResolvedFileToPublish Include="$(_IFWpfRuntimeDir)WindowsBase.dll">
+        <RelativePath>WindowsBase.dll</RelativePath>
+        <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+      <ResolvedFileToPublish Include="$(_IFWpfRuntimeDir)System.Xaml.dll">
+        <RelativePath>System.Xaml.dll</RelativePath>
+        <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+
+    <Message Importance="high"
+             Text="InjectIfWpfAssemblies: copied InitialForce.WPF patched DLLs to $(OutDir)"
+             Condition="'$(RuntimeIdentifier)' == 'win-x64'" />
+  </Target>
+
+</Project>
