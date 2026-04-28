@@ -1,0 +1,47 @@
+# .github/workflows/test-autonomy-check.yml
+#
+# Caller workflow that exercises the autonomy-check reusable workflow.
+# Triggered manually via workflow_dispatch so a human can verify the gate
+# logic end-to-end without needing a real Claude job to fire first.
+name: Test Autonomy Check
+
+on:
+  workflow_dispatch:
+    inputs:
+      requested_action:
+        description: "Action to test against the gate (default: claude-invoke)"
+        type: string
+        required: false
+        default: "claude-invoke"
+      bypass_for_human_dispatch:
+        description: "Pass bypass_for_human_dispatch=true to the gate"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Call autonomy gate
+    uses: ./.github/workflows/autonomy-check.yml
+    with:
+      requested_action: ${{ inputs.requested_action || 'claude-invoke' }}
+      bypass_for_human_dispatch: ${{ inputs.bypass_for_human_dispatch || false }}
+
+  report:
+    name: Log gate outputs
+    needs: gate
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Print gate result
+        run: |
+          echo "proceed : ${{ needs.gate.outputs.proceed }}"
+          echo "reason  : ${{ needs.gate.outputs.reason }}"
+          if [ "${{ needs.gate.outputs.proceed }}" = "true" ]; then
+            echo "::notice::Gate PASSED — would continue to Claude jobs."
+          else
+            echo "::warning::Gate BLOCKED — downstream Claude jobs would be skipped."
+          fi
