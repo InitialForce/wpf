@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <!-- Target framework must be set for SDK-style pack; no actual compilation. -->
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <IsPackable>true</IsPackable>
     <!-- We are packaging pre-built DLLs, not compiling this project. -->
     <IncludeBuildOutput>false</IncludeBuildOutput>
@@ -36,17 +36,17 @@
   <!-- Empty placeholder assembly: makes the package referenceable in projects
        that check for compile-time assets. The real DLLs are under runtimes/. -->
   <ItemGroup>
-    <None Include="lib\net10.0-windows\_._" Pack="true"
-          PackagePath="lib/net10.0-windows/_._" />
+    <None Include="lib\net10.0\_._" Pack="true"
+          PackagePath="lib/net10.0/_._" />
   </ItemGroup>
 
   <!-- The four patched DLLs and their portable PDBs.
        Populated by release.yml before dotnet pack is called. -->
   <ItemGroup>
-    <None Include="runtimes\win-x64\lib\net10.0-windows\*.dll" Pack="true"
-          PackagePath="runtimes/win-x64/lib/net10.0-windows/" />
-    <None Include="runtimes\win-x64\lib\net10.0-windows\*.pdb" Pack="true"
-          PackagePath="runtimes/win-x64/lib/net10.0-windows/" />
+    <None Include="runtimes\win-x64\lib\net10.0\*.dll" Pack="true"
+          PackagePath="runtimes/win-x64/lib/net10.0/" />
+    <None Include="runtimes\win-x64\lib\net10.0\*.pdb" Pack="true"
+          PackagePath="runtimes/win-x64/lib/net10.0/" />
   </ItemGroup>
 
   <!-- MSBuild targets and props files: injected transitively into all consuming projects.
