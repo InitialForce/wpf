@@ -37,11 +37,6 @@ internal static class ElementUtil
                     remoteException = e;
                     return null;
                 }
-                catch        //for non-CLS Compliant exceptions
-                {
-                    remoteException = null;
-                    return null;
-                }
                 finally
                 {
                     completed = true;
