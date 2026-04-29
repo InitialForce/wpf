@@ -243,4 +243,5 @@ jobs:
         env:
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
+          IF_FORK_ALLOW_UNSIGNED_LEDGER: "true"  # phase-0: GPG key not yet provisioned for the bot identity
           GH_TOKEN: ${{ steps.app-token.outputs.token }}

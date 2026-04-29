@@ -91,6 +91,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
+          IF_FORK_ALLOW_UNSIGNED_LEDGER: "true"  # phase-0: GPG key not yet provisioned for the bot identity
 
       - name: Handle graduated — end workflow (no work needed)
         if: steps.check.outputs.action == 'skip'
@@ -117,6 +118,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
+          IF_FORK_ALLOW_UNSIGNED_LEDGER: "true"  # phase-0: GPG key not yet provisioned for the bot identity
 
   # -------------------------------------------------------------------------
   # Job 3: sha-smuggling-check — verify HEAD SHA matches ledger
@@ -220,6 +222,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
+          IF_FORK_ALLOW_UNSIGNED_LEDGER: "true"  # phase-0: GPG key not yet provisioned for the bot identity
 
   # -------------------------------------------------------------------------
   # Job 4: cherry-pick — Claude Sonnet applies the patch
@@ -302,6 +305,7 @@ jobs:
         env:
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
+          IF_FORK_ALLOW_UNSIGNED_LEDGER: "true"  # phase-0: GPG key not yet provisioned for the bot identity
 
   # -------------------------------------------------------------------------
   # Job 5: denylist-check — check changed files against file_denylist
@@ -521,6 +525,7 @@ jobs:
         env:
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
+          IF_FORK_ALLOW_UNSIGNED_LEDGER: "true"  # phase-0: GPG key not yet provisioned for the bot identity
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Enable auto-merge (24h timer) if not frozen

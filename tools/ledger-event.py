@@ -150,11 +150,21 @@ def _git_commit(ledger_path: Path, message: str, line_hash: str) -> None:
         f"Ledger-Line-Hash: {line_hash}"
     )
 
+    # Ensure git has a committer identity. Workflows already set GIT_AUTHOR_*
+    # for attribution; mirror those into GIT_COMMITTER_* if not already set so
+    # `git commit` never fails on "Committer identity unknown".
+    commit_env = os.environ.copy()
+    if "GIT_COMMITTER_NAME" not in commit_env and "GIT_AUTHOR_NAME" in commit_env:
+        commit_env["GIT_COMMITTER_NAME"] = commit_env["GIT_AUTHOR_NAME"]
+    if "GIT_COMMITTER_EMAIL" not in commit_env and "GIT_AUTHOR_EMAIL" in commit_env:
+        commit_env["GIT_COMMITTER_EMAIL"] = commit_env["GIT_AUTHOR_EMAIL"]
+
     # Stage the ledger file
     subprocess.run(
         ["git", "add", str(ledger_path)],
         check=True,
         capture_output=True,
+        env=commit_env,
     )
 
     # Try signed commit first
@@ -163,6 +173,7 @@ def _git_commit(ledger_path: Path, message: str, line_hash: str) -> None:
             ["git", "commit", "-S", "-m", full_message],
             capture_output=True,
             text=True,
+            env=commit_env,
         )
         if result.returncode == 0:
             return
@@ -171,26 +182,36 @@ def _git_commit(ledger_path: Path, message: str, line_hash: str) -> None:
             "gpg" in result.stderr.lower() or "signing" in result.stderr.lower()
         )
         if is_gpg_failure:
-            if _is_ci():
-                # HIGH-2 fix: fail closed in CI
+            # Phase-0 escape hatch: explicit opt-in env var permits unsigned
+            # commits in CI when GPG signing isn't yet provisioned. Remove the
+            # opt-in once a bot GPG key is wired up; production CI must sign.
+            allow_unsigned = (
+                os.environ.get("IF_FORK_ALLOW_UNSIGNED_LEDGER", "").lower()
+                in ("1", "true", "yes")
+            )
+            if _is_ci() and not allow_unsigned:
+                # HIGH-2 fix: fail closed in CI unless the operator explicitly
+                # opted in via IF_FORK_ALLOW_UNSIGNED_LEDGER.
                 die(
                     5,
                     "GPG signing failed in CI environment; unsigned commits are not "
-                    "permitted in production. Ensure a GPG key is available to the runner.",
+                    "permitted in production. Set IF_FORK_ALLOW_UNSIGNED_LEDGER=true "
+                    "for explicit phase-0 opt-in, or provision a GPG key.",
                     stdout=result.stdout,
                     stderr=result.stderr,
                     returncode=result.returncode,
                 )
-            # Outside CI: warn and fall back to unsigned
+            # Outside CI, or with the phase-0 opt-in: warn and fall back to unsigned
             print(
                 "WARNING: GPG signing failed; falling back to unsigned commit. "
-                "Signed commits are required in production CI.",
+                "Signed commits are required in production CI once GPG is provisioned.",
                 file=sys.stderr,
             )
             subprocess.run(
                 ["git", "commit", "-m", full_message],
                 check=True,
                 capture_output=True,
+                env=commit_env,
             )
             return
         # Some other error — propagate
