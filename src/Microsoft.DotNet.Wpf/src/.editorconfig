@@ -17,6 +17,15 @@ csharp_style_pattern_matching_over_as_with_null_check = true:suggestion
 # CA1036: Override methods on comparable types
 dotnet_diagnostic.CA1036.severity = suggestion
 
+# CA1052: Static holder types should be Static or NotInheritable
+# Upstream PR #10718 (cherry-picked as dfd7ac3f6) removed this severity
+# downgrade, but the upstream PR is still OPEN and incomplete — it does
+# not fix MarshalGeneric<T>, XamlParser, or XamlReaderHelper. Reinstate
+# the suggestion-level severity so the build passes; finishing upstream
+# PR 10718 (making those three types static/sealed/abstract correctly)
+# is tracked as a follow-up.
+dotnet_diagnostic.CA1052.severity = suggestion
+
 # NOTE: If existing public API, CA1066 should be suppressed individually
 # in the GlobalSuppressions file.
 
