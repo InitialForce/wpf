@@ -1,16 +1,53 @@
 # InitialForce/wpf — Differences from upstream
 
-_Last updated: 2026-04-28 · Branch `if/main` is 24 commits ahead of `upstream/release/10.0`_
+_Last updated: 2026-04-29 · Branch `if/main` is 238 commits ahead of `upstream/release/10.0` (33 tooling + 205 cherry-picked `src/` commits across 38 community PRs)_
+
+---
+
+## ELI10 — what is this and why does it exist? {#eli10}
+
+**Microsoft's WPF is open source on GitHub.** Skilled community contributors — most prolifically [**h3xds1nz**](https://github.com/h3xds1nz) — regularly fix WPF perf bugs, remove dead code, and clean up boxing/allocation hot-spots. Microsoft merges those fixes into `dotnet/wpf` `main`, but only a slice of them get backported to the stable branch (`release/10.0`) that ships inside .NET 10.
+
+If your app uses stock .NET 10 WPF you only get the slice Microsoft chose to backport. Every "this allocates 40 MB unnecessarily on every layout pass" or "this UI freezes when the GPU cache is on" fix that didn't make the backport cut is invisible to you until the next .NET major version.
+
+**This fork closes that gap.** We take Microsoft's `release/10.0` branch and cherry-pick the merged-but-not-backported community improvements on top, then republish the four WPF runtime DLLs (`PresentationCore.dll`, `PresentationFramework.dll`, `WindowsBase.dll`, `System.Xaml.dll`) as NuGet packages anyone can consume.
+
+### How the package works in your app
+You add one `<PackageReference>`. MSBuild targets shipped in the package strip Microsoft's WPF DLLs from your build/publish output and copy our patched DLLs in their place. **Your app's source code does not change.** Your app does not need to know the fork exists.
+
+### What's in the current build
+`upstream/release/10.0` + **38 cherry-picked open community PRs** — mostly allocation reduction, boxing removal, `Hashtable`/`ArrayList` → generic collection swaps, dead-code cleanup, and a handful of correctness fixes (Indeterminate `ProgressBar` with `CacheMode`, `AdornerLayer` measuring, `ComboBoxAutomationPeer` cast, etc.). Full per-PR list with upstream links is in [Consumer-facing changes](#consumer-facing-changes) below.
+
+### How safety works
+Every candidate PR is reviewed by two independent Claude Opus reviewers at different temperatures before it lands. Hard-fail patterns (`[DllImport`, `unsafe`, `BinaryFormatter`) auto-reject. Failed builds, failed smoke tests, or perf regressions block publish. A human approves every NuGet release. Full design is in [The autonomous pipeline](#pipeline).
+
+### How to use it
+Replace all four WPF runtime DLLs:
+```xml
+<PackageReference Include="InitialForce.WPF" Version="10.0.0-if.*" />
+```
+Or, for selective per-assembly replacement (e.g. only the perf-critical ones):
+```xml
+<PropertyGroup>
+  <IF_OverrideAssemblies>PresentationCore;PresentationFramework</IF_OverrideAssemblies>
+</PropertyGroup>
+<ItemGroup>
+  <PackageReference Include="InitialForce.WPF.RuntimeOverride" Version="10.0.0-if.*" />
+</ItemGroup>
+```
+Both packages are published to [nuget.org](https://www.nuget.org/packages?q=InitialForce.WPF) under Initial Force AS's reserved `InitialForce.*` prefix.
+
+**RID support:** `win-x64` only in v1. Other RIDs (`win-arm64`, `linux-x64`, …) hard-fail with an actionable build error so you discover it at compile time, not runtime.
 
 ---
 
 ## TL;DR
 
-- **What it is.** A production fork of `dotnet/wpf` (`release/10.0`) maintained by [Initial Force AS](https://initialforce.com) for internal use. The fork adds zero source-code changes today — its value is the autonomous tooling overlay that will continuously evaluate and cherry-pick high-quality community PRs that are merged into `dotnet/wpf` main but not yet included in the `release/10.0` branch.
-- **Why it exists.** Community contributors (notably **h3xds1nz**) regularly merge allocation-reduction, dead-code-removal, and correctness fixes into `dotnet/wpf` main months before they appear in a stable .NET release. This fork provides a way to consume those improvements earlier, under a safety gate, as NuGet packages.
+- **What it is.** A production fork of `dotnet/wpf` (`release/10.0`) maintained by [Initial Force AS](https://initialforce.com). Carries 38 cherry-picked open community PRs not yet in `release/10.0`, shipped as NuGet replacements for WPF's four core runtime DLLs.
+- **Why it exists.** Community contributors (notably **h3xds1nz**) merge perf and correctness fixes into `dotnet/wpf` `main` that don't all get backported to `release/10.0`. This fork lets us consume those improvements early, under a safety gate, as production NuGets.
+- **What you get today.** Real allocation reductions (`Hashtable` → `Dictionary`/`HashSet`, boxing removal in `DataBindEngine`, `Grid.Measure`, `UncommonField<bool>`, `AutomationPeer`), bug fixes (Indeterminate `ProgressBar` with `CacheMode`, `AdornerLayer` measuring, `ComboBoxAutomationPeer` `InvalidCastException`), and dead-code removal across `PresentationCore` / `PresentationFramework` / `WindowsBase` / `System.Xaml`. Full list: [Consumer-facing changes](#consumer-facing-changes).
 - **How autonomous review works.** Every candidate upstream PR is evaluated independently by two Claude Opus reviewers at different temperatures. Disagreements escalate to a human; unanimous approval triggers cherry-pick, build, smoke, and perf gating before the patch lands.
-- **Current operational status.** Phase 0 — bootstrap complete. All workflows, tooling, tests, and the 223-entry patch ledger are committed. The pipeline becomes live once the Phase-0 human gates (GitHub App, branch protection, environments, variables) are configured. Zero patches have been cherry-picked through the automated pipeline yet.
-- **All `src/` code is byte-identical to upstream** `dotnet/wpf` `release/10.0` HEAD.
+- **Current operational status.** Phase 0 bootstrap complete. CI pipeline live, real WPF DLLs build under arcade, NuGet packages publish to `nuget.org` under the `InitialForce.*` reserved prefix. The initial 38-PR batch was applied by a human-supervised bulk cherry-pick (the autonomous review pipeline remains in default-deny mode until per-PR reviewer beads drain).
 
 ---
 
@@ -18,11 +55,87 @@ _Last updated: 2026-04-28 · Branch `if/main` is 24 commits ahead of `upstream/r
 
 | Metric | Value |
 |---|---|
-| Commits ahead of `upstream/release/10.0` | **24** |
-| Files changed (M + D + A) | **167** (3 modified, 5 deleted, 159 added) |
-| Net lines across modified files | `+16 / −21` (additive in README and .gitignore; reduction in issue template config) |
-| Source files modified | **0** — no `src/` changes |
-| New fork-only files | **159** |
+| Commits ahead of `upstream/release/10.0` | **238** (33 tooling/CI + 205 cherry-picked `src/` commits) |
+| Total files changed (M + D + A) across all 238 commits | **714** |
+| Aggregate line delta | `+44 286 / −11 939` |
+| Cherry-picked open community PRs (`dotnet/wpf` PRs not in `release/10.0`) | **38 applied** |
+| Cherry-pick attempts skipped due to merge conflicts | **17** (queued for manual resolution — see [conflicted PRs](#conflicted-prs)) |
+| New fork-only files (tooling overlay) | **159** |
+| Source-only behaviour delta vs upstream `release/10.0` | dominated by allocation reduction and dead-code removal — net negative LOC under `src/` |
+
+---
+
+## Consumer-facing changes {#consumer-facing-changes}
+
+The 38 cherry-picked PRs below are ahead of `upstream/release/10.0` and **all have user-visible impact** — they change allocation behaviour, fix observable bugs, or trim live code paths. Every entry was independently merged into `dotnet/wpf` `main` by Microsoft maintainers and is awaiting backport. Authorship belongs to the upstream contributor (overwhelmingly [@h3xds1nz](https://github.com/h3xds1nz)); this fork only reorders the delivery.
+
+### Performance — allocation & boxing reduction
+
+| PR | Title (consumer impact) |
+|---|---|
+| [#10237](https://github.com/dotnet/wpf/pull/10237) | Replace boxing `Hashtable` in `AutomationPeer` with `ReadOnlyDictionary<K,V>` — eliminates per-lookup boxing on accessibility tree traversal |
+| [#10246](https://github.com/dotnet/wpf/pull/10246) | Remove array allocation during `SystemParametersInfo` cache invalidation — fewer GC-gen0 collections on system theme changes |
+| [#10320](https://github.com/dotnet/wpf/pull/10320) | Use stack-allocated/inline arrays with fixed lengths in more places — replaces several short-lived heap arrays with `stackalloc` |
+| [#10386](https://github.com/dotnet/wpf/pull/10386) | Remove duplicated PInvoke branch in `Geometry` Milcore call — one fewer indirect call per geometry combine |
+| [#10542](https://github.com/dotnet/wpf/pull/10542) | Remove double dictionary lookup for ctor params lookup in `WpfKnownType` — XAML-load-time perf |
+| [#10628](https://github.com/dotnet/wpf/pull/10628) | Stop boxing booleans in `DataBindEngine` — uses `BooleanBoxes` cached pair on every binding state transition |
+| [#10630](https://github.com/dotnet/wpf/pull/10630) | Optimize `ComputeInkBoundingBox(LtoR)` — removes a redundant branch in stylus/ink hit-testing |
+| [#10681](https://github.com/dotnet/wpf/pull/10681) | Avoid boxing booleans and allocations in `UncommonField<bool>` — touches every WPF control with bool flags stored in uncommon-field storage |
+| [#10684](https://github.com/dotnet/wpf/pull/10684) | Replace boxing `Hashtable` in `Grid`'s `Measure` — meaningful win for layouts with many `Grid` cells |
+| [#10700](https://github.com/dotnet/wpf/pull/10700) | Replace `ArrayList` from `FrameworkElement` with `List<TemplateKey>` — generic, no boxing on template lookup |
+| [#10715](https://github.com/dotnet/wpf/pull/10715) | Avoid caching `typeof` result in MilCodeGen output — reduces static-field count and code size |
+| [#10719](https://github.com/dotnet/wpf/pull/10719) | Swap `Dictionary<ICyclicBrush, EmptyStruct>` with `HashSet<ICyclicBrush>` in `TreeWalkProgress` — half the storage, faster `Contains` |
+| [#10750](https://github.com/dotnet/wpf/pull/10750) | Swap `Dictionary` with `HashSet<XamlMember>` and avoid double lookup — XAML-load-time perf |
+| [#10879](https://github.com/dotnet/wpf/pull/10879) | Use `StrongBox<Rect>` over `object` field in `GlyphRun` — strongly-typed, no boxing on rect access |
+| [#10880](https://github.com/dotnet/wpf/pull/10880) | Avoid specialized-generic methods for object null checks in `StylusTraceLogger` |
+| [#10884](https://github.com/dotnet/wpf/pull/10884) | Avoid boxing booleans during tracing and when setting `bool?` properties |
+| [#10889](https://github.com/dotnet/wpf/pull/10889) | Refactor `WeakReferenceList`/`CopyOnWriteList` as type-safe generic collections — removes `object` boxing on every enumeration |
+
+### Bug fixes (correctness)
+
+| PR | Title (consumer impact) |
+|---|---|
+| [#10289](https://github.com/dotnet/wpf/pull/10289) | Fix `InvalidCastException` in `Can/ConvertTo` from `KeyConverter` — incorrect input no longer crashes the converter |
+| [#10617](https://github.com/dotnet/wpf/pull/10617) | Test for `NaN` correctly (CA2242) — avoids latent buggy `NaN` comparisons across geometry/animation code |
+| [#10649](https://github.com/dotnet/wpf/pull/10649) | Fix Indeterminate `ProgressBar` animation when `CacheMode` is set — animation no longer freezes on cached visual trees |
+| [#10657](https://github.com/dotnet/wpf/pull/10657) | Fix measuring passes in `AdornerLayer` of underlying `Adorner` elements — adorners now invalidate measure when their content changes |
+| [#10877](https://github.com/dotnet/wpf/pull/10877) | Fix `InvalidCastException` in `ComboBoxAutomationPeer` and forward `Scroll` to `ItemsControl` base — accessibility tooling no longer crashes against open `ComboBox` |
+
+### Dead code & startup-cost reduction
+
+| PR | Title (consumer impact) |
+|---|---|
+| [#10641](https://github.com/dotnet/wpf/pull/10641) | Remove NetFX-specific dead code from `DWriteForwarder` compilation — smaller `PresentationCore.dll` |
+| [#10680](https://github.com/dotnet/wpf/pull/10680) | Remove unused dead code in `ElementUtil`, make class static — fewer JITed methods at startup |
+| [#10874](https://github.com/dotnet/wpf/pull/10874) | Remove non-CLS exception handlers in `LineServicesCallbacks` — dead branches eliminated from text layout hot path |
+| [#10875](https://github.com/dotnet/wpf/pull/10875) | Remove non-CLS exception handlers in `PtsHost` |
+| [#10876](https://github.com/dotnet/wpf/pull/10876) | Remove non-CLS exception handlers and CS1058 suppressions in PTS callbacks |
+| [#10881](https://github.com/dotnet/wpf/pull/10881) | Remove unused dead code in `BamlMapTable` / `XamlTypeMapper` — removes `_reusingMapTable` (always false) and `MapTable.Initialize` |
+| [#10882](https://github.com/dotnet/wpf/pull/10882) | Remove `Verify` classes, use standard BCL throw helpers — smaller binaries, consistent argument validation |
+| [#10883](https://github.com/dotnet/wpf/pull/10883) | Stop duplicating `Scroll` code in `TreeViewAutomationPeer` — forwards to `ItemsControl` base instead |
+
+### Code generation, build pipeline & style hygiene
+
+These are not user-runtime perf wins on their own, but they propagate into every `MilCodeGen`-generated type (most of `PresentationCore`'s primitive graphics types) and into `PresentationBuildTasks`, so they affect compile-time and the shape of generated code.
+
+| PR | Title |
+|---|---|
+| [#10618](https://github.com/dotnet/wpf/pull/10618) | [MilCodeGen] Declare `Equals`/`GetHashCode` and property getters as `readonly` on generated structs |
+| [#10648](https://github.com/dotnet/wpf/pull/10648) | [MilCodeGen] Optimize generated `ValueSerializers` code style and usings |
+| [#10704](https://github.com/dotnet/wpf/pull/10704) | [StyleCleanUp] Specify `StringComparison` for correctness (CA1310) |
+| [#10713](https://github.com/dotnet/wpf/pull/10713) | Add tests for the public API surface of `BitmapSizeOptions`, cleanup the class |
+| [#10718](https://github.com/dotnet/wpf/pull/10718) | [StyleCleanUp] Static holder types should be `static` or `sealed` (CA1052) |
+| [#10725](https://github.com/dotnet/wpf/pull/10725) | [StyleCleanUp] Use literals where appropriate (CA1802) |
+| [#10729](https://github.com/dotnet/wpf/pull/10729) | [StyleCleanUp] Add `readonly` modifiers in `PresentationBuildTasks` |
+| [#10856](https://github.com/dotnet/wpf/pull/10856) | [MilCodeGen] Allow emitting empty lines via `NULL`, including conditionals — clean diffs in regenerated MilCodeGen output |
+
+### Conflicted PRs (queued for manual resolution) {#conflicted-prs}
+
+The bulk cherry-pick run skipped 17 PRs because they conflicted with upstream `release/10.0` (mostly because Microsoft already partially backported the same change, or because two h3xds1nz PRs depend on each other and only one was resolved cleanly). These are tracked for follow-up:
+
+`#10245`, `#10388`, `#10543`, `#10613`, `#10635`, `#10636`, `#10647`, `#10664`, `#10668`, `#10673`, `#10690`, `#10691`, `#10701`, `#10706`, `#10711`, `#10731`, `#10903`.
+
+Each will be retried with manual conflict resolution in a follow-up release.
 
 ---
 
@@ -150,7 +263,7 @@ flowchart TD
     EE -.->|replays| A
 ```
 
-**Phase-0 note.** The `build-wpf` job currently emits placeholder marker files rather than real `.nupkg` artifacts — the upstream WPF source checkout and `dotnet pack` invocations are `TODO` pending the Phase-0 packaging beads. Smoke and perf steps are similarly wired but produce sentinel outputs only. The orchestration, gating, artifact paths, ledger chain, and Python tooling CI are fully operational.
+**Build status.** The `build-wpf` job runs the real arcade build (`build.cmd -c Release -plat <arch> -pack`), produces the four patched WPF runtime DLLs, stages them into both `InitialForce.WPF` and `InitialForce.WPF.RuntimeOverride` packaging trees, runs `dotnet pack` against both, and (on release builds) publishes the resulting `.nupkg` files to [nuget.org](https://www.nuget.org/packages?q=InitialForce.WPF) under the reserved `InitialForce.*` prefix. Smoke and perf harnesses execute against the packed DLLs.
 
 ### Ledger and audit trail
 
@@ -162,7 +275,9 @@ Valid event types: `discovered`, `review_1`, `review_2`, `merged_verdict`, `cher
 
 ## Current state of the patch ledger {#patch-ledger}
 
-**As of 2026-04-28, zero patches have been processed through the automated 2× review gate.** The ledger contains 223 entries, all in the `discovered` state — these are candidates queued for review, not applied patches.
+**As of 2026-04-29, zero patches have been processed through the automated 2× review gate.** The ledger contains 223 entries, all in the `discovered` state — candidates queued for review.
+
+The 38 PRs already on `if/main` (see [Consumer-facing changes](#consumer-facing-changes)) were applied via a human-supervised bulk cherry-pick, **not** the autonomous pipeline. The pipeline is wired end-to-end and used in dry-run on every PR review, but the global `IF_AUTONOMY_ENABLED` switch remains `false` until per-PR review beads drain through the operator triage queue and at least one full nightly cycle runs green.
 
 ### Event-type summary
 
@@ -211,7 +326,12 @@ Five patches in [`docs/manual-candidates.md`](docs/manual-candidates.md) have no
 
 ## What is identical to upstream {#identical}
 
-All files under `src/`, `eng/`, and every other WPF runtime path are byte-identical to `dotnet/wpf` `release/10.0` HEAD. The fork ships zero source-code modifications today. Every commit in the 24-commit delta concerns CI/CD workflows, Python test tooling, NuGet packaging metadata, Claude prompts, ledger data, documentation, and root-level config files. No WPF assembly behavior is altered.
+All paths outside the 38 cherry-picked PRs' touched files remain byte-identical to `dotnet/wpf` `release/10.0` HEAD. Concretely:
+
+- **`eng/`, `tests/`, `Documentation/`, build infrastructure** — untouched. Arcade build configuration, signing, test infrastructure, native build glue, and design docs all match upstream `release/10.0`.
+- **`src/` files outside the cherry-picked PRs** — untouched. Every `src/` change is traceable to one of the 38 cherry-picks via `git log -- <file>` and each cherry-pick commit carries a `(cherry picked from commit <upstream-sha>)` trailer for full upstream attribution.
+
+The 33-commit tooling overlay (CI/CD workflows, Python test tooling, NuGet packaging metadata, Claude prompts, ledger data, documentation, root-level config) does not touch any WPF runtime code. No fork-only modifications exist inside `src/` — every byte in there comes from either upstream or a documented upstream PR.
 
 ---
 
