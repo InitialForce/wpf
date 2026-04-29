@@ -252,6 +252,51 @@ jobs:
           }
         shell: powershell
 
+      # ----- crossgen2 (ReadyToRun) compilation -----
+      # Stock dotnet/wpf DLLs in Microsoft.WindowsDesktop.App ship with R2R native
+      # code baked in by dotnet/runtime's runtime-pack assembly step. Our fork
+      # builds the libraries via build.cmd but does not run that step, so the DLLs
+      # in artifacts/bin are JIT-only. JIT'd frames are slightly fatter than R2R'd
+      # frames, and WPF code paths that are already deep on the stack
+      # (dispatcher unhandled-exception handler -> MessageDialog.xaml -> BAML ->
+      # WPFLocalizeExtension's culture iteration) overflow the 1 MB thread stack
+      # in consumers. R2R-compile the staged DLLs in place to match upstream behavior.
+      - name: R2R-compile staged DLLs (crossgen2)
+        run: |
+          $rid = if ("${{ matrix.arch }}" -eq "x64") { "win-x64" } else { "win-arm64" }
+          # Locate runtime packs from the SDK installed by setup-dotnet.
+          $sdkInfo = (& dotnet --info) -join "`n"
+          $dotnetRoot = $env:DOTNET_ROOT
+          if (-not $dotnetRoot -or -not (Test-Path $dotnetRoot)) {
+            $dotnetRoot = Split-Path -Parent (Get-Command dotnet).Source
+          }
+          $netCorePack = Get-ChildItem (Join-Path $dotnetRoot 'shared\Microsoft.NETCore.App') -Directory |
+                         Sort-Object Name -Descending | Select-Object -First 1
+          $desktopPack = Get-ChildItem (Join-Path $dotnetRoot 'shared\Microsoft.WindowsDesktop.App') -Directory |
+                         Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $netCorePack)  { throw "Microsoft.NETCore.App runtime pack not found under $dotnetRoot" }
+          if (-not $desktopPack) { throw "Microsoft.WindowsDesktop.App runtime pack not found under $dotnetRoot" }
+          Write-Host "Using NetCorePack = $($netCorePack.FullName)"
+          Write-Host "Using DesktopPack = $($desktopPack.FullName)"
+
+          $stagingDirs = @(
+            "packaging\InitialForce.WPF\runtimes\$rid\lib\net10.0",
+            "packaging\InitialForce.WPF.RuntimeOverride\runtimes\$rid\lib\net10.0"
+          )
+          foreach ($dir in $stagingDirs) {
+            Write-Host ""
+            Write-Host "==================================================================="
+            Write-Host "Crossgen2: $dir"
+            Write-Host "==================================================================="
+            & .\tools\crossgen-staged.ps1 `
+              -StagingDir $dir `
+              -NetCorePack $netCorePack.FullName `
+              -DesktopPack $desktopPack.FullName `
+              -TargetArch ${{ matrix.arch }}
+            if ($LASTEXITCODE -ne 0) { throw "crossgen-staged.ps1 failed for $dir" }
+          }
+        shell: powershell
+
       - name: Compute package version
         id: version
         run: |
