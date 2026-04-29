@@ -113,7 +113,16 @@ c. **TEST COVERAGE** — for non-trivial logic changes, is there a test? If not,
 d. **REVERT SAFETY** — if this change turns out wrong, can it be reverted cleanly, or does it
    create data-migration or serialization commitments?
 
-**Step 6 — Emit verdict JSON** to stdout (exactly one JSON object, no other output).
+**Step 6 — Emit verdict JSON** by writing it to the file path in `$VERDICT_OUTPUT_PATH`
+using a single Bash command (the workflow uploads that file as an artifact and the
+merge-verdict job reads it). Do this with one heredoc/printf invocation, e.g.
+```bash
+cat > "$VERDICT_OUTPUT_PATH" <<'JSON'
+{"verdict": "...", "confidence": 0.9, "rationale": "..."}
+JSON
+```
+Write exactly one JSON object — no logs, comments, or trailing newlines outside the
+JSON. Do not also print to stdout; the file is the canonical channel.
 
 ---
 
