@@ -1,0 +1,58 @@
+name: Import bot GPG key
+description: >-
+  Import the Initial Force WPF bot's GPG signing key into the runner's keyring
+  and configure git to sign commits/tags with it. Used by every job that emits
+  signed ledger events via tools/ledger-event.py.
+
+inputs:
+  gpg-private-key:
+    description: ASCII-armored private key (passphrase-less ed25519)
+    required: true
+  gpg-key-id:
+    description: Long-form (16 hex char) key ID to set as user.signingkey
+    required: true
+  gpg-fingerprint:
+    description: Full 40-hex-char fingerprint for ownertrust import (optional; defaults to gpg-key-id which works for signing but not for trust marking)
+    required: false
+    default: ""
+  git-user-name:
+    description: Author/committer name to configure
+    required: false
+    default: "Claude (Initial Force WPF Bot)"
+  git-user-email:
+    description: Author/committer email; must match the UID on the GPG key
+    required: false
+    default: "wpf-bot@initialforce.com"
+
+runs:
+  using: composite
+  steps:
+    - name: Import GPG key and configure git signing
+      shell: bash
+      env:
+        GH_BOT_GPG_KEY: ${{ inputs.gpg-private-key }}
+        GH_BOT_GPG_KEY_ID: ${{ inputs.gpg-key-id }}
+        GH_BOT_GPG_FPR: ${{ inputs.gpg-fingerprint }}
+        GIT_USER_NAME: ${{ inputs.git-user-name }}
+        GIT_USER_EMAIL: ${{ inputs.git-user-email }}
+      run: |
+        set -euo pipefail
+        echo "::group::Import bot GPG key"
+        # Import the private key (no passphrase: the key was generated with %no-protection)
+        printf '%s' "$GH_BOT_GPG_KEY" | gpg --batch --import
+        # Mark the key as ultimately trusted (skip if no full fingerprint supplied —
+        # signing still works without trust, just produces a "key not certified" warning).
+        if [ -n "${GH_BOT_GPG_FPR:-}" ]; then
+          echo "${GH_BOT_GPG_FPR}:6:" | gpg --import-ownertrust
+        fi
+        # Configure git to sign with this key
+        git config --global user.name  "$GIT_USER_NAME"
+        git config --global user.email "$GIT_USER_EMAIL"
+        git config --global user.signingkey "$GH_BOT_GPG_KEY_ID"
+        git config --global commit.gpgsign true
+        git config --global tag.gpgsign true
+        git config --global gpg.program gpg
+        # Sanity check: produce a test signature non-interactively
+        echo "test" | gpg --batch --yes --pinentry-mode loopback --local-user "$GH_BOT_GPG_KEY_ID" --clearsign > /dev/null
+        echo "GPG key imported and git configured for signing."
+        echo "::endgroup::"

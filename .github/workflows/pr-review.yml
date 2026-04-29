@@ -122,6 +122,13 @@ jobs:
           VERDICT_OUTPUT_PATH: /tmp/review-1.json
           REVIEW_TEMPERATURE: "0.0"
 
+      - name: Import bot GPG key
+        uses: ./.github/actions/import-bot-gpg
+        with:
+          gpg-private-key: ${{ secrets.GH_BOT_GPG_KEY }}
+          gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
+          gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
+
       - name: Emit review_1 ledger event
         run: |
           python tools/ledger-event.py \
@@ -134,7 +141,6 @@ jobs:
         env:
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
-          IF_FORK_ALLOW_UNSIGNED_LEDGER: "true"  # phase-0: GPG key not yet provisioned for the bot identity
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Upload review-1 artifact
@@ -211,6 +217,13 @@ jobs:
           VERDICT_OUTPUT_PATH: /tmp/review-2.json
           REVIEW_TEMPERATURE: "0.7"
 
+      - name: Import bot GPG key
+        uses: ./.github/actions/import-bot-gpg
+        with:
+          gpg-private-key: ${{ secrets.GH_BOT_GPG_KEY }}
+          gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
+          gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
+
       - name: Emit review_2 ledger event
         run: |
           python tools/ledger-event.py \
@@ -223,7 +236,6 @@ jobs:
         env:
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
-          IF_FORK_ALLOW_UNSIGNED_LEDGER: "true"  # phase-0: GPG key not yet provisioned for the bot identity
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Upload review-2 artifact
@@ -262,6 +274,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Import bot GPG key
+        uses: ./.github/actions/import-bot-gpg
+        with:
+          gpg-private-key: ${{ secrets.GH_BOT_GPG_KEY }}
+          gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
+          gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
+
       - name: Warn and record single-review fast path
         run: |
           echo "::warning::IF_REVIEW_DOUBLE_REQUIRED is 'false' — single-review fast path active. This bypasses the two-reviewer independence guarantee. Use only in emergencies."
@@ -275,7 +294,6 @@ jobs:
         env:
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
-          IF_FORK_ALLOW_UNSIGNED_LEDGER: "true"  # phase-0: GPG key not yet provisioned for the bot identity
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
   # ---------------------------------------------------------------------------
@@ -322,6 +340,13 @@ jobs:
           merge-multiple: true
           path: /tmp/verdicts/
 
+      - name: Import bot GPG key
+        uses: ./.github/actions/import-bot-gpg
+        with:
+          gpg-private-key: ${{ secrets.GH_BOT_GPG_KEY }}
+          gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
+          gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
+
       - name: Merge verdicts
         id: merge
         run: |
@@ -334,7 +359,6 @@ jobs:
         env:
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
-          IF_FORK_ALLOW_UNSIGNED_LEDGER: "true"  # phase-0: GPG key not yet provisioned for the bot identity
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Dispatch approved PRs for ingestion
@@ -382,5 +406,4 @@ jobs:
         env:
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
-          IF_FORK_ALLOW_UNSIGNED_LEDGER: "true"  # phase-0: GPG key not yet provisioned for the bot identity
           GH_TOKEN: ${{ steps.app-token.outputs.token }}

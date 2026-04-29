@@ -93,10 +93,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Configure git identity
-        run: |
-          git config user.name "Claude (Initial Force WPF Bot)"
-          git config user.email "wpf-bot@initialforce.com"
+      - name: Import bot GPG key (also sets user.name/email)
+        uses: ./.github/actions/import-bot-gpg
+        with:
+          gpg-private-key: ${{ secrets.GH_BOT_GPG_KEY }}
+          gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
+          gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
 
       - name: Add upstream remote and fetch
         run: |
@@ -178,7 +180,6 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
-          IF_FORK_ALLOW_UNSIGNED_LEDGER: "true"  # phase-0: GPG key not yet provisioned for the bot identity
 
       - name: Open rebase-failure issue on conflict
         if: steps.rebase.outputs.result == 'failed'
@@ -218,7 +219,6 @@ jobs:
         env:
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
-          IF_FORK_ALLOW_UNSIGNED_LEDGER: "true"  # phase-0: GPG key not yet provisioned for the bot identity
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Fail job when rebase failed
@@ -283,6 +283,18 @@ jobs:
           ref: ${{ needs.attempt-rebase.outputs.branch }}
           token: ${{ steps.app-token.outputs.token }}
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Import bot GPG key
+        uses: ./.github/actions/import-bot-gpg
+        with:
+          gpg-private-key: ${{ secrets.GH_BOT_GPG_KEY }}
+          gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
+          gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
+
       - name: Open promotion PR if/staging → if/main
         run: |
           UPSTREAM_SHA="${{ needs.fetch-upstream.outputs.upstream_sha }}"
@@ -326,5 +338,4 @@ jobs:
         env:
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
-          IF_FORK_ALLOW_UNSIGNED_LEDGER: "true"  # phase-0: GPG key not yet provisioned for the bot identity
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
