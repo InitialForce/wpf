@@ -92,13 +92,24 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
+      - name: Load failure-analysis prompt
+        id: load-prompt
+        shell: bash
+        run: |
+          {
+            echo 'prompt<<__EOF_PROMPT__'
+            cat .if-fork/prompts/failure-analysis.md
+            echo
+            echo '__EOF_PROMPT__'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Run failure analysis (Claude Sonnet)
         id: run-analysis
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: ${{ steps.load-prompt.outputs.prompt }}
           claude_args: >-
-            --prompt-file .if-fork/prompts/failure-analysis.md
             --max-turns 8
             --model claude-sonnet-4-6
             --allowedTools Read,Bash,Grep,mcp__github__issue_write,mcp__github__search_issues

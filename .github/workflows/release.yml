@@ -303,12 +303,23 @@ jobs:
           echo "Previous tag: $PREV_TAG"
         shell: bash
 
+      - name: Load release-notes prompt
+        id: load-prompt
+        shell: bash
+        run: |
+          {
+            echo 'prompt<<__EOF_PROMPT__'
+            cat .if-fork/prompts/release-notes.md
+            echo
+            echo '__EOF_PROMPT__'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Run release notes prompt (Claude Sonnet)
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: ${{ steps.load-prompt.outputs.prompt }}
           claude_args: >-
-            --prompt-file .if-fork/prompts/release-notes.md
             --max-turns 10
             --model claude-sonnet-4-6
             --allowedTools Bash,Read,Grep

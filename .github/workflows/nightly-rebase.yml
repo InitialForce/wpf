@@ -140,12 +140,14 @@ jobs:
                 break
               fi
 
-              # Use Claude to resolve conflicts
+              # Use Claude to resolve conflicts. The Claude CLI does not
+              # support --prompt-file directly; pass the prompt via -p.
+              PROMPT_TEXT="$(cat .if-fork/prompts/resolve-rebase-conflict.md)"
               CONFLICT_FILES="$CONFLICT_FILES" \
               CURRENT_BRANCH="$BRANCH" \
               ESCALATION_ISSUE_PATH="/tmp/rebase-escalation.md" \
               CONFIG_PATH=".if-fork/config.yaml" \
-              claude --prompt-file .if-fork/prompts/resolve-rebase-conflict.md \
+              claude -p "$PROMPT_TEXT" \
                 --max-turns 20 \
                 --model claude-sonnet-4-6 \
                 --allowedTools "Bash,Read,Edit,Grep" \

@@ -266,13 +266,24 @@ jobs:
           git checkout -b "${{ steps.set-branch.outputs.branch }}" if/staging || \
             git checkout "${{ steps.set-branch.outputs.branch }}"
 
+      - name: Load cherry-pick prompt
+        id: load-prompt-pick
+        shell: bash
+        run: |
+          {
+            echo 'prompt<<__EOF_PROMPT__'
+            cat .if-fork/prompts/cherry-pick.md
+            echo
+            echo '__EOF_PROMPT__'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Run cherry-pick (Claude Sonnet)
         id: pick
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: ${{ steps.load-prompt-pick.outputs.prompt }}
           claude_args: >-
-            --prompt-file .if-fork/prompts/cherry-pick.md
             --max-turns 15
             --model claude-sonnet-4-6
             --allowedTools Bash,Read,Edit,Grep,mcp__github__pull_request_read,mcp__github__get_file_contents,mcp__github__issue_write
@@ -283,13 +294,25 @@ jobs:
           PINNED_HEAD_SHA: ${{ env.PINNED_HEAD_SHA }}
           CHERRY_PICK_BRANCH: ${{ steps.set-branch.outputs.branch }}
 
+      - name: Load cherry-pick-conflict-resolution prompt
+        id: load-prompt-conflict
+        if: steps.pick.outcome == 'failure'
+        shell: bash
+        run: |
+          {
+            echo 'prompt<<__EOF_PROMPT__'
+            cat .if-fork/prompts/cherry-pick-conflict-resolution.md
+            echo
+            echo '__EOF_PROMPT__'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Run conflict-resolution if cherry-pick failed
         if: steps.pick.outcome == 'failure'
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: ${{ steps.load-prompt-conflict.outputs.prompt }}
           claude_args: >-
-            --prompt-file .if-fork/prompts/cherry-pick-conflict-resolution.md
             --max-turns 10
             --model claude-sonnet-4-6
             --allowedTools Bash,Read,Edit,Grep,mcp__github__issue_write

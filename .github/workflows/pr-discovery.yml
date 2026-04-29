@@ -54,14 +54,24 @@ jobs:
       # NOTE: The actual Claude action wiring (anthropics/claude-code-action) is implemented
       # in a separate bead. This step is a placeholder that calls the action in the same form
       # as the rest of the pipeline; CI will skip/fail gracefully until the action is wired.
+      - name: Load pr-discovery prompt
+        id: load-prompt
+        shell: bash
+        run: |
+          {
+            echo 'prompt<<__EOF_PROMPT__'
+            cat .if-fork/prompts/pr-discovery.md
+            echo
+            echo '__EOF_PROMPT__'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Run discovery (Claude Haiku)
         id: run
-        # placeholder — replace with real action once claude-code-action bead lands
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: ${{ steps.load-prompt.outputs.prompt }}
           claude_args: >-
-            --prompt-file .if-fork/prompts/pr-discovery.md
             --max-turns 8
             --model claude-haiku-4-5
             --allowedTools Bash,Read,Grep,mcp__github__list_pull_requests,mcp__github__search_pull_requests,mcp__github__issue_write
