@@ -16,7 +16,9 @@ Exit codes:
 
 Output (stdout): JSON with either:
   { "verdict": "ok", "checked_shas": [...] }
-  { "verdict": "denied", "matched": {"sha": "...", "pr": ..., "reason": "..."}, "checked_shas": [...] }
+  { "verdict": "denied",
+    "matched": {"sha": "...", "pr": ..., "reason": "..."},
+    "checked_shas": [...] }
 """
 
 from __future__ import annotations
