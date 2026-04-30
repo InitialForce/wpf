@@ -61,7 +61,7 @@ Exit 0 for `graduated_upstream` (not an error). Exit 0 on success. Exit 1 on all
 
 ## Procedure
 
-**Step 1 — Load config.** Note `config.file_denylist` and `config.review_hard_fail_patterns`.
+**Step 1 — Load config.** Note `config.file_denylist`, `config.commit_denylist`, and `config.review_hard_fail_patterns`.
 
 **Step 2 — Verify SHA:**
 ```bash
@@ -71,6 +71,23 @@ if [ "$CURRENT" != "$HEAD_SHA" ]; then
   python tools/ledger-event.py --event escalated --pr-number $PR_NUMBER \
     --head-sha "$HEAD_SHA" --actor cherry-pick \
     --details-json '{"reason":"sha_mismatch"}'
+  exit 1
+fi
+```
+
+**Step 2.5 — Commit denylist check.** Refuse the pick (exit 1) if the upstream
+SHA, or any SHA reached by walking `(cherry picked from commit ...)` trailers,
+is on `config.commit_denylist`. This catches regressions that were already
+identified and reverted in this fork.
+```bash
+python tools/check-commit-denylist.py "$HEAD_SHA" --config "$CONFIG_PATH"
+RC=$?
+if [ $RC -eq 2 ]; then
+  python tools/ledger-event.py --event refused --pr-number $PR_NUMBER \
+    --head-sha "$HEAD_SHA" --actor cherry-pick \
+    --details-json '{"reason":"commit_denylist"}'
+  exit 1
+elif [ $RC -ne 0 ]; then
   exit 1
 fi
 ```
