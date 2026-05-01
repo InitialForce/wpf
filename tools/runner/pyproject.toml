@@ -1,0 +1,35 @@
+[project]
+name = "wpf-perf-runner"
+version = "0.1.0"
+description = "CLI orchestrator: drives MotionCatalyst through a perf scenario with PerfView ETW capture."
+requires-python = ">=3.11"
+dependencies = [
+    "jsonschema>=4.26.0",
+]
+
+[project.scripts]
+wpf-perf-runner = "wpf_perf_runner.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wpf_perf_runner"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4"]
+ignore = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "ty>=0.0.33",
+]
