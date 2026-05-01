@@ -1,0 +1,567 @@
+{
+  "name": "v1",
+  "description": "Whole-app perf scenario: cold-start → load multi-take session → scrub timeline × 3 cycles → camera-layout switch → line annotation → frame-by-frame scrub → data-box toggle → controlled shutdown.",
+  "scenarioVersion": "1.0",
+
+  "warmupSteps": [
+    {
+      "type": "wait-ready",
+      "timeoutMs": 120000,
+      "comment": "Wait for MC_READY sentinel on stdout (W1.1). 120s budget covers cold-start GPU init + HLSL JIT."
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 30000,
+      "comment": "Let WPF dispatcher drain after MC_READY: theme load, splash close, hardware calibration tasks."
+    },
+    {
+      "type": "tool",
+      "tool": "mc_detect_current_screen",
+      "args": {},
+      "name": "warmup-detect-screen",
+      "comment": "Confirm we are on Home (HomeViewControl sentinel). Expected: Home."
+    },
+    {
+      "type": "tool",
+      "tool": "mc_navigate_to",
+      "args": { "screenName": "UserSelection" },
+      "timeoutMs": 30000,
+      "name": "warmup-to-user-selection",
+      "comment": "Navigate Home → UserSelection. mc_navigate_to clicks AnalyzeButton automatically via screens.yml edge."
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 15000,
+      "comment": "Wait for UserSelection screen to settle (student list populated from seeded DB)."
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_select_item",
+      "args": {
+        "automationId": "listViewStudentsAndGroups",
+        "itemText": "Perf Test User"
+      },
+      "name": "warmup-select-student",
+      "comment": "Select seeded student 'Perf Test User' (StudentID=100, seed.sql). automationId verified: SelectStudentOrGroupControl.xaml:164. itemText must match the display name from the DB."
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 10000,
+      "comment": "Let student details panel populate after selection."
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_click",
+      "args": { "automationId": "NextViewButton" },
+      "name": "warmup-click-next",
+      "comment": "Click Next → Analysis. automationId verified: SelectStudentOrGroupControl.xaml:365."
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 60000,
+      "waitForLayoutQuiescence": true,
+      "comment": "Wait for Analysis view to fully load: video decode, frame cache build, layout quiescence. 60s for cold-start GPU spike (VideoEffectsRendererGpu lazy-init + HLSL JIT)."
+    },
+    {
+      "type": "tool",
+      "tool": "mc_detect_current_screen",
+      "args": {},
+      "name": "warmup-confirm-analysis",
+      "comment": "Confirm we reached the Analysis screen (VideoPlaybackControl sentinel per screens.yml)."
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_set_slider_value",
+      "args": {
+        "automationId": "VideoSlider",
+        "value": 0.5
+      },
+      "name": "warmup-scrub-midpoint",
+      "comment": "Warmup scrub to midpoint. Forces GPU texture upload + first full render pipeline activation. automationId verified: BookmarkControl.xaml:23 (x:Name=VideoSlider). Value is normalized [0..1]; 0.5 = midpoint of take."
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 15000,
+      "comment": "Wait for render pipeline to settle after warmup scrub."
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_set_slider_value",
+      "args": {
+        "automationId": "VideoSlider",
+        "value": 0.0
+      },
+      "name": "warmup-scrub-return",
+      "comment": "Return to frame 0 to start measured run from a consistent position."
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 10000,
+      "comment": "Settle at frame 0 before ETW capture begins."
+    }
+  ],
+
+  "steps": [
+    {
+      "type": "perf-event",
+      "event": "ScenarioStart",
+      "label": "v1",
+      "comment": "ETW bracket open. MotionCatalyst-PerfHarness EventSource (W1.3)."
+    },
+
+    {
+      "type": "tool",
+      "tool": "mc_detect_current_screen",
+      "args": {},
+      "name": "step-detect-screen",
+      "comment": "Sanity check: confirm we are still on Analysis before measured work begins."
+    },
+
+    {
+      "type": "perf-event",
+      "event": "StepStart",
+      "label": "open-session",
+      "comment": "Phase: open seeded session. Session is already open from warmup; this event brackets the 'settled analysis view' baseline."
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 30000,
+      "waitForLayoutQuiescence": true,
+      "name": "settle-analysis-open",
+      "comment": "Confirm layout is quiesced after warmup sequence. First measured idle sample."
+    },
+    {
+      "type": "perf-event",
+      "event": "StepEnd",
+      "label": "open-session"
+    },
+
+    {
+      "type": "perf-event",
+      "event": "StepStart",
+      "label": "scrub-cycle-1-forward"
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_set_slider_value",
+      "args": {
+        "automationId": "VideoSlider",
+        "value": 0.33
+      },
+      "name": "scrub-fwd-1",
+      "comment": "Scrub forward ~5 s equivalent (33% of take = roughly 5 s for a 15 s take). VideoSlider is normalized [0..1]. automationId: BookmarkControl.xaml:23."
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 15000,
+      "comment": "Wait for frame decode + WPF render after slider move."
+    },
+    {
+      "type": "perf-event",
+      "event": "StepEnd",
+      "label": "scrub-cycle-1-forward"
+    },
+
+    {
+      "type": "perf-event",
+      "event": "StepStart",
+      "label": "scrub-cycle-1-back"
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_set_slider_value",
+      "args": {
+        "automationId": "VideoSlider",
+        "value": 0.0
+      },
+      "name": "scrub-back-1",
+      "comment": "Scrub back to start."
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 15000,
+      "comment": "Settle at frame 0."
+    },
+    {
+      "type": "perf-event",
+      "event": "StepEnd",
+      "label": "scrub-cycle-1-back"
+    },
+
+    {
+      "type": "perf-event",
+      "event": "StepStart",
+      "label": "scrub-cycle-2-forward"
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_set_slider_value",
+      "args": {
+        "automationId": "VideoSlider",
+        "value": 0.66
+      },
+      "name": "scrub-fwd-2",
+      "comment": "Scrub forward to 66% (further into take for variety)."
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 15000,
+      "comment": "Settle after scrub."
+    },
+    {
+      "type": "perf-event",
+      "event": "StepEnd",
+      "label": "scrub-cycle-2-forward"
+    },
+
+    {
+      "type": "perf-event",
+      "event": "StepStart",
+      "label": "scrub-cycle-2-back"
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_set_slider_value",
+      "args": {
+        "automationId": "VideoSlider",
+        "value": 0.0
+      },
+      "name": "scrub-back-2"
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 15000
+    },
+    {
+      "type": "perf-event",
+      "event": "StepEnd",
+      "label": "scrub-cycle-2-back"
+    },
+
+    {
+      "type": "perf-event",
+      "event": "StepStart",
+      "label": "scrub-cycle-3-forward"
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_set_slider_value",
+      "args": {
+        "automationId": "VideoSlider",
+        "value": 1.0
+      },
+      "name": "scrub-fwd-3",
+      "comment": "Scrub all the way to the last frame."
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 15000
+    },
+    {
+      "type": "perf-event",
+      "event": "StepEnd",
+      "label": "scrub-cycle-3-forward"
+    },
+
+    {
+      "type": "perf-event",
+      "event": "StepStart",
+      "label": "scrub-cycle-3-back"
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_set_slider_value",
+      "args": {
+        "automationId": "VideoSlider",
+        "value": 0.0
+      },
+      "name": "scrub-back-3"
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 15000
+    },
+    {
+      "type": "perf-event",
+      "event": "StepEnd",
+      "label": "scrub-cycle-3-back"
+    },
+
+    {
+      "type": "perf-event",
+      "event": "StepStart",
+      "label": "camera-layout-switch"
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_click",
+      "args": {
+        "automationId": "LayoutHighlight",
+        "comment": "TODO_FIND_ACTUAL_ID: LayoutHighlight is the HighlightFeature wrapper in AnalysisMenu.xaml:1778. The actual DropDownButton inside does not have its own x:Name. Try clicking LayoutHighlight first; if that fails, use wpf_find_elements to discover the inner DropDownButton automationId. Verified context: AnalysisMenu.xaml lines 1772-1921."
+      },
+      "name": "open-layout-dropdown",
+      "comment": "Open the Layout/Camera dropdown in the View toolbar. This reveals the camera-count ListBox."
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 10000,
+      "comment": "Wait for dropdown popup to open and populate."
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_select_item_by_index",
+      "args": {
+        "automationId": "TODO_FIND_ACTUAL_ID",
+        "index": 1,
+        "comment": "TODO_FIND_ACTUAL_ID: The camera ListBox inside the LayoutHighlight dropdown (AngleModes / AnalysisViewModes) has no x:Name in AnalysisMenu.xaml. Use wpf_find_elements with typeName=ListBox after opening the dropdown to discover the automationId at runtime during PoC spike."
+      },
+      "name": "select-2-camera-layout",
+      "comment": "Switch to 2-camera layout (index 1). Drives MultiView.SelectedScreenLayout change → layout invalidation → WPF re-render. This is a significant layout-pass workload."
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 20000,
+      "waitForLayoutQuiescence": true,
+      "comment": "Wait for MultiView to re-render with new layout. LayoutUpdated quiescence required."
+    },
+    {
+      "type": "perf-event",
+      "event": "StepEnd",
+      "label": "camera-layout-switch"
+    },
+
+    {
+      "type": "perf-event",
+      "event": "StepStart",
+      "label": "annotation-draw-line"
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_click",
+      "args": { "automationId": "LineToolsGroupToggleButton" },
+      "name": "activate-line-tool",
+      "comment": "Activate the Line drawing tool. automationId verified: ToolsGroupBoxControl.xaml:444. This sets DrawingTools.SelectedTool = Line."
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 5000,
+      "comment": "Let tool activation state propagate (CanvasOverlay mode change)."
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_send_keys",
+      "args": {
+        "text": " ",
+        "comment": "TODO_FIND_ACTUAL_ID: Drawing a line annotation requires mouse-down + mouse-up on the video canvas (VideoPresenterWPF). wpf_send_keys cannot place a line. The correct approach is wpf_click on the VideoViewA element at position (0.3, 0.4) for start point, then wpf_click at (0.7, 0.6) for end point. wpf_click with relative coordinates may not be supported — check wpf_click parameter list during PoC spike. Fallback: use wpf_execute_command with DrawingTools.DrawLineCommand if that command exists."
+      },
+      "name": "draw-line-placeholder",
+      "comment": "PLACEHOLDER: line drawing requires coordinate-based clicks on the video viewport. See comment in args. This step will be replaced after PoC spike confirms the coordinate-click API."
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 10000,
+      "comment": "Wait for annotation canvas overlay to re-render after line placement."
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_click",
+      "args": { "automationId": "SelectButton" },
+      "name": "deactivate-line-tool",
+      "comment": "Return to Select tool (deactivates drawing mode). automationId verified: ToolsGroupBoxControl.xaml:296."
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 5000
+    },
+    {
+      "type": "perf-event",
+      "event": "StepEnd",
+      "label": "annotation-draw-line"
+    },
+
+    {
+      "type": "perf-event",
+      "event": "StepStart",
+      "label": "frame-by-frame-scrub"
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_set_slider_value",
+      "args": {
+        "automationId": "VideoSlider",
+        "value": 0.1
+      },
+      "name": "position-for-framestep",
+      "comment": "Move to 10% into the take before frame-stepping, so we have room to step forward."
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 10000
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_click",
+      "args": { "automationId": "StepForwardButton" },
+      "name": "step-frame-fwd-1",
+      "comment": "Step forward 1 frame. automationId verified: VideoPlaybackControl.xaml:196 (x:Name=StepForwardButton, Command=Playback.StepForwardCommand)."
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 5000
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_click",
+      "args": { "automationId": "StepForwardButton" },
+      "name": "step-frame-fwd-2"
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 5000
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_click",
+      "args": { "automationId": "StepForwardButton" },
+      "name": "step-frame-fwd-3"
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 5000
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_click",
+      "args": { "automationId": "StepForwardButton" },
+      "name": "step-frame-fwd-4"
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 5000
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_click",
+      "args": { "automationId": "StepForwardButton" },
+      "name": "step-frame-fwd-5"
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 5000
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_click",
+      "args": { "automationId": "StepBackwardButton" },
+      "name": "step-frame-back-1",
+      "comment": "Step backward. automationId verified: VideoPlaybackControl.xaml:189 (x:Name=StepBackwardButton, Command=Playback.StepBackwardCommand)."
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 5000
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_click",
+      "args": { "automationId": "StepBackwardButton" },
+      "name": "step-frame-back-2"
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 5000
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_click",
+      "args": { "automationId": "StepBackwardButton" },
+      "name": "step-frame-back-3"
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 5000
+    },
+    {
+      "type": "perf-event",
+      "event": "StepEnd",
+      "label": "frame-by-frame-scrub"
+    },
+
+    {
+      "type": "perf-event",
+      "event": "StepStart",
+      "label": "data-box-toggle-open"
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_toggle",
+      "args": {
+        "automationId": "HideBoxSingleSwing",
+        "targetState": true
+      },
+      "name": "hide-data-boxes",
+      "comment": "Toggle HideDataboxes=true (collapse the data panel). automationId verified: MultiView.xaml:1347 (x:Name=HideBoxSingleSwing, IsChecked binds to HideDataboxes). This triggers a layout pass on the MultiView grid."
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 15000,
+      "waitForLayoutQuiescence": true,
+      "comment": "Wait for layout re-measure after data box collapse."
+    },
+    {
+      "type": "perf-event",
+      "event": "StepEnd",
+      "label": "data-box-toggle-open"
+    },
+
+    {
+      "type": "perf-event",
+      "event": "StepStart",
+      "label": "data-box-toggle-close"
+    },
+    {
+      "type": "tool",
+      "tool": "wpf_toggle",
+      "args": {
+        "automationId": "HideBoxSingleSwing",
+        "targetState": false
+      },
+      "name": "show-data-boxes",
+      "comment": "Restore data boxes (HideDataboxes=false). Second layout pass."
+    },
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 15000,
+      "waitForLayoutQuiescence": true,
+      "comment": "Wait for layout to re-expand."
+    },
+    {
+      "type": "perf-event",
+      "event": "StepEnd",
+      "label": "data-box-toggle-close"
+    },
+
+    {
+      "type": "wait-idle",
+      "maxTimeoutMs": 10000,
+      "name": "final-settle",
+      "comment": "Final dispatcher drain before scenario-end event."
+    },
+
+    {
+      "type": "perf-event",
+      "event": "ScenarioEnd",
+      "label": "v1",
+      "comment": "ETW bracket close. MotionCatalyst-PerfHarness EventSource (W1.3)."
+    },
+
+    {
+      "type": "shutdown",
+      "timeoutMs": 30000,
+      "comment": "mc_disconnect(closeTarget=true). Runner issues WM_CLOSE and waits up to 30s for clean exit."
+    }
+  ],
+
+  "shutdown": {
+    "timeoutMs": 30000
+  }
+}
