@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://initialforce.com/wpf-perf/scenarios/schema.json",
+  "title": "wpf-perf scenario",
+  "description": "Defines a repeatable performance scenario for wpf-perf-runner.",
+  "type": "object",
+  "required": ["name", "steps"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique scenario identifier (used as part of trace file names)."
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable scenario description."
+    },
+    "scenarioVersion": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "description": "Scenario schema version, semver major.minor (e.g. \"1.0\")."
+    },
+    "warmupSteps": {
+      "type": "array",
+      "description": "Steps executed before ETW capture starts (not timed, not included in metrics).",
+      "items": { "$ref": "#/$defs/step" }
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Ordered list of measured steps executed under ETW capture.",
+      "items": { "$ref": "#/$defs/step" }
+    },
+    "shutdown": {
+      "type": "object",
+      "description": "Optional shutdown configuration overrides.",
+      "additionalProperties": false,
+      "properties": {
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 120000,
+          "description": "Maximum ms to wait for MC process to exit after disconnect."
+        }
+      }
+    }
+  },
+  "$defs": {
+    "step": {
+      "type": "object",
+      "required": ["type"],
+      "description": "A single scenario step.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["wait-ready", "tool", "wait-idle", "wait-ms", "perf-event", "shutdown"],
+          "description": "Step discriminator."
+        },
+        "comment": {
+          "type": "string",
+          "description": "Optional human-readable annotation (ignored by runner)."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "wait-ready" } } },
+          "then": {
+            "description": "Wait for MC_READY sentinel on MC stdout. Must be the first step.",
+            "additionalProperties": false,
+            "properties": {
+              "type": true,
+              "comment": true,
+              "timeoutMs": {
+                "type": "integer",
+                "minimum": 1000,
+                "maximum": 300000,
+                "default": 60000,
+                "description": "Max ms to wait for MC_READY before failing the run."
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "tool" } } },
+          "then": {
+            "description": "Invoke a wpf_* or mc_* MCP tool via UiMcpHost.",
+            "required": ["tool"],
+            "additionalProperties": false,
+            "properties": {
+              "type": true,
+              "comment": true,
+              "tool": {
+                "type": "string",
+                "minLength": 1,
+                "description": "MCP tool name, e.g. \"wpf_click\" or \"mc_navigate_to\"."
+              },
+              "args": {
+                "type": "object",
+                "description": "Tool arguments passed verbatim to the MCP call.",
+                "additionalProperties": true
+              },
+              "timeoutMs": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 300000,
+                "default": 60000,
+                "description": "Per-call timeout in ms."
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Optional label for this step in timing output."
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "wait-idle" } } },
+          "then": {
+            "description": "Invoke wpf_pump_until_idle to wait for WPF dispatcher quiescence.",
+            "additionalProperties": false,
+            "properties": {
+              "type": true,
+              "comment": true,
+              "name": {
+                "type": "string",
+                "description": "Optional label for this step in timing output."
+              },
+              "maxTimeoutMs": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 120000,
+                "default": 30000,
+                "description": "Maximum ms to wait for idle. Passed to wpf_pump_until_idle."
+              },
+              "waitForLayoutQuiescence": {
+                "type": "boolean",
+                "default": false,
+                "description": "If true, also wait for LayoutUpdated to quiesce (requires W2.2)."
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "wait-ms" } } },
+          "then": {
+            "description": "Unconditional sleep for a fixed duration.",
+            "required": ["ms"],
+            "additionalProperties": false,
+            "properties": {
+              "type": true,
+              "comment": true,
+              "name": {
+                "type": "string",
+                "description": "Optional label."
+              },
+              "ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 60000,
+                "description": "Duration to sleep in milliseconds."
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "perf-event" } } },
+          "then": {
+            "description": "Emit a named ETW sentinel event via MotionCatalyst-PerfHarness EventSource.",
+            "required": ["event"],
+            "additionalProperties": false,
+            "properties": {
+              "type": true,
+              "comment": true,
+              "event": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Event name to emit (e.g. \"ScenarioStart\", \"StepStart\")."
+              },
+              "label": {
+                "type": "string",
+                "description": "Optional label payload attached to the ETW event."
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "shutdown" } } },
+          "then": {
+            "description": "Disconnect MC via mc_disconnect(closeTarget=true) and wait for process exit.",
+            "additionalProperties": false,
+            "properties": {
+              "type": true,
+              "comment": true,
+              "timeoutMs": {
+                "type": "integer",
+                "minimum": 1000,
+                "maximum": 120000,
+                "default": 30000,
+                "description": "Max ms to wait for MC process to exit."
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
