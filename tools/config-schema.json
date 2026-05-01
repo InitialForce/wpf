@@ -88,6 +88,36 @@
       "items": {"type": "string"},
       "description": "Glob patterns for files that auto-fail conflict resolution"
     },
+    "commit_denylist": {
+      "type": "array",
+      "description": "Upstream commit SHAs that must never be cherry-picked (regression list)",
+      "items": {
+        "type": "object",
+        "required": ["sha", "reason", "added"],
+        "additionalProperties": false,
+        "properties": {
+          "sha": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{12,40}$",
+            "description": "Upstream commit SHA (matched as prefix on first 12+ chars)"
+          },
+          "pr": {
+            "type": "integer",
+            "description": "Upstream PR number for cross-reference",
+            "minimum": 1
+          },
+          "reason": {
+            "type": "string",
+            "description": "Human-readable rationale for the block"
+          },
+          "added": {
+            "type": "string",
+            "format": "date",
+            "description": "ISO date the entry was added"
+          }
+        }
+      }
+    },
     "tier_predicates": {
       "type": "object",
       "required": ["s", "a", "b"],

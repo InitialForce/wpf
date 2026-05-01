@@ -30,6 +30,31 @@ author_allowlist:
   - akshatsinha0
   - dotnet-maestro    # automated dep updates only
 
+# Upstream commits/PRs that must NEVER be cherry-picked back into the fork.
+# Each entry refuses both the listed upstream commit SHA and any further commit
+# whose message contains "(cherry picked from commit <sha>)" pointing at it.
+# Cherry-pick automation must consult this list before applying any patch.
+#
+# Format: list of objects with:
+#   sha:    upstream commit SHA (40 hex chars; matched as prefix on first 12+ chars)
+#   pr:     (optional) upstream PR number for cross-reference
+#   reason: short human-readable rationale
+#   added:  ISO date the entry was added
+commit_denylist:
+  - sha: 0e965e795ee813ea17bf1bfaf3b8db9a0e0f9a8a
+    pr: 10715
+    reason: >
+      Substitutes typeof(CanExecuteChangedEventManager) for
+      typeof(RequerySuggestedEventManager) as the WeakEventManager dictionary key
+      in CommandManager.RequerySuggestedEventManager.CurrentManager. The two managers
+      then race for the same key; whichever registers first wins, and the cast on
+      the loser's lookup throws InvalidCastException at runtime under XAML parsing
+      paths that bind ICommand. Reproducible: any Button with a Command in a template
+      crashes once the cast goes the wrong way. Author claims "Risk: Low / Regression: No"
+      but it is a hard regression. Do not re-apply without an upstream fix that uses
+      each manager's own type as its key.
+    added: "2026-04-30"
+
 # Files that auto-fail conflict resolution (always escalate to human).
 file_denylist:
   # supply chain
