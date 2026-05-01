@@ -1,0 +1,6 @@
+{
+  "rollForward": "latestPatch",
+  "configProperties": {
+    "System.GC.Server": false
+  }
+}
