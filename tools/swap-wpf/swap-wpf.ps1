@@ -1,6 +1,6 @@
-<#
+﻿<#
 .SYNOPSIS
-    swap-wpf — swap patched WPF DLLs into MotionCatalyst's build output and restore originals.
+    swap-wpf - swap patched WPF DLLs into MotionCatalyst's build output and restore originals.
 
 .DESCRIPTION
     Manages swapping of 4 WPF DLLs (PresentationCore, PresentationFramework, System.Xaml,
