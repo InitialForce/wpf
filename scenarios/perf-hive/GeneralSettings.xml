@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<GeneralSettings xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <!-- Startup / UX: suppress all first-run UI and network on startup -->
+  <ShowWelcomeWizard>false</ShowWelcomeWizard>
+  <ShowOnboardingGuide>false</ShowOnboardingGuide>
+  <ShowPromoteDownloadableRecording>false</ShowPromoteDownloadableRecording>
+  <RestoreSessionOnStartup>false</RestoreSessionOnStartup>
+  <UseSounds>false</UseSounds>
+
+  <!-- Identity / facility -->
+  <FacilityName>Perf Test Facility</FacilityName>
+  <Sport>Golf</Sport>
+  <Activity>GolfSwing</Activity>
+  <Units>Metric</Units>
+
+  <!-- Online / telemetry: disable all network activity on startup -->
+  <UseCustomScOnlineApiUrl>false</UseCustomScOnlineApiUrl>
+  <ScOnlineRememberLogin>false</ScOnlineRememberLogin>
+
+  <!-- Hardware vendor flags — ALL false.
+       This disables every real sensor SDK, eliminating DLL loads, network probes,
+       and hardware enumeration that would add startup noise and run-to-run variance.
+       Always-registered systems (HardwareSystemSimulated, HardwareSystemTakes, CoreAudio)
+       are controlled separately via DebugSettings.xml and UseCoreAudio below. -->
+
+  <!-- Force plate / pressure pad hardware -->
+  <UseBertecSDK>false</UseBertecSDK>
+  <UseAxioForce>false</UseAxioForce>
+  <UseBodiTrak>false</UseBodiTrak>
+  <UseMeasureX>false</UseMeasureX>
+  <UseZebris>false</UseZebris>
+
+  <!-- Launch monitor hardware -->
+  <UseTrackMan>false</UseTrackMan>
+  <UseForesight>false</UseForesight>
+  <UseForesightGc2Usb>false</UseForesightGc2Usb>
+  <UseForesightSim>false</UseForesightSim>
+  <UseSkyTrak2>false</UseSkyTrak2>
+  <UseFlightScope>false</UseFlightScope>
+  <UseFullSwing>false</UseFullSwing>
+  <UseFullSwingKit>false</UseFullSwingKit>
+
+  <!-- Camera hardware vendors (all real cameras off; DebugCam on below) -->
+  <UseSpinnakerCameras>false</UseSpinnakerCameras>
+  <UseMVSCameras>false</UseMVSCameras>
+  <UseXimeaCameras>false</UseXimeaCameras>
+  <UseIDSUeyeCameras>false</UseIDSUeyeCameras>
+  <UseHalconCameras>false</UseHalconCameras>
+  <UseProsilicaGigECameras>false</UseProsilicaGigECameras>
+  <UseDirectShow>false</UseDirectShow>
+  <UsePointGreyCameras2>false</UsePointGreyCameras2>
+  <UseMobileCameras>false</UseMobileCameras>
+  <MobileCameraAutoConnect>false</MobileCameraAutoConnect>
+
+  <!-- Core audio: W1.9 adds this flag; no-op until that lands, include now for forward-compat.
+       When UseCoreAudio=false, CoreAudio HwSystem is skipped at DI registration time. -->
+  <UseCoreAudio>false</UseCoreAudio>
+
+  <!-- Synthetic debug camera: 2-camera rig, provides live-like frames without real hardware.
+       Registered via HardwareSystemVideoDebugCam when IsEnabled=true. -->
+  <DebugCameras>
+    <IsEnabled>true</IsEnabled>
+    <NumCameras>2</NumCameras>
+  </DebugCameras>
+
+  <!-- Video rendering: keep DX enabled (software rendering kills GPU profiling).
+       Do not set UseDxRendering2/UseDxEncoding2 to false here: that would be equivalent to the qa-mode flag. -->
+  <UseDxRendering2>true</UseDxRendering2>
+  <UseDxEncoding2>true</UseDxEncoding2>
+  <UseVideoReplay>true</UseVideoReplay>
+
+  <!-- Misc: stable non-default settings for determinism -->
+  <UseCaptureQuickBuffering>false</UseCaptureQuickBuffering>
+  <UseDynamicPressureDataFilter>false</UseDynamicPressureDataFilter>
+  <UseRetroactiveCcmCorrection>false</UseRetroactiveCcmCorrection>
+  <PrecisionClockType>QPC</PrecisionClockType>
+</GeneralSettings>

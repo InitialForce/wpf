@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PrivacySettings xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <!-- Telemetry/analytics consent: explicitly declined.
+       Suppresses Sentry and any analytics consent dialogs or deferred upload timers.
+       Matches the pattern used by AppLauncher.PrivacySettingsXml in the test harness. -->
+  <DataSharing>
+    <Consented>false</Consented>
+  </DataSharing>
+</PrivacySettings>

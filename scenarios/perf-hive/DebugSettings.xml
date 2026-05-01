@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<DebugSettings xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <!-- Simulated hardware system: provides synthetic force plates and pressure pads.
+       Always registered at startup; this flag activates it.
+       Required for the app to reach analysis view without real hardware. -->
+  <EnableSimulatedHardwareSystem>true</EnableSimulatedHardwareSystem>
+
+  <!-- Debug viewer: enable so the debug overlay is available during profiling sessions
+       (allows injecting fake shots, inspecting state). -->
+  <EnableDebugViewer>true</EnableDebugViewer>
+
+  <!-- Use fake launch monitor devices: replaces real LM receivers with in-memory fakes.
+       Suppresses outbound network connections from LM subsystem even when flags are on.
+       Redundant with all Use*=false above, but adds defense-in-depth. -->
+  <UseFakeLaunchMonitorDevices>true</UseFakeLaunchMonitorDevices>
+
+  <!-- Silence exception dumps: perf runs should not write crash dump files. -->
+  <DumpNativeExceptions>false</DumpNativeExceptions>
+  <DumpManagedExceptions>false</DumpManagedExceptions>
+
+  <!-- Repository: disable integrity checks and method logging (adds noise). -->
+  <UseRepositoryIntegrityCheck>false</UseRepositoryIntegrityCheck>
+  <UseRepositoryMethodLogging>false</UseRepositoryMethodLogging>
+
+  <!-- Take analysis cache: keep small to bound memory footprint during scrub. -->
+  <TakeAnalysisCacheSize>5</TakeAnalysisCacheSize>
+</DebugSettings>
