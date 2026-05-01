@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>wpf-perf-diff</AssemblyName>
+    <RootNamespace>WpfPerfDiff</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <WarningsNotAsErrors>CS1591</WarningsNotAsErrors>
+    <LangVersion>latest</LangVersion>
+    <Optimize>false</Optimize>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- Use whatever .NET 10 patch is installed; SDK may reference a newer patch than what's on this machine -->
+    <RuntimeFrameworkVersion>10.0.7</RuntimeFrameworkVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- System.Text.Json ships in-box with .NET 10, no explicit ref needed -->
+    <!-- Note: AnalysisResult DTOs are copied from tools/analyze/Models/AnalysisResult.cs
+         to keep this project buildable independently while analyze is still scaffolded. -->
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Exclude the Tests/ subtree so unit test files don't get compiled into the main exe. -->
+    <Compile Remove="Tests\**" />
+    <Content Remove="Tests\**" />
+    <EmbeddedResource Remove="Tests\**" />
+    <None Remove="Tests\**" />
+  </ItemGroup>
+
+</Project>
