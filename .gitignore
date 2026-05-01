@@ -55,6 +55,9 @@ project.fragment.lock.json
 artifacts/
 **/Properties/launchSettings.json
 
+# Tooling cache (downloaded crossgen2 nupkg, etc.)
+.tools-cache/
+
 # StyleCop
 StyleCopReport.xml
 
