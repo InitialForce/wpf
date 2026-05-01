@@ -1,0 +1,4 @@
+<Project>
+  <!-- Intentionally empty: prevents the WPF repo root Directory.Build.targets
+       from being inherited by tool projects under tools/. -->
+</Project>

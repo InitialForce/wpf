@@ -1,0 +1,9 @@
+<Project>
+  <!-- The tools/ directory contains standalone utilities that are not part of the
+       WPF repo's Arcade-SDK build system. Disable strong-name signing so that
+       InternalsVisibleTo declarations work without requiring a public key. -->
+  <PropertyGroup>
+    <SignAssembly>false</SignAssembly>
+    <DelaySign>false</DelaySign>
+  </PropertyGroup>
+</Project>
