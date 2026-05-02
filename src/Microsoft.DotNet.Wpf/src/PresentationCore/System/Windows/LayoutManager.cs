@@ -575,9 +575,9 @@ namespace System.Windows
             {
                 _inFireLayoutUpdated = true;
 
-                LayoutEventList.ListItem [] copy = LayoutEvents.CopyToArray();
+                LayoutEventList.ListItem [] copy = LayoutEvents.CopyToArray(out int copyCount);
 
-                for(int i=0; i<copy.Length; i++)
+                for(int i=0; i<copyCount; i++)
                 {
                     LayoutEventList.ListItem item = copy[i];
                     //store handler here in case if thread gets pre-empted between check for IsAlive and invocation
@@ -678,9 +678,9 @@ namespace System.Windows
                 _inFireAutomationEvents = true;
                 _firePostLayoutEvents = false;
 
-                LayoutEventList.ListItem [] copy = AutomationEvents.CopyToArray();
+                LayoutEventList.ListItem [] copy = AutomationEvents.CopyToArray(out int copyCount);
 
-                for(int i=0; i<copy.Length; i++)
+                for(int i=0; i<copyCount; i++)
                 {
                     LayoutEventList.ListItem item = copy[i];
                     //store peer here in case if thread gets pre-empted between check for IsAlive and invocation
@@ -729,12 +729,12 @@ namespace System.Windows
 
         internal AutomationPeer[] GetAutomationRoots()
         {
-            LayoutEventList.ListItem [] copy = AutomationEvents.CopyToArray();
+            LayoutEventList.ListItem [] copy = AutomationEvents.CopyToArray(out int copyCount);
 
-            AutomationPeer[] peers = new AutomationPeer[copy.Length];
+            AutomationPeer[] peers = new AutomationPeer[copyCount];
             int freeSlot = 0;
 
-            for(int i=0; i<copy.Length; i++)
+            for(int i=0; i<copyCount; i++)
             {
                 LayoutEventList.ListItem item = copy[i];
                 //store peer here in case if thread gets pre-empted between check for IsAlive and invocation
@@ -1114,17 +1114,44 @@ namespace System.Windows
             }
         }
 
-        internal ListItem[] CopyToArray()
+        // Per-instance scratch buffer for CopyToArray. Each call to
+        // fireLayoutUpdateEvent (one per render pass when there is layout
+        // dirtiness) used to allocate a fresh ListItem[_count]; with the
+        // typical hundreds of UIElements that subscribe to LayoutUpdated
+        // that's hundreds of MB/s of gen0 churn during sustained playback.
+        // The list is only walked from a single dispatcher thread under the
+        // _inFireLayoutUpdated guard, so a single reusable buffer is safe.
+        // Caller must use the returned `count`; buffer length may exceed it.
+        private ListItem[] _copyBuffer;
+
+        internal ListItem[] CopyToArray(out int count)
         {
-            ListItem [] copy = new ListItem[_count];
-            ListItem t = _head;
-            int cnt = 0;
-            while(t != null)
+            count = _count;
+            ListItem[] buffer = _copyBuffer;
+            if (buffer == null || buffer.Length < count)
             {
-                copy[cnt++] = t;
+                // Round up to next power of two so steady-state subscriber
+                // counts don't keep reallocating on small swings.
+                int newSize = buffer == null ? 16 : buffer.Length;
+                while (newSize < count) newSize *= 2;
+                buffer = new ListItem[newSize];
+                _copyBuffer = buffer;
+            }
+
+            ListItem t = _head;
+            int i = 0;
+            while (t != null)
+            {
+                buffer[i++] = t;
                 t = t.Next;
             }
-            return copy;
+            // Clear the tail of any stale references from a previous fire so
+            // ListItems removed during/after that fire can be GC'd.
+            for (int j = i; j < buffer.Length && buffer[j] != null; j++)
+            {
+                buffer[j] = null;
+            }
+            return buffer;
         }
 
         internal int Count
