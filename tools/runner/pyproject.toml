@@ -9,6 +9,7 @@ dependencies = [
 
 [project.scripts]
 wpf-perf-runner = "wpf_perf_runner.cli:main"
+wpf-perf-deep = "wpf_perf_runner.asynkron_cli:main"
 
 [build-system]
 requires = ["hatchling"]

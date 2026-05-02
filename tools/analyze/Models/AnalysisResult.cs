@@ -124,6 +124,39 @@ public sealed class WpfMetrics
 
     [JsonPropertyName("bamlLoadTotalMs")]
     public double BamlLoadTotalMs { get; set; }
+
+    [JsonPropertyName("layoutPassMaxMs")]
+    public double LayoutPassMaxMs { get; set; }
+
+    [JsonPropertyName("renderFrameMaxMs")]
+    public double RenderFrameMaxMs { get; set; }
+
+    [JsonPropertyName("renderFrameP95Ms")]
+    public double RenderFrameP95Ms { get; set; }
+
+    [JsonPropertyName("dispatcherOpCount")]
+    public int DispatcherOpCount { get; set; }
+
+    [JsonPropertyName("dispatcherOpTotalMs")]
+    public double DispatcherOpTotalMs { get; set; }
+
+    [JsonPropertyName("dispatcherIdleCount")]
+    public int DispatcherIdleCount { get; set; }
+
+    [JsonPropertyName("topElementsLoaded")]
+    public List<ElementLoadEntry> TopElementsLoaded { get; set; } = [];
+
+    [JsonPropertyName("instrumented")]
+    public bool Instrumented { get; set; }
+}
+
+public sealed class ElementLoadEntry
+{
+    [JsonPropertyName("typeName")]
+    public string TypeName { get; set; } = "";
+
+    [JsonPropertyName("count")]
+    public int Count { get; set; }
 }
 
 public sealed class CpuMethodEntry
