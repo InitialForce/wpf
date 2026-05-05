@@ -437,11 +437,19 @@ def decide_and_revert(decision: str, payload: dict) -> int:
     rc = exit_codes[decision]
 
     if rc != 0:
-        log(f"reverting last commit in {WPF_REPO}")
-        subprocess.run(
-            ["git", "reset", "--hard", "HEAD^"],
-            cwd=str(WPF_REPO), check=False,
-        )
+        iter_sha = payload.get("git_sha")
+        if iter_sha:
+            log(f"reverting iter commit {iter_sha[:8]} in {WPF_REPO}")
+            subprocess.run(
+                ["git", "reset", "--hard", f"{iter_sha}^"],
+                cwd=str(WPF_REPO), check=False,
+            )
+        else:
+            log(f"WARN: no git_sha in payload; reverting HEAD^ in {WPF_REPO}")
+            subprocess.run(
+                ["git", "reset", "--hard", "HEAD^"],
+                cwd=str(WPF_REPO), check=False,
+            )
     return rc
 
 
