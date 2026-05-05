@@ -4435,10 +4435,6 @@ namespace System.Windows.Media
 
             if (isSimple)
             {
-                if (simpleTransform.IsIdentity)
-                {
-                    return Transform.Identity;
-                }
                 MatrixTransform matrixTransform = new MatrixTransform(simpleTransform);
                 matrixTransform.Freeze();
                 return matrixTransform;
