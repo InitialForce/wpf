@@ -148,6 +148,14 @@ def cleanup_orphan_processes(spike_stdout: str = "") -> None:
         ["cmd.exe", "/c", "taskkill", "/F", "/IM", "UiMcpHost.exe", "/T"],
         capture_output=True, text=True, timeout=15,
     )
+    # 1b) MotionCatalyst-cli.exe (NOT the GUI MotionCatalyst.exe) is the CLI
+    #     variant the spike spawns. Users run the GUI; nobody runs the CLI
+    #     interactively — so killing by image is safe and reliable. This
+    #     covers crashes where the spike never logged a [mc-pid] marker.
+    subprocess.run(
+        ["cmd.exe", "/c", "taskkill", "/F", "/IM", "MotionCatalyst-cli.exe", "/T"],
+        capture_output=True, text=True, timeout=15,
+    )
     # 2) MC: only kill the PID the spike tracked, parsed from its captured stdout.
     import re
     pids = set()
@@ -206,7 +214,13 @@ def build_presentation_core() -> bool:
 
 
 def do_swap() -> bool:
-    """Use swap-wpf.ps1 -Force to install the staged fork DLLs into MC's build."""
+    """Use swap-wpf.ps1 -Force to install the staged fork DLLs into MC's build.
+
+    Pre-sweep orphan MC-cli/UiMcpHost processes that may be holding handles
+    on the target DLLs from a prior crashed iter — otherwise swap-wpf fails
+    with 'file is being used by another process' and the iter BUILD-FAILs.
+    """
+    cleanup_orphan_processes("")
     log("swap-wpf swap -Force …")
     rc, out = cmd(
         [
@@ -290,7 +304,11 @@ def _run_spike_once(rep: int, iter_num: int, attempt: int) -> dict | None:
     if rc != 0:
         # Spike emits explicit non-zero rc on play-verify failure (17),
         # broker disconnect, etc. Treat as a failed rep and let the caller retry.
+        # Also: a crashed spike often leaves an MC-cli (and broker) running
+        # with file handles on the swapped DLLs — the next swap then BUILD-FAILs.
+        # Sweep orphans before returning so the next attempt can swap cleanly.
         log(f"  {label}: spike exit rc={rc} — rejecting rep")
+        cleanup_orphan_processes(out or "")
         return None
 
     analysis = out_dir / "analysis.json"
