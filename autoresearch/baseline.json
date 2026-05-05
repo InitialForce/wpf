@@ -1,0 +1,133 @@
+{
+  "captured_at": "2026-05-05T16:32:16Z",
+  "reps": 10,
+  "medians": {
+    "alloc_bytes": 688797304.0,
+    "gc_max_pause_ms": 672.3723,
+    "ss_p50_ms": 6.257999999999999,
+    "ss_p95_ms": 27.1825,
+    "ss_p99_ms": 32.966,
+    "missed_16_count": 93.0,
+    "missed_50_count": 1.0
+  },
+  "stds": {
+    "alloc_bytes": 36421718.3695788,
+    "gc_max_pause_ms": 24.9043612087455,
+    "ss_p50_ms": 2.9521798800961374,
+    "ss_p95_ms": 4.868600210646908,
+    "ss_p99_ms": 4.272029775177134,
+    "missed_16_count": 35.17322213780756,
+    "missed_50_count": 0.9944289260117531
+  },
+  "raw_stds": {
+    "alloc_bytes": 36421718.3695788,
+    "gc_max_pause_ms": 24.9043612087455,
+    "ss_p50_ms": 2.9521798800961374,
+    "ss_p95_ms": 4.868600210646908,
+    "ss_p99_ms": 4.272029775177134,
+    "missed_16_count": 35.17322213780756,
+    "missed_50_count": 0.9944289260117531
+  },
+  "per_rep": [
+    {
+      "alloc_bytes": 680791504.0,
+      "gc_max_pause_ms": 667.9412,
+      "ss_p50_ms": 6.387,
+      "ss_p95_ms": 29.742,
+      "ss_p99_ms": 35.692,
+      "missed_16_count": 86.0,
+      "missed_50_count": 1.0
+    },
+    {
+      "alloc_bytes": 696285888.0,
+      "gc_max_pause_ms": 676.8034,
+      "ss_p50_ms": 6.099,
+      "ss_p95_ms": 23.011,
+      "ss_p99_ms": 31.033,
+      "missed_16_count": 95.0,
+      "missed_50_count": 0.0
+    },
+    {
+      "alloc_bytes": 661577688.0,
+      "gc_max_pause_ms": 733.4125,
+      "ss_p50_ms": 6.129,
+      "ss_p95_ms": 22.996,
+      "ss_p99_ms": 30.81,
+      "missed_16_count": 89.0,
+      "missed_50_count": 1.0
+    },
+    {
+      "alloc_bytes": 713851152.0,
+      "gc_max_pause_ms": 651.6324,
+      "ss_p50_ms": 5.056,
+      "ss_p95_ms": 18.713,
+      "ss_p99_ms": 27.684,
+      "missed_16_count": 81.0,
+      "missed_50_count": 0.0
+    },
+    {
+      "alloc_bytes": 681308720.0,
+      "gc_max_pause_ms": 663.7962,
+      "ss_p50_ms": 5.508,
+      "ss_p95_ms": 21.973,
+      "ss_p99_ms": 27.869,
+      "missed_16_count": 89.0,
+      "missed_50_count": 0.0
+    },
+    {
+      "alloc_bytes": 668295376.0,
+      "gc_max_pause_ms": 660.1887,
+      "ss_p50_ms": 5.557,
+      "ss_p95_ms": 24.623,
+      "ss_p99_ms": 31.35,
+      "missed_16_count": 127.0,
+      "missed_50_count": 1.0
+    },
+    {
+      "alloc_bytes": 734255832.0,
+      "gc_max_pause_ms": 699.9452,
+      "ss_p50_ms": 7.977,
+      "ss_p95_ms": 30.876,
+      "ss_p99_ms": 36.044,
+      "missed_16_count": 91.0,
+      "missed_50_count": 2.0
+    },
+    {
+      "alloc_bytes": 774799104.0,
+      "gc_max_pause_ms": 680.2175000000001,
+      "ss_p50_ms": 8.057,
+      "ss_p95_ms": 30.22,
+      "ss_p99_ms": 34.582,
+      "missed_16_count": 150.0,
+      "missed_50_count": 0.0
+    },
+    {
+      "alloc_bytes": 703968944.0,
+      "gc_max_pause_ms": 689.5566,
+      "ss_p50_ms": 7.943,
+      "ss_p95_ms": 31.471,
+      "ss_p99_ms": 36.161,
+      "missed_16_count": 99.0,
+      "missed_50_count": 1.0
+    },
+    {
+      "alloc_bytes": 657274792.0,
+      "gc_max_pause_ms": 654.0165999999999,
+      "ss_p50_ms": 15.183,
+      "ss_p95_ms": 32.512,
+      "ss_p99_ms": 41.363,
+      "missed_16_count": 189.0,
+      "missed_50_count": 3.0
+    }
+  ],
+  "weights": {
+    "alloc_bytes": 0.3,
+    "gc_max_pause_ms": 0.1,
+    "ss_p50_ms": 0.1,
+    "ss_p95_ms": 0.2,
+    "ss_p99_ms": 0.15,
+    "missed_16_count": 0.1,
+    "missed_50_count": 0.05
+  },
+  "pareto_threshold": 0.03
+}
