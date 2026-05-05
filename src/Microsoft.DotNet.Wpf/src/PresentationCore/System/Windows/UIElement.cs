@@ -563,8 +563,8 @@ namespace System.Windows
         {
             bool etwTracingEnabled = false;
             long perfElementID = 0;
-            ContextLayoutManager ContextLayoutManager = ContextLayoutManager.From(Dispatcher);
-            if (ContextLayoutManager.AutomationEvents.Count != 0)
+            ContextLayoutManager layoutManager = ContextLayoutManager.From(Dispatcher);
+            if (layoutManager.AutomationEvents.Count != 0)
                 UIElementHelper.InvalidateAutomationAncestors(this);
 
             if (EventTrace.IsEnabled(EventTrace.Keyword.KeywordLayout, EventTrace.Level.Verbose))
@@ -645,8 +645,6 @@ namespace System.Windows
                     MeasureInProgress = true;
 
                     Size desiredSize = new Size(0, 0);
-
-                    ContextLayoutManager layoutManager = ContextLayoutManager.From(Dispatcher);
 
                     bool gotException = true;
 
@@ -798,8 +796,8 @@ namespace System.Windows
             bool etwTracingEnabled = false;
             long perfElementID = 0;
 
-            ContextLayoutManager ContextLayoutManager = ContextLayoutManager.From(Dispatcher);
-            if (ContextLayoutManager.AutomationEvents.Count != 0)
+            ContextLayoutManager layoutManager = ContextLayoutManager.From(Dispatcher);
+            if (layoutManager.AutomationEvents.Count != 0)
                 UIElementHelper.InvalidateAutomationAncestors(this);
 
             if (EventTrace.IsEnabled(EventTrace.Keyword.KeywordLayout, EventTrace.Level.Verbose))
@@ -891,8 +889,6 @@ namespace System.Windows
                         bool firstArrange = NeverArranged;
                         NeverArranged = false;
                         ArrangeInProgress = true;
-
-                        ContextLayoutManager layoutManager = ContextLayoutManager.From(Dispatcher);
 
                         Size oldSize = RenderSize;
                         bool sizeChanged = false;
