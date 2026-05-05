@@ -152,11 +152,13 @@ def analyze_to_files(
     reported by writing an error stub and the path is still included so the
     caller can detect partial completion.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     results: dict[str, Path] = {}
 
-    for mode in modes:
+    def _run_one(mode: str) -> tuple[str, Path]:
         out_file = out / f"asynkron-{mode}.txt"
         try:
             rc, stdout, stderr = run_mode(
@@ -175,6 +177,12 @@ def analyze_to_files(
             )
         except FileNotFoundError as exc:
             out_file.write_text(f"{exc}\n", encoding="utf-8")
-        results[mode] = out_file
+        return mode, out_file
+
+    with ThreadPoolExecutor(max_workers=len(modes)) as pool:
+        futures = {pool.submit(_run_one, mode): mode for mode in modes}
+        for fut in as_completed(futures):
+            mode_name, out_file = fut.result()
+            results[mode_name] = out_file
 
     return results
