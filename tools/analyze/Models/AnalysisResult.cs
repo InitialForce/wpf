@@ -134,6 +134,27 @@ public sealed class WpfMetrics
     [JsonPropertyName("renderFrameP95Ms")]
     public double RenderFrameP95Ms { get; set; }
 
+    [JsonPropertyName("renderFrameP50Ms")]
+    public double RenderFrameP50Ms { get; set; }
+
+    [JsonPropertyName("renderFrameP99Ms")]
+    public double RenderFrameP99Ms { get; set; }
+
+    [JsonPropertyName("missedFrames16Count")]
+    public int MissedFrames16Count { get; set; }
+
+    [JsonPropertyName("missedFrames33Count")]
+    public int MissedFrames33Count { get; set; }
+
+    [JsonPropertyName("missedFrames50Count")]
+    public int MissedFrames50Count { get; set; }
+
+    [JsonPropertyName("steadyState")]
+    public SteadyStateMetrics? SteadyState { get; set; }
+
+    [JsonPropertyName("presentationSnapshots")]
+    public List<PresentationSnapshot> PresentationSnapshots { get; set; } = [];
+
     [JsonPropertyName("dispatcherOpCount")]
     public int DispatcherOpCount { get; set; }
 
@@ -146,8 +167,107 @@ public sealed class WpfMetrics
     [JsonPropertyName("topElementsLoaded")]
     public List<ElementLoadEntry> TopElementsLoaded { get; set; } = [];
 
+    [JsonPropertyName("topMeasureSlow")]
+    public List<ElementLayoutTimingEntry> TopMeasureSlow { get; set; } = [];
+
+    [JsonPropertyName("topArrangeSlow")]
+    public List<ElementLayoutTimingEntry> TopArrangeSlow { get; set; } = [];
+
+    [JsonPropertyName("measureSlowEventCount")]
+    public int MeasureSlowEventCount { get; set; }
+
+    [JsonPropertyName("arrangeSlowEventCount")]
+    public int ArrangeSlowEventCount { get; set; }
+
+    [JsonPropertyName("renderFrameSlowEventCount")]
+    public int RenderFrameSlowEventCount { get; set; }
+
+    [JsonPropertyName("renderFrameSlowMaxMs")]
+    public double RenderFrameSlowMaxMs { get; set; }
+
+    [JsonPropertyName("renderFrameSlowSumMs")]
+    public double RenderFrameSlowSumMs { get; set; }
+
+    [JsonPropertyName("topRenderFrameSlow")]
+    public List<RenderFrameSlowEntry> TopRenderFrameSlow { get; set; } = [];
+
     [JsonPropertyName("instrumented")]
     public bool Instrumented { get; set; }
+}
+
+public sealed class SteadyStateMetrics
+{
+    [JsonPropertyName("skippedFrames")]
+    public int SkippedFrames { get; set; }
+
+    [JsonPropertyName("renderPassCount")]
+    public int RenderPassCount { get; set; }
+
+    [JsonPropertyName("renderFrameP50Ms")]
+    public double RenderFrameP50Ms { get; set; }
+
+    [JsonPropertyName("renderFrameP95Ms")]
+    public double RenderFrameP95Ms { get; set; }
+
+    [JsonPropertyName("renderFrameP99Ms")]
+    public double RenderFrameP99Ms { get; set; }
+
+    [JsonPropertyName("renderFrameMaxMs")]
+    public double RenderFrameMaxMs { get; set; }
+
+    [JsonPropertyName("missedFrames16Count")]
+    public int MissedFrames16Count { get; set; }
+
+    [JsonPropertyName("missedFrames33Count")]
+    public int MissedFrames33Count { get; set; }
+
+    [JsonPropertyName("missedFrames50Count")]
+    public int MissedFrames50Count { get; set; }
+}
+
+public sealed class PresentationSnapshot
+{
+    [JsonPropertyName("frameNumber")]
+    public int FrameNumber { get; set; }
+
+    [JsonPropertyName("animationRenderRate")]
+    public int AnimationRenderRate { get; set; }
+
+    [JsonPropertyName("displayRefreshRate")]
+    public int DisplayRefreshRate { get; set; }
+
+    [JsonPropertyName("interlockState")]
+    public int InterlockState { get; set; }
+
+    [JsonPropertyName("lastPresentationResults")]
+    public int LastPresentationResults { get; set; }
+}
+
+public sealed class RenderFrameSlowEntry
+{
+    [JsonPropertyName("elapsedMs")]
+    public double ElapsedMs { get; set; }
+
+    [JsonPropertyName("callbacksMs")]
+    public double CallbacksMs { get; set; }
+
+    [JsonPropertyName("renderingEventMs")]
+    public double RenderingEventMs { get; set; }
+
+    [JsonPropertyName("targetsMs")]
+    public double TargetsMs { get; set; }
+
+    [JsonPropertyName("commitMs")]
+    public double CommitMs { get; set; }
+
+    [JsonPropertyName("tickLoopCount")]
+    public int TickLoopCount { get; set; }
+
+    [JsonPropertyName("registeredTargets")]
+    public int RegisteredTargets { get; set; }
+
+    [JsonPropertyName("atMs")]
+    public double AtMs { get; set; }
 }
 
 public sealed class ElementLoadEntry
@@ -157,6 +277,39 @@ public sealed class ElementLoadEntry
 
     [JsonPropertyName("count")]
     public int Count { get; set; }
+}
+
+public sealed class ElementLayoutTimingEntry
+{
+    [JsonPropertyName("typeName")]
+    public string TypeName { get; set; } = "";
+
+    [JsonPropertyName("count")]
+    public int Count { get; set; }
+
+    [JsonPropertyName("totalMicros")]
+    public long TotalMicros { get; set; }
+
+    [JsonPropertyName("maxMicros")]
+    public long MaxMicros { get; set; }
+
+    [JsonPropertyName("selfMicros")]
+    public long SelfMicros { get; set; }
+
+    [JsonPropertyName("maxSelfMicros")]
+    public long MaxSelfMicros { get; set; }
+
+    [JsonPropertyName("totalMs")]
+    public double TotalMs => TotalMicros / 1000.0;
+
+    [JsonPropertyName("maxMs")]
+    public double MaxMs => MaxMicros / 1000.0;
+
+    [JsonPropertyName("selfMs")]
+    public double SelfMs => SelfMicros / 1000.0;
+
+    [JsonPropertyName("maxSelfMs")]
+    public double MaxSelfMs => MaxSelfMicros / 1000.0;
 }
 
 public sealed class CpuMethodEntry
