@@ -26,7 +26,19 @@ if [[ ! -f baseline.json ]]; then
     exit 1
 fi
 
+# Resolve claude binary. The CLI is an ELF on /c/ (drvfs) where direct exec
+# fails with "Exec format error"; invoke via the dynamic loader instead.
+CLAUDE_BIN="$(readlink -f "$HOME/.local/bin/claude" 2>/dev/null || true)"
+if [[ -z "$CLAUDE_BIN" || ! -f "$CLAUDE_BIN" ]]; then
+    echo "[ralph] FATAL: cannot resolve $HOME/.local/bin/claude" >&2
+    exit 1
+fi
+LD_LINUX="/lib64/ld-linux-x86-64.so.2"
+
+run_claude() { "$LD_LINUX" "$CLAUDE_BIN" --dangerously-skip-permissions "$@"; }
+
 echo "[ralph] starting loop, max_iters=${MAX_ITERS}"
+echo "[ralph] claude bin: $CLAUDE_BIN"
 echo "[ralph] press Ctrl-C to stop"
 
 for ((i = 1; i <= MAX_ITERS; i++)); do
@@ -39,7 +51,7 @@ for ((i = 1; i <= MAX_ITERS; i++)); do
 
     # Fresh context window each iteration (Geoff Huntley's key insight).
     # --dangerously-skip-permissions: this is a closed-loop sandbox, not interactive.
-    if ! claude --dangerously-skip-permissions < program.md; then
+    if ! run_claude < program.md; then
         echo "[ralph] claude exited non-zero on iter $i — continuing"
     fi
 done
