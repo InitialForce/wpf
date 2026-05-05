@@ -1352,13 +1352,13 @@ def main() -> int:
                 driver.disconnect(close_target=True)
             except Exception:
                 pass
-
-            deadline = time.monotonic() + 30.0
-            while time.monotonic() < deadline and driver.is_alive():
-                time.sleep(0.5)
-            if driver.is_alive():
-                driver.kill()
-                mark("driver.killed")
+            # mc_disconnect RPC has fired; MC begins shutdown. We don't wait
+            # for graceful exit — it takes >30s and we have all artifacts.
+            # Logs were already copied above. Hive cleanup uses
+            # ignore_cleanup_errors=True, so held files are harmless.
+            time.sleep(0.5)  # let the RPC round-trip before terminating broker
+            driver.kill()
+            mark("driver.killed")
 
         except Exception as exc:
             mark("FATAL", err=str(exc))
