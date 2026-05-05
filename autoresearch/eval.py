@@ -457,11 +457,30 @@ def decide_and_revert(decision: str, payload: dict) -> int:
     if rc != 0:
         iter_sha = payload.get("git_sha")
         if iter_sha:
-            log(f"reverting iter commit {iter_sha[:8]} in {WPF_REPO}")
-            subprocess.run(
-                ["git", "reset", "--hard", f"{iter_sha}^"],
-                cwd=str(WPF_REPO), check=False,
+            # Use `git revert` (creates a new commit) rather than `git reset
+            # --hard` so any orchestrator commits stacked on top of the iter
+            # are preserved. With reset --hard, an orchestrator commit ends
+            # up dangling in reflog and the fix it carried is lost.
+            env = os.environ.copy()
+            env.setdefault("GIT_AUTHOR_NAME", "wpf-ar-eval")
+            env.setdefault("GIT_AUTHOR_EMAIL", "eval@autoresearch.local")
+            env.setdefault("GIT_COMMITTER_NAME", "wpf-ar-eval")
+            env.setdefault("GIT_COMMITTER_EMAIL", "eval@autoresearch.local")
+            log(f"reverting iter commit {iter_sha[:8]} in {WPF_REPO} via git revert")
+            r = subprocess.run(
+                ["git", "revert", "--no-edit", iter_sha],
+                cwd=str(WPF_REPO), env=env, capture_output=True, text=True,
             )
+            if r.returncode != 0:
+                # Conflict — orchestrator commit edited the same file. Abort
+                # the revert and fall back to reset --hard <iter_sha>^.
+                log(f"WARN: git revert failed: {r.stderr.strip()[:200]}")
+                subprocess.run(["git", "revert", "--abort"],
+                               cwd=str(WPF_REPO), check=False)
+                subprocess.run(
+                    ["git", "reset", "--hard", f"{iter_sha}^"],
+                    cwd=str(WPF_REPO), check=False,
+                )
         else:
             log(f"WARN: no git_sha in payload; reverting HEAD^ in {WPF_REPO}")
             subprocess.run(
