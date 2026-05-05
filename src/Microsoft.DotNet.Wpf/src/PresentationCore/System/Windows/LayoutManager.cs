@@ -570,14 +570,6 @@ namespace System.Windows
             //no reentrancy. It may happen if one of handlers calls UpdateLayout synchronously
             if(_inFireLayoutUpdated) return;
 
-            // Empty-subscriber short-circuit. fireLayoutUpdateEvent runs every
-            // layout pass; in scenarios with no LayoutUpdated subscribers
-            // (common — the field stays null until first AddLayoutUpdatedHandler)
-            // touching the LayoutEvents getter would allocate a fresh
-            // LayoutEventList with a 153-ListItem pocket on first call, plus
-            // do CopyToReusableArray bookkeeping on every call.
-            if (_layoutEvents == null || _layoutEvents.Count == 0) return;
-
             EventTrace.EasyTraceEvent(EventTrace.Keyword.KeywordLayout, EventTrace.Level.Verbose, EventTrace.Event.WClientLayoutFireLayoutUpdatedBegin);
             try
             {
@@ -679,18 +671,6 @@ namespace System.Windows
         {
             //no reentrancy. It may happen if one of handlers calls UpdateLayout synchronously
             if(_inFireAutomationEvents) return;
-
-            // Empty-subscriber short-circuit (see fireLayoutUpdateEvent). Most
-            // apps without active automation peers never populate
-            // _automationEvents; avoid lazy-allocating the 153-ListItem
-            // pocket and the per-call CopyToReusableArray bookkeeping.
-            // We must still clear _firePostLayoutEvents here so the
-            // outer hasDirtiness loop in UpdateLayout terminates.
-            if (_automationEvents == null || _automationEvents.Count == 0)
-            {
-                _firePostLayoutEvents = false;
-                return;
-            }
 
             EventTrace.EasyTraceEvent(EventTrace.Keyword.KeywordLayout, EventTrace.Level.Verbose, EventTrace.Event.WClientLayoutFireAutomationEventsBegin);
             try
