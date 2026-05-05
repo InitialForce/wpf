@@ -49,11 +49,10 @@ REPS = int(os.environ.get("WPF_AR_REPS", "5"))
 PARETO_THRESHOLD = float(os.environ.get("WPF_AR_PARETO", "0.03"))  # 3 %
 SPIKE_TIMEOUT_S = int(os.environ.get("WPF_AR_SPIKE_TIMEOUT", "300"))
 BUILD_TIMEOUT_S = int(os.environ.get("WPF_AR_BUILD_TIMEOUT", "600"))
-# Legacy throttled-mode filter — superseded by steady-state metrics which are
-# stable (1–6% CV) regardless of cohort. Default 0 disables; set non-zero to
-# re-enable cohort filtering during fork-WPF experiments where the race
-# window is induced.
-MIN_RENDER_PASSES = int(os.environ.get("WPF_AR_MIN_PASSES", "0"))
+# Scenario-completion gate. Healthy reps capture ~10,500 frames; reps that
+# terminate playback early drop to <5,000 frames and produce noisy steady-state
+# stats that swamp the Pareto signal. Set to 0 to disable.
+MIN_RENDER_PASSES = int(os.environ.get("WPF_AR_MIN_PASSES", "8000"))
 MAX_REP_ATTEMPTS = int(os.environ.get("WPF_AR_MAX_REP_ATTEMPTS", "3"))
 
 # Metric extraction: each entry is (key) → (dotted path into analysis.json).
@@ -230,22 +229,34 @@ def do_swap() -> bool:
 
 
 def do_restore() -> None:
-    """Always-safe restore using swap-wpf.ps1 manifest."""
+    """Always-safe restore using swap-wpf.ps1 manifest. Retries on DLL lock —
+    OS file-handle release after taskkill is non-instant."""
     log("swap-wpf restore …")
-    rc, out = cmd(
-        [
-            "cmd.exe", "/c",
-            "powershell", "-ExecutionPolicy", "Bypass", "-NoProfile",
-            "-File", to_winpath(SWAP_TOOL),
-            "restore",
-            "-McBuildDir", to_winpath(MC_BUILD),
-        ],
-        cwd=WPF_REPO, timeout=120,
-    )
-    if rc != 0:
-        log(f"WARN: restore returned rc={rc}. Last 15 lines:")
-        for line in out.splitlines()[-15:]:
-            print("  " + line)
+    last_out = ""
+    for attempt in range(4):
+        if attempt > 0:
+            wait_s = 2 ** attempt  # 2, 4, 8 s
+            log(f"  restore: DLL still locked, waiting {wait_s}s before retry …")
+            time.sleep(wait_s)
+        rc, out = cmd(
+            [
+                "cmd.exe", "/c",
+                "powershell", "-ExecutionPolicy", "Bypass", "-NoProfile",
+                "-File", to_winpath(SWAP_TOOL),
+                "restore",
+                "-McBuildDir", to_winpath(MC_BUILD),
+            ],
+            cwd=WPF_REPO, timeout=120,
+        )
+        last_out = out
+        if rc == 0:
+            return
+        # Only retry on the "file in use" failure pattern
+        if "is being used by another process" not in out:
+            break
+    log(f"WARN: restore failed after retries. Last 15 lines:")
+    for line in last_out.splitlines()[-15:]:
+        print("  " + line)
 
 
 # ─── Spike runner ────────────────────────────────────────────────────────────
@@ -306,15 +317,17 @@ def _run_spike_once(rep: int, iter_num: int, attempt: int) -> dict | None:
             "— scenario integrity)")
         return None
 
-    # Optional cohort filter (default off). Steady-state metrics are stable
-    # across DWM-locked vs VSYNC_UNSUPPORTED cohorts (1–6 % CV), so this is
-    # only useful for fork-WPF experiments that deliberately induce one cohort.
+    # Scenario-completion gate. Healthy reps capture ~10,500 frames during the
+    # full playback. Reps that terminate early (playback aborted, take loop
+    # ended prematurely) drop to 1,000–5,000 frames with degraded steady-state
+    # stats. 8,000 is comfortably below the healthy floor and well above the
+    # truncated-rep ceiling. Set WPF_AR_MIN_PASSES=0 to disable.
     if MIN_RENDER_PASSES > 0:
         render_pass_count = data.get("wpf", {}).get("renderPassCount", 0)
         if render_pass_count < MIN_RENDER_PASSES:
             log(
                 f"  {label}: rejected (renderPassCount={render_pass_count} "
-                f"< {MIN_RENDER_PASSES} — cohort filter)"
+                f"< {MIN_RENDER_PASSES} — scenario truncated)"
             )
             return None
 
