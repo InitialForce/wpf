@@ -41,6 +41,8 @@ echo "[ralph] starting loop, max_iters=${MAX_ITERS}"
 echo "[ralph] claude bin: $CLAUDE_BIN"
 echo "[ralph] press Ctrl-C to stop"
 
+fast_fail_count=0
+
 for ((i = 1; i <= MAX_ITERS; i++)); do
     if grep -q "<halt/>" program.md; then
         echo "[ralph] <halt/> sentinel detected in program.md — stopping"
@@ -51,8 +53,23 @@ for ((i = 1; i <= MAX_ITERS; i++)); do
 
     # Fresh context window each iteration (Geoff Huntley's key insight).
     # --dangerously-skip-permissions: this is a closed-loop sandbox, not interactive.
+    iter_start=$(date +%s)
     if ! run_claude < program.md; then
-        echo "[ralph] claude exited non-zero on iter $i — continuing"
+        iter_dur=$(( $(date +%s) - iter_start ))
+        # Fast non-zero exits (<60 s) are almost always API failures (503,
+        # rate limit, auth). A normal iter is 7–25 min. Back off so we don't
+        # spin and burn quota.
+        if (( iter_dur < 60 )); then
+            backoff=$(( fast_fail_count == 0 ? 60 : (fast_fail_count >= 5 ? 600 : 60 * (fast_fail_count + 1)) ))
+            fast_fail_count=$(( fast_fail_count + 1 ))
+            echo "[ralph] claude exited non-zero in ${iter_dur}s (fast-fail #${fast_fail_count}) — sleeping ${backoff}s before next iter"
+            sleep "$backoff"
+        else
+            fast_fail_count=0
+            echo "[ralph] claude exited non-zero on iter $i (after ${iter_dur}s) — continuing"
+        fi
+    else
+        fast_fail_count=0
     fi
 done
 
