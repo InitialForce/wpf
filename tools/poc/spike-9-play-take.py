@@ -1302,6 +1302,33 @@ def main() -> int:
             trace_capture = None
             mark("trace.stopped", rc=trc_rc)
 
+            # Start asynkron analysis in a background thread immediately after
+            # trace.stopped. The 4 modes run in parallel (see asynkron.py
+            # ThreadPoolExecutor). Meanwhile the main thread runs gcdump
+            # (requires MC alive), probe (file-only), screenshot, and teardown.
+            # We join before exiting the try block so timeline marks are correct.
+            import threading as _threading
+            _asynkron_result: dict = {}
+            _asynkron_exc: list[Exception] = []
+
+            def _asynkron_bg() -> None:
+                try:
+                    outs = asynkron_analyze(
+                        nettrace_path,
+                        out_dir=RESULT_DIR,
+                        modes=("memory", "cpu", "exception", "contention"),
+                        timeout_s=600,
+                    )
+                    _asynkron_result["outs"] = outs
+                except Exception as exc:
+                    _asynkron_exc.append(exc)
+
+            mark("asynkron.start")
+            _asynkron_thread = _threading.Thread(
+                target=_asynkron_bg, daemon=True, name="asynkron-bg",
+            )
+            _asynkron_thread.start()
+
             shot_paused = capture_screenshot(driver, "03-paused", RESULT_DIR / "shots")
             mark("paused.shot", ok=shot_paused.get("ok"),
                  path=shot_paused.get("path"), err=shot_paused.get("error"))
@@ -1334,19 +1361,6 @@ def main() -> int:
             except Exception as exc:
                 mark("probe.error", err=str(exc))
 
-            mark("asynkron.start")
-            try:
-                outs = asynkron_analyze(
-                    nettrace_path,
-                    out_dir=RESULT_DIR,
-                    modes=("memory", "cpu", "exception", "contention"),
-                    timeout_s=600,
-                )
-                sizes = {m: p.stat().st_size for m, p in outs.items() if p.exists()}
-                mark("asynkron.done", sizes=sizes)
-            except Exception as exc:
-                mark("asynkron.error", err=str(exc))
-
             mark("disconnect")
             try:
                 driver.disconnect(close_target=True)
@@ -1359,6 +1373,15 @@ def main() -> int:
             time.sleep(0.5)  # let the RPC round-trip before terminating broker
             driver.kill()
             mark("driver.killed")
+
+            # Join background asynkron thread (may already be done).
+            _asynkron_thread.join()
+            if _asynkron_exc:
+                mark("asynkron.error", err=str(_asynkron_exc[0]))
+            else:
+                outs = _asynkron_result.get("outs", {})
+                sizes = {m: p.stat().st_size for m, p in outs.items() if p.exists()}
+                mark("asynkron.done", sizes=sizes)
 
         except Exception as exc:
             mark("FATAL", err=str(exc))
