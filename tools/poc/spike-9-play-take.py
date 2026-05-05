@@ -85,8 +85,14 @@ PRE_PLAY_ATTACH_S = 3.0
 PLAY_DURATION_S = 10.0
 POST_PLAY_IDLE_S = 1.5
 TRACE_FLUSH_MARGIN_S = 4.0
+# Trace covers only the play window: IPC attach settle + play + post-play
+# idle + flush margin. Navigation happens before the trace starts, so
+# EXPLORER_NAV_BUDGET_S is no longer needed in this calculation.
 TRACE_DURATION_S = int(round(
-    PRE_PLAY_ATTACH_S + PLAY_DURATION_S + POST_PLAY_IDLE_S + TRACE_FLUSH_MARGIN_S
+    PRE_PLAY_ATTACH_S
+    + PLAY_DURATION_S
+    + POST_PLAY_IDLE_S
+    + TRACE_FLUSH_MARGIN_S
 ))  # = 19s
 WARMUP_TIMEOUT_S = 90
 
@@ -160,14 +166,31 @@ def _is_error_response(r: dict) -> tuple[bool, str]:
     return False, ""
 
 
-def call_strict(driver: McpDriver, name: str, args: dict, timeout: float = 10.0) -> dict:
+def call_strict(
+    driver: McpDriver,
+    name: str,
+    args: dict,
+    timeout: float = 10.0,
+    *,
+    retry_on_busy_for_s: float = 15.0,
+) -> dict:
     """call_tool that RAISES on tool-level errors (e.g. ArgumentException
-    for missing nodeId)."""
-    r = driver.call_tool(name, args, timeout=timeout)
-    is_err, msg = _is_error_response(r)
-    if is_err:
+    for missing nodeId).
+
+    Auto-retries on DISPATCHER_BUSY for up to `retry_on_busy_for_s` — the
+    broker explicitly says to retry that error, and a long-running WPF
+    operation (template load, layout pass on first frame) routinely makes
+    the dispatcher unavailable for hundreds of milliseconds at a time."""
+    deadline = time.monotonic() + max(retry_on_busy_for_s, 0.0)
+    while True:
+        r = driver.call_tool(name, args, timeout=timeout)
+        is_err, msg = _is_error_response(r)
+        if not is_err:
+            return r
+        if "DISPATCHER_BUSY" in msg and time.monotonic() < deadline:
+            time.sleep(0.5)
+            continue
         raise RuntimeError(f"{name}({args}) failed: {msg}")
-    return r
 
 
 def find_node_id(driver: McpDriver, x_name: str, timeout_s: float = 30.0) -> str | None:
@@ -788,6 +811,7 @@ def main() -> int:
             #      OpenCommand to load the take and dismiss the dialog.
             #   7. Diagnostic screenshot — verify Quick Start panel hid and
             #      the video viewport rendered the first frame.
+            # ====================================================================
             mark("warmup.click_open_swing_explorer")
             open_explorer = find_clickable_node(driver, "OpenSwingExplorer", 30.0)
             if open_explorer is None:
@@ -1110,36 +1134,6 @@ def main() -> int:
             mark("warmup.shot", ok=shot_warmup.get("ok"),
                  path=shot_warmup.get("path"), err=shot_warmup.get("error"))
 
-            # ====================================================================
-            # CAPTURE WINDOW BEGINS HERE — covers attach + play + flush margin.
-            #
-            # IMPORTANT: dotnet-trace's --duration is wall-clock from collect
-            # start, NOT from attach. And dotnet-trace prints no "Recording"
-            # marker we can poll for, so we cannot reliably wait_started; the
-            # earlier version did, fell through its 15s timeout, and ended up
-            # clicking play AFTER the 12s trace had already finished collecting.
-            #
-            # Replacement strategy: start trace, sleep PRE_PLAY_ATTACH_S so the
-            # diagnostic-IPC handshake completes, click play, sleep play
-            # duration, click pause. The --duration is sized to cover the full
-            # sequence with flush margin.
-            # ====================================================================
-            trace_capture = DotnetTraceCapture(
-                dotnet_trace_path=dotnet_trace,
-                process_id=mc_pid,
-                output_path=nettrace_path,
-                duration_s=TRACE_DURATION_S,
-                buffer_mb=512,
-            )
-            mark("trace.start", duration_s=TRACE_DURATION_S)
-            trace_capture.start()
-
-            # Static attach delay. dotnet-trace's diagnostic-IPC handshake
-            # plus EventPipe enable + initial rundown is ~1-2s in practice;
-            # we wait a bit longer to give it room.
-            time.sleep(PRE_PLAY_ATTACH_S)
-            mark("trace.attach_settled", waited_s=PRE_PLAY_ATTACH_S)
-
             # Click play. PlayButton is a ToggleButton bound to
             # Playback.TogglePlayCommand. wpf_click goes through the UIA
             # InvokePattern (L1) which ToggleButton does NOT expose
@@ -1153,13 +1147,112 @@ def main() -> int:
             # CanExecute checked first — exactly what a real mouse click
             # would do, no SendInput. Broker docs explicitly recommend
             # this for any Command-bound ButtonBase including ToggleButton.
+            # PlayButton is a ToggleButton bound to TogglePlayCommand. Clicking
+            # toggles state. To verify the click ACTUALLY started playback (and
+            # didn't silently no-op due to a dispatcher race / focus issue / WPF
+            # render-thread stall), poll VideoSlider.Value after each click —
+            # advancing Value is the truth signal for "MC is playing". If the
+            # value doesn't advance within 2 s, click again (re-toggling); up
+            # to 3 attempts before giving up the rep.
+            def _read_prop(node_id: str, prop: str) -> str | None:
+                try:
+                    r = driver.call_tool(
+                        "wpf_get_properties",
+                        {"nodeId": node_id, "names": [prop]},
+                        timeout=5.0,
+                    )
+                    env = _envelope(r)
+                    items = (env.get("items") if isinstance(env, dict) else None) or []
+                    for it in items:
+                        if it.get("name") == prop:
+                            return it.get("value")
+                except Exception:
+                    return None
+                return None
+
+            def _slider_value() -> float | None:
+                v = _read_prop(video_slider, "Value")
+                try:
+                    return float(v) if v is not None else None
+                except (TypeError, ValueError):
+                    return None
+
+            def _is_play_checked() -> bool:
+                v = _read_prop(play_node, "IsChecked")
+                return str(v).lower() == "true"
+
+            # CAPTURE WINDOW BEGINS HERE — covers IPC attach settle + play +
+            # post-play idle. Navigation is already complete; the trace contains
+            # only the steady-state playback window we want to measure.
+            # TRACE_DURATION_S = PRE_PLAY_ATTACH_S + PLAY_DURATION_S +
+            #                    POST_PLAY_IDLE_S + TRACE_FLUSH_MARGIN_S = 19s.
+            # dotnet-trace self-exits when its --duration timer fires (~2s after
+            # pause.click + POST_PLAY_IDLE_S), so trace_capture.stop() returns
+            # almost immediately — no multi-minute flush wait.
+            trace_capture = DotnetTraceCapture(
+                dotnet_trace_path=dotnet_trace,
+                process_id=mc_pid,
+                output_path=nettrace_path,
+                duration_s=TRACE_DURATION_S,
+                buffer_mb=512,
+            )
+            mark("trace.start", duration_s=TRACE_DURATION_S)
+            trace_capture.start()
+            time.sleep(PRE_PLAY_ATTACH_S)
+            mark("trace.attach_settled", waited_s=PRE_PLAY_ATTACH_S)
+
             mark("play.click")
             play_r = call_strict(
                 driver, "wpf_execute_command",
                 {"nodeId": play_node}, timeout=10.0,
+                retry_on_busy_for_s=30.0,
             )
             (RESULT_DIR / "diag-play-execute_command-response.json").write_text(
                 json.dumps(play_r, indent=2, default=str), encoding="utf-8")
+
+            # Verify play actually started. PlayButton.IsChecked is bound to
+            # the playback Toggle state — when MC accepts the play command it
+            # flips to True and stays there for the duration of playback.
+            # Retrying the click when IsChecked is already True would just
+            # toggle play back OFF, so we only retry when IsChecked is still
+            # False after a 2 s settle. We also poll a few times because
+            # property reads through the broker are occasionally flaky.
+            def _sample_is_checked(samples: int = 5, period_s: float = 0.4) -> bool:
+                """True iff IsChecked reads True at least once across samples."""
+                for _ in range(samples):
+                    if _is_play_checked():
+                        return True
+                    time.sleep(period_s)
+                return False
+
+            play_started = False
+            for attempt in range(3):
+                # Give MC a moment for the click to land + state to update.
+                time.sleep(1.0)
+                checked = _sample_is_checked()
+                mark("play.verify", attempt=attempt + 1, isChecked=checked)
+                if checked:
+                    play_started = True
+                    break
+                # IsChecked still False → click didn't toggle the state.
+                if attempt < 2:
+                    mark("play.click.retry", attempt=attempt + 1)
+                    try:
+                        call_strict(
+                            driver, "wpf_execute_command",
+                            {"nodeId": play_node}, timeout=10.0,
+                            retry_on_busy_for_s=15.0,
+                        )
+                    except Exception as exc:
+                        mark("play.click.retry.error", err=str(exc))
+
+            if not play_started:
+                mark("FATAL.play_did_not_start")
+                shot_fail = capture_screenshot(
+                    driver, "99-play-did-not-start", RESULT_DIR / "shots",
+                )
+                mark("diag.shot_failure", **shot_fail)
+                return 17
             # In-trace mid-play screenshots — VERIFICATION mode. Each
             # 1080p PNG capture allocates ~5 MB on the LOH; we accept that
             # cost so we can compare the captured frames pixel-wise to
@@ -1195,6 +1288,7 @@ def main() -> int:
                 call_strict(
                     driver, "wpf_execute_command",
                     {"nodeId": play_node}, timeout=10.0,
+                    retry_on_busy_for_s=15.0,
                 )
             except Exception as exc:
                 mark("pause.error", err=str(exc))
