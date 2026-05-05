@@ -114,7 +114,14 @@ DO NOT edit (eval.py reverts automatically if these change):
 
 ## Hard rules
 
-- NEVER STOP. The user kills the loop when satisfied.
+- **ONE iteration per Claude invocation.** Read state → form hypothesis →
+  edit → commit → run `eval.py` → read verdict → summarize → **EXIT**.
+  ralph.sh will spawn the next Claude with a fresh context window. "NEVER
+  STOP" applies to the *loop* (ralph.sh keeps invoking you), not to a
+  single Claude session — staying in one session past one iteration
+  exhausts your context and degrades work quality.
+- NEVER STOP THE LOOP. The user kills ralph when satisfied; you exit after
+  each iteration but the loop carries on across many invocations.
 - NEVER edit files in `/c/work/wpf-perf/autoresearch/` except `results.*`
   (and even those, only via `eval.py`).
 - NEVER skip `eval.py`. NEVER hand-edit `results.tsv` or `results.jsonl`.
