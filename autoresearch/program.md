@@ -78,10 +78,15 @@ DO NOT edit (eval.py reverts automatically if these change):
    git commit -m "wpf-ar(iter=NNN): <one-line description>"
    ```
 
-5. **Evaluate.** Run from `/c/work/wpf-perf/autoresearch/`:
+5. **Evaluate.** Run from `/c/work/wpf-perf/autoresearch/` **foreground** with
+   a long timeout (eval takes 7–10 min: build + 5 reps + restore):
    ```
-   python3 eval.py
+   python3 eval.py    # Bash tool: timeout=600000, run_in_background=false
    ```
+   Do NOT background eval.py and poll with `pgrep -f`. The poller's own argv
+   contains the literal "eval.py" so `pgrep -f` matches its own bash process
+   and the wait loop never exits, hanging the iteration indefinitely.
+
    `eval.py` builds WPF, swaps DLLs into MC's build output, runs the spike
    N=5 times, aggregates, decides. It will:
    - **exit 0 (KEEP)** — your commit stays; the loop continues
