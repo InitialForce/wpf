@@ -307,11 +307,6 @@
         <target state="translated">'{0}' に '{1}' という名前が付いています。ResourceDictionary のコンテンツのインスタンス化は遅延されるため、これらのコンテンツには名前を付けないでください。</target>
         <note />
       </trans-unit>
-      <trans-unit id="NonClsError">
-        <source>BG1001: Unknown CLS exception.</source>
-        <target state="translated">BG1001: 不明な CLS 例外です。</target>
-        <note />
-      </trans-unit>
       <trans-unit id="OutputType">
         <source>OutputType is '{0}'.</source>
         <target state="translated">OutputType が '{0}' です。</target>

@@ -307,11 +307,6 @@
         <target state="translated">Um '{0}' está denominado '{1}'. Não nomeie o conteúdo de ResourceDictionary porque sua instanciação foi adiada.</target>
         <note />
       </trans-unit>
-      <trans-unit id="NonClsError">
-        <source>BG1001: Unknown CLS exception.</source>
-        <target state="translated">BG1001: exceção CLS desconhecida.</target>
-        <note />
-      </trans-unit>
       <trans-unit id="OutputType">
         <source>OutputType is '{0}'.</source>
         <target state="translated">OutputType é '{0}'.</target>

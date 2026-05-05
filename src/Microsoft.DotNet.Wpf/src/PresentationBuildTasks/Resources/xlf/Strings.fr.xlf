@@ -307,11 +307,6 @@
         <target state="translated">Un '{0}' est appelé '{1}'. N'attribuez pas de nom au contenu ResourceDictionary, car son installation est différée.</target>
         <note />
       </trans-unit>
-      <trans-unit id="NonClsError">
-        <source>BG1001: Unknown CLS exception.</source>
-        <target state="translated">BG1001 : exception CLS inconnue.</target>
-        <note />
-      </trans-unit>
       <trans-unit id="OutputType">
         <source>OutputType is '{0}'.</source>
         <target state="translated">OutputType est '{0}'.</target>

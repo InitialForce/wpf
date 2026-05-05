@@ -12,6 +12,7 @@ using MS.Internal.PresentationCore;
 using MS.Utility;
 using System.Collections;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Windows.Automation;
 using System.Windows.Automation.Peers;
 using System.Windows.Input;
@@ -66,6 +67,15 @@ namespace System.Windows
     [UidProperty("Uid")]
     public partial class UIElement : Visual, IInputElement, IAnimatable
     {
+        // Layout-perf instrumentation accumulators. The active recursion
+        // pushes its child elapsed-time into the parent's saved slot so the
+        // parent can report exclusive (self) time = total - children.
+        // ThreadStatic since each WPF UI thread has its own layout pass.
+        [ThreadStatic]
+        private static long s_childMeasureMicros;
+        [ThreadStatic]
+        private static long s_childArrangeMicros;
+
         static UIElement()
         {
             UIElement.RegisterEvents(typeof(UIElement));
@@ -640,6 +650,11 @@ namespace System.Windows
 
                     bool gotException = true;
 
+                    bool layoutPerfEnabled = LayoutPerfTraceLogger.IsEnabled;
+                    long layoutPerfStartTicks = layoutPerfEnabled ? Stopwatch.GetTimestamp() : 0;
+                    long savedChildMeasureMicros = layoutPerfEnabled ? s_childMeasureMicros : 0;
+                    if (layoutPerfEnabled) s_childMeasureMicros = 0;
+
                     try
                     {
                         layoutManager.EnterMeasure();
@@ -651,6 +666,23 @@ namespace System.Windows
                     {
                         // reset measure in progress
                         MeasureInProgress = false;
+
+                        if (layoutPerfEnabled)
+                        {
+                            long deltaTicks = Stopwatch.GetTimestamp() - layoutPerfStartTicks;
+                            long elapsedMicros = (long)(deltaTicks * (1_000_000.0 / Stopwatch.Frequency));
+                            long childMicros = s_childMeasureMicros;
+                            long selfMicros = elapsedMicros - childMicros;
+                            if (selfMicros < 0) selfMicros = 0;
+                            // Restore parent's accumulator and report our total to it.
+                            s_childMeasureMicros = savedChildMeasureMicros + elapsedMicros;
+                            if (elapsedMicros >= LayoutPerfTraceLogger.MeasureThresholdMicros)
+                            {
+                                LayoutPerfTraceLogger.LogSlowMeasure(
+                                    GetType().Name, elapsedMicros, selfMicros,
+                                    availableSize.Width, availableSize.Height);
+                            }
+                        }
 
                         _previousAvailableSize = availableSize;
 
@@ -873,6 +905,11 @@ namespace System.Windows
                             finalRect = RoundLayoutRect(finalRect, dpi.DpiScaleX, dpi.DpiScaleY);
                         }
 
+                        bool layoutPerfEnabled = LayoutPerfTraceLogger.IsEnabled;
+                        long layoutPerfStartTicks = layoutPerfEnabled ? Stopwatch.GetTimestamp() : 0;
+                        long savedChildArrangeMicros = layoutPerfEnabled ? s_childArrangeMicros : 0;
+                        if (layoutPerfEnabled) s_childArrangeMicros = 0;
+
                         try
                         {
                             layoutManager.EnterArrange();
@@ -892,6 +929,22 @@ namespace System.Windows
                         {
                             ArrangeInProgress = false;
                             layoutManager.ExitArrange();
+
+                            if (layoutPerfEnabled)
+                            {
+                                long deltaTicks = Stopwatch.GetTimestamp() - layoutPerfStartTicks;
+                                long elapsedMicros = (long)(deltaTicks * (1_000_000.0 / Stopwatch.Frequency));
+                                long childMicros = s_childArrangeMicros;
+                                long selfMicros = elapsedMicros - childMicros;
+                                if (selfMicros < 0) selfMicros = 0;
+                                s_childArrangeMicros = savedChildArrangeMicros + elapsedMicros;
+                                if (elapsedMicros >= LayoutPerfTraceLogger.ArrangeThresholdMicros)
+                                {
+                                    LayoutPerfTraceLogger.LogSlowArrange(
+                                        GetType().Name, elapsedMicros, selfMicros,
+                                        finalRect.Width, finalRect.Height);
+                                }
+                            }
 
                             if (gotException)
                             {

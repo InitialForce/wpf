@@ -307,11 +307,6 @@
         <target state="translated">Ein "{0}" hat den Namen "{1}". Benennen Sie ResourceDictionary-Inhalte nicht, da ihre Instanziierung zurückgestellt wird.</target>
         <note />
       </trans-unit>
-      <trans-unit id="NonClsError">
-        <source>BG1001: Unknown CLS exception.</source>
-        <target state="translated">BG1001: Unbekannte CLS-Ausnahme.</target>
-        <note />
-      </trans-unit>
       <trans-unit id="OutputType">
         <source>OutputType is '{0}'.</source>
         <target state="translated">OutputType: "{0}".</target>

@@ -307,11 +307,6 @@
         <target state="translated">{0} má název {1}. Nepojmenovávejte obsah ResourceDictionary, protože jeho vytvoření instance je odloženo.</target>
         <note />
       </trans-unit>
-      <trans-unit id="NonClsError">
-        <source>BG1001: Unknown CLS exception.</source>
-        <target state="translated">BG1001: Neznámá výjimka CLS.</target>
-        <note />
-      </trans-unit>
       <trans-unit id="OutputType">
         <source>OutputType is '{0}'.</source>
         <target state="translated">OutputType je {0}.</target>

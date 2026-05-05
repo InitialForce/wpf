@@ -307,11 +307,6 @@
         <target state="translated">某“{0}”已命名为“{1}”。请勿命名 ResourceDictionary 内容，因为已推迟此类内容的实例化。</target>
         <note />
       </trans-unit>
-      <trans-unit id="NonClsError">
-        <source>BG1001: Unknown CLS exception.</source>
-        <target state="translated">BG1001: 未知的 CLS 异常。</target>
-        <note />
-      </trans-unit>
       <trans-unit id="OutputType">
         <source>OutputType is '{0}'.</source>
         <target state="translated">OutputType 是“{0}”。</target>

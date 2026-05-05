@@ -1,6 +1,7 @@
 ﻿// Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.Diagnostics;
 using System.Threading;
 using System.Windows.Threading;
 using System.Windows.Input;
@@ -8,6 +9,7 @@ using System.Windows.Interop;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Composition;
 using MS.Internal;
+using MS.Internal.PresentationCore;
 using MS.Utility;
 using MS.Win32;
 
@@ -1777,6 +1779,19 @@ namespace System.Windows.Media
             _promoteRenderOpToInput.Stop();
             _promoteRenderOpToRender.Stop();
 
+            // Per-frame WPF performance accounting. When a TraceLogging consumer
+            // is listening to the LayoutPerfTraceLogger provider, we capture
+            // wall-time of each phase (callbacks, Rendering event, target
+            // render loop, channel commit) and emit a single
+            // WpfRenderFrameSlow event per frame whose total exceeds the
+            // configured threshold. Single Stopwatch reads per phase, so the
+            // overhead is negligible when no consumer is active.
+            bool layoutPerfEnabled = LayoutPerfTraceLogger.IsEnabled;
+            long perfFrameStart = layoutPerfEnabled ? Stopwatch.GetTimestamp() : 0;
+            long perfCallbacksMicros = 0;
+            long perfRenderingEventMicros = 0;
+            RenderPerfStats perfStats = default;
+
             bool gotException = true;
 
             try
@@ -1805,7 +1820,10 @@ namespace System.Windows.Media
                     _timeManager.LockTickTime();
 
                     // call all render callbacks
+                    long perfTcb = layoutPerfEnabled ? Stopwatch.GetTimestamp() : 0;
                     FireInvokeOnRenderCallbacks();
+                    if (layoutPerfEnabled)
+                        perfCallbacksMicros += ElapsedMicros(perfTcb);
 
                     // signal that the frame has been updated and we are ready to render.
                     // only fire on the first iteration
@@ -1816,11 +1834,17 @@ namespace System.Windows.Media
                         // (TimeManager gets its tick time from MediaContext's IClock implementation).
                         // In the case where we can't query QPC or aren't doing interlocked presents,
                         // this will be equal to the current time, which is a good enough approximation.
+                        long perfTr = layoutPerfEnabled ? Stopwatch.GetTimestamp() : 0;
                         Rendering?.Invoke(this.Dispatcher, new RenderingEventArgs(_timeManager.LastTickTime));
+                        if (layoutPerfEnabled)
+                            perfRenderingEventMicros += ElapsedMicros(perfTr);
 
                         // call all render callbacks again in case the Rendering event affects layout
                         // this will enable layout effecting changes to get triggered this frame
+                        long perfTcb2 = layoutPerfEnabled ? Stopwatch.GetTimestamp() : 0;
                         FireInvokeOnRenderCallbacks();
+                        if (layoutPerfEnabled)
+                            perfCallbacksMicros += ElapsedMicros(perfTcb2);
                     }
                 }
                 while (_timeManager.IsDirty);
@@ -1850,7 +1874,8 @@ namespace System.Windows.Media
                 // to the UCE.
                 //
 
-                Render((ICompositionTarget)resizedCompositionTarget);
+                Render((ICompositionTarget)resizedCompositionTarget, ref perfStats);
+                perfStats.TickLoopCount = tickLoopCount;
 
                 //
                 // We've processed the currentRenderOp so clear it
@@ -1896,7 +1921,41 @@ namespace System.Windows.Media
                 }
 
                 _isRendering = false;
+
+                if (layoutPerfEnabled)
+                {
+                    long frameMicros = ElapsedMicros(perfFrameStart);
+                    if (frameMicros >= LayoutPerfTraceLogger.RenderFrameThresholdMicros)
+                    {
+                        LayoutPerfTraceLogger.LogSlowRenderFrame(
+                            elapsedMicros: frameMicros,
+                            callbacksMicros: perfCallbacksMicros,
+                            renderingEventMicros: perfRenderingEventMicros,
+                            targetsMicros: perfStats.TargetsMicros,
+                            commitMicros: perfStats.CommitMicros,
+                            tickLoopCount: perfStats.TickLoopCount,
+                            registeredTargets: perfStats.RegisteredTargets);
+                    }
+                }
             }
+        }
+
+        // Phase counters populated by Render() / CommitChannel() so the
+        // slow-frame event in RenderMessageHandlerCore's finally block has a
+        // breakdown without resorting to thread-static state. Passed by ref
+        // through the call chain.
+        private struct RenderPerfStats
+        {
+            public long TargetsMicros;
+            public long CommitMicros;
+            public int RegisteredTargets;
+            public int TickLoopCount;
+        }
+
+        private static long ElapsedMicros(long startTicks)
+        {
+            long delta = Stopwatch.GetTimestamp() - startTicks;
+            return (long)(delta * (1_000_000.0 / Stopwatch.Frequency));
         }
 
         private int InvokeOnRenderCallbacksCount
@@ -1990,6 +2049,12 @@ namespace System.Windows.Media
         /// </remarks>
         private void Render(ICompositionTarget resizedCompositionTarget)
         {
+            RenderPerfStats unused = default;
+            Render(resizedCompositionTarget, ref unused);
+        }
+
+        private void Render(ICompositionTarget resizedCompositionTarget, ref RenderPerfStats perfStats)
+        {
             // resizedCompositionTarget is the HwndTarget that is currently being resized.
 
             //
@@ -2009,6 +2074,8 @@ namespace System.Windows.Media
 
                 Debug.Assert(!_isDisposed);
                 Debug.Assert(_registeredICompositionTargets != null);
+
+                bool layoutPerfEnabled = LayoutPerfTraceLogger.IsEnabled;
 
                 // ETW event tracing
                 bool etwTracingEnabled = false;
@@ -2033,6 +2100,8 @@ namespace System.Windows.Media
                 // ----------------------------------------------------------------
                 // 1) Render each registered ICompositionTarget to finish up the batch.
 
+                long perfTargetsStart = layoutPerfEnabled ? Stopwatch.GetTimestamp() : 0;
+                int targetCount = 0;
                 foreach (ICompositionTarget registeredTarget in _registeredICompositionTargets)
                 {
                     DUCE.ChannelSet channelSet;
@@ -2041,6 +2110,12 @@ namespace System.Windows.Media
                     _currentRenderingChannel = channelSet;
                     registeredTarget.Render((registeredTarget == resizedCompositionTarget), channelSet.Channel);
                     _currentRenderingChannel = null;
+                    targetCount++;
+                }
+                if (layoutPerfEnabled)
+                {
+                    perfStats.TargetsMicros += ElapsedMicros(perfTargetsStart);
+                    perfStats.RegisteredTargets = targetCount;
                 }
 
 
@@ -2057,6 +2132,8 @@ namespace System.Windows.Media
                 // channel at this time. If we are waiting for a present then we
                 // will wait until we have presented before committing this channel
                 //
+
+                long perfCommitStart = layoutPerfEnabled ? Stopwatch.GetTimestamp() : 0;
 
                 Channel?.CloseBatch();
 
@@ -2075,6 +2152,9 @@ namespace System.Windows.Media
                         CommitChannel();
                     }
                 }
+
+                if (layoutPerfEnabled)
+                    perfStats.CommitMicros += ElapsedMicros(perfCommitStart);
 
                 // ----------------------------------------------------------------
                 // 4) Raise RenderComplete event.

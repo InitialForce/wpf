@@ -100,6 +100,7 @@
     <Compile Include="$(WpfSharedDir)\Telemetry\Managed\TelemetryEventSource.cs" />
     <Compile Include="$(WpfSharedDir)\Telemetry\Managed\TraceLoggingProvider.cs" />
     <Compile Include="$(WpfSharedDir)\Telemetry\Managed\TraceLoggers\XpsOMPrintingTraceLogger.cs" />
+    <Compile Include="MS\Internal\Telemetry\LayoutPerfTraceLogger.cs" />
     <Compile Include="ModuleInitializer.cs" />
     <Compile Include="OtherAssemblyAttrs.cs" />
     <Compile Include="MS\Internal\AnimatedTypeHelpers.cs" />
@@ -1394,9 +1395,15 @@
   <ItemGroup>
     <!-- required for internals access -->
     <ProjectReference Include="$(WpfSourceDir)WindowsBase\WindowsBase.csproj" />
-    <ProjectReference Include="$(WpfSourceDir)DirectWriteForwarder\DirectWriteForwarder.vcxproj">
+    <ProjectReference Include="$(WpfSourceDir)DirectWriteForwarder\DirectWriteForwarder.vcxproj"
+                      Condition="'$(SkipDirectWriteForwarderProjectRef)'!='true'">
       <UndefineProperties>TargetFramework;TargetFrameworks</UndefineProperties>
     </ProjectReference>
+    <Reference Include="DirectWriteForwarder"
+               Condition="'$(SkipDirectWriteForwarderProjectRef)'=='true' and '$(DirectWriteForwarderBinaryPath)'!=''">
+      <HintPath>$(DirectWriteForwarderBinaryPath)</HintPath>
+      <Private>false</Private>
+    </Reference>
     <ProjectReference Include="$(WpfSourceDir)System.Xaml\System.Xaml.csproj" />
     <ProjectReference Include="$(WpfSourceDir)System.Windows.Input.Manipulations\System.Windows.Input.Manipulations.csproj" />
     <ProjectReference Include="$(WpfSourceDir)System.Windows.Primitives\System.Windows.Primitives.csproj" />
