@@ -972,8 +972,8 @@ namespace System.Windows.Media
                     {
                         // SyncFlush will Commit()
 
-                        CommittingBatch?.Invoke(Channel, EventArgs.Empty);
-
+                        CommittingBatch?.Invoke(Channel, new EventArgs());
+                        
 
                         Channel.SyncFlush();
                     }
@@ -2226,7 +2226,7 @@ namespace System.Windows.Media
                     _lastCommitTime = currentTicks;
                 }
 
-                CommittingBatch?.Invoke(Channel, EventArgs.Empty);
+                CommittingBatch?.Invoke(Channel, new EventArgs());
 
                 Channel.Commit();
 
@@ -2304,8 +2304,8 @@ namespace System.Windows.Media
                         do
                         {
                             // WaitForNextMessage will Commit()
-                            CommittingBatch?.Invoke(Channel, EventArgs.Empty);
-
+                            CommittingBatch?.Invoke(Channel, new EventArgs());
+                            
 
                             Channel.WaitForNextMessage();
                             NotifyChannelMessage();
@@ -2345,8 +2345,8 @@ namespace System.Windows.Media
                 else
                 {
                     // SyncFlush() will Commit()
-                    CommittingBatch?.Invoke(Channel, EventArgs.Empty);
-
+                    CommittingBatch?.Invoke(Channel, new EventArgs());
+                    
 
                     //
                     // Issue a sync flush, which will only return after
