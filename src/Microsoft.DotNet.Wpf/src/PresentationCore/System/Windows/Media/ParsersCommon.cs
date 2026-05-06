@@ -407,26 +407,31 @@ namespace MS.Internal.Markup
 
             if (simple && (_curIndex <= (start + 8))) // 32-bit integer
             {
+                // Hoist _pathString to a local so the JIT proves the ref is
+                // stable across the loop and folds away per-iteration field
+                // loads + null-checks on the string indexer.
+                string s = _pathString;
+                int end = _curIndex;
                 int sign = 1;
-                
-                if (_pathString[start] == '+')
+
+                if (s[start] == '+')
                 {
                     start ++;
                 }
-                else if (_pathString[start] == '-')
+                else if (s[start] == '-')
                 {
                     start ++;
                     sign = -1;
-                }                                        
-                
+                }
+
                 int value = 0;
-                
-                while (start < _curIndex)
+
+                while (start < end)
                 {
-                    value = value * 10 + (_pathString[start] - '0');
+                    value = value * 10 + (s[start] - '0');
                     start ++;
                 }
-                
+
                 return value * sign;
             }
             else
