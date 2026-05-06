@@ -93,8 +93,12 @@ def cmd(argv: list[str], cwd: Path | None = None, timeout: int | None = None,
 
 
 def to_winpath(p: Path) -> str:
-    out = subprocess.run(["cygpath", "-w", str(p)], capture_output=True, text=True, check=True)
-    return out.stdout.strip()
+    """Convert /c/foo/bar → C:\\foo\\bar for PowerShell / cmd args. Mirrors
+    eval.py since `cygpath` isn't reliably on PATH in this WSL setup."""
+    s = str(p)
+    if s.startswith("/c/"):
+        return "C:\\" + s[3:].replace("/", "\\")
+    return s
 
 
 def git(*args: str, cwd: Path = WPF_REPO) -> tuple[int, str]:
