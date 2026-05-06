@@ -204,14 +204,22 @@ namespace MS.Internal.Markup
         private bool SkipWhiteSpace(bool allowComma)
         {
             bool commaMet = false;
-            
+
             while (More())
             {
                 char ch = _pathString[_curIndex];
-                
+
+                // ASCII space dominates whitespace in SVG path data; bypass
+                // the switch jump-table dispatch for the hot case so it
+                // reduces to one compare + advance per iteration.
+                if (ch == ' ')
+                {
+                    _curIndex++;
+                    continue;
+                }
+
                 switch (ch)
                 {
-                case ' ' :
                 case '\n':
                 case '\r':
                 case '\t': // SVG whitespace
