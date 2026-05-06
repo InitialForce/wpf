@@ -373,44 +373,52 @@ namespace MS.Internal.Markup
                 _curIndex ++;
             }
 
-            // Check for Infinity (or -Infinity).
-            if (More() && (_pathString[_curIndex] == 'I'))
+            // Peek the post-sign char once and dispatch on it. The original
+            // code re-checked More() and re-loaded _pathString[_curIndex] for
+            // both the 'I' (Infinity) and 'N' (NaN) probes; the digit case
+            // (overwhelmingly common) paid for both probes despite needing
+            // neither. One peek + branch covers all three cases.
+            if (More())
             {
-                //
-                // Don't bother reading the characters, as the CLR parser will
-                // do this for us later.
-                //
-                _curIndex = Math.Min(_curIndex+8, _pathLength); // "Infinity" has 8 characters
-                simple = false;
-            }
-            // Check for NaN
-            else if (More() && (_pathString[_curIndex] == 'N'))
-            {
-                //
-                // Don't bother reading the characters, as the CLR parser will
-                // do this for us later.
-                //
-                _curIndex = Math.Min(_curIndex+3, _pathLength); // "NaN" has 3 characters
-                simple = false;
-            }
-            else
-            {
-                SkipDigits(! AllowSign);
+                char nextCh = _pathString[_curIndex];
 
-                // Optional period, followed by more digits
-                if (More() && (_pathString[_curIndex] == '.'))
+                if (nextCh == 'I')
                 {
+                    //
+                    // Don't bother reading the characters, as the CLR parser will
+                    // do this for us later.
+                    //
+                    _curIndex = Math.Min(_curIndex+8, _pathLength); // "Infinity" has 8 characters
                     simple = false;
-                    _curIndex ++;
-                    SkipDigits(! AllowSign);
                 }
-
-                // Exponent
-                if (More() && ((_pathString[_curIndex] == 'E') || (_pathString[_curIndex] == 'e')))
+                else if (nextCh == 'N')
                 {
+                    //
+                    // Don't bother reading the characters, as the CLR parser will
+                    // do this for us later.
+                    //
+                    _curIndex = Math.Min(_curIndex+3, _pathLength); // "NaN" has 3 characters
                     simple = false;
-                    _curIndex ++;
-                    SkipDigits(AllowSign);
+                }
+                else
+                {
+                    SkipDigits(! AllowSign);
+
+                    // Optional period, followed by more digits
+                    if (More() && (_pathString[_curIndex] == '.'))
+                    {
+                        simple = false;
+                        _curIndex ++;
+                        SkipDigits(! AllowSign);
+                    }
+
+                    // Exponent
+                    if (More() && ((_pathString[_curIndex] == 'E') || (_pathString[_curIndex] == 'e')))
+                    {
+                        simple = false;
+                        _curIndex ++;
+                        SkipDigits(AllowSign);
+                    }
                 }
             }
 
