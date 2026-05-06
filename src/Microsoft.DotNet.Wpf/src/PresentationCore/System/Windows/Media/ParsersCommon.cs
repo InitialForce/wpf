@@ -364,14 +364,8 @@ namespace MS.Internal.Markup
                 _curIndex ++;
             }
 
-            // Infinity/NaN can only appear when the leading non-sign char is
-            // 'I' or 'N'. When `first` was already a digit, both probes are
-            // dead — short-circuit them to skip 2× More()+indexer+cmp per
-            // number on the digit-dominated hot path.
-            bool firstIsDigit = (uint)(first - '0') <= 9u;
-
             // Check for Infinity (or -Infinity).
-            if (!firstIsDigit && More() && (_pathString[_curIndex] == 'I'))
+            if (More() && (_pathString[_curIndex] == 'I'))
             {
                 //
                 // Don't bother reading the characters, as the CLR parser will
@@ -381,7 +375,7 @@ namespace MS.Internal.Markup
                 simple = false;
             }
             // Check for NaN
-            else if (!firstIsDigit && More() && (_pathString[_curIndex] == 'N'))
+            else if (More() && (_pathString[_curIndex] == 'N'))
             {
                 //
                 // Don't bother reading the characters, as the CLR parser will
