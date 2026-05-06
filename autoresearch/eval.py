@@ -580,9 +580,32 @@ def main() -> int:
     # Returning fast lets ralph.sh's backoff put the loop to sleep until the
     # user reconnects (or the system comes back). NEVER spends quota on a
     # guaranteed-fail iter.
+    #
+    # The iter's commit may already be on HEAD (claude commits before calling
+    # eval). Revert it via git revert so it doesn't accumulate untested code
+    # between iterations and corrupt subsequent runs.
     if not is_session_connected():
         log("FATAL: user session disconnected — D3D9 unavailable. "
             "Skipping iter; ralph.sh will back off.")
+        head_sha = git_sha(WPF_REPO)
+        head_msg_rc, head_msg = cmd(
+            ["git", "log", "-1", "--format=%s"], cwd=WPF_REPO,
+        )
+        if head_msg_rc == 0 and head_msg.strip().startswith("wpf-ar(iter="):
+            log(f"reverting unevaluated iter commit {head_sha[:8]} via git revert")
+            renv = os.environ.copy()
+            renv.setdefault("GIT_AUTHOR_NAME", "wpf-ar-eval")
+            renv.setdefault("GIT_AUTHOR_EMAIL", "eval@autoresearch.local")
+            renv.setdefault("GIT_COMMITTER_NAME", "wpf-ar-eval")
+            renv.setdefault("GIT_COMMITTER_EMAIL", "eval@autoresearch.local")
+            r = subprocess.run(
+                ["git", "revert", "--no-edit", head_sha],
+                cwd=str(WPF_REPO), env=renv, capture_output=True, text=True,
+            )
+            if r.returncode != 0:
+                log(f"WARN: git revert failed: {r.stderr.strip()[:200]}")
+                subprocess.run(["git", "revert", "--abort"],
+                               cwd=str(WPF_REPO), check=False)
         return 6
 
     iter_num = iter_count() + 1
