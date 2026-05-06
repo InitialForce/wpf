@@ -268,25 +268,32 @@ namespace MS.Internal.Markup
         private bool IsNumber(bool allowComma)
         {
             bool commaMet = SkipWhiteSpace(allowComma);
-            
+
             if (More())
             {
-                _token = _pathString[_curIndex];
+                char t = _pathString[_curIndex];
+                _token = t;
 
-                // Valid start of a number
-                if ((_token == '.') || (_token == '-') || (_token == '+') || ((_token >= '0') && (_token <= '9'))
-                    || (_token == 'I')  // Infinity
-                    || (_token == 'N')) // NaN
+                // Path data is digit-dominated; check the digit range first
+                // via single subtract+unsigned-compare so the hot path takes
+                // one branch instead of stepping through '.', '-', '+'.
+                if ((uint)(t - '0') <= 9u)
                 {
                     return true;
-                }                    
+                }
+
+                // Other valid number starts: sign, decimal point, Infinity, NaN.
+                if ((t == '.') || (t == '-') || (t == '+') || (t == 'I') || (t == 'N'))
+                {
+                    return true;
+                }
             }
 
             if (commaMet) // Only allowed between numbers
             {
                 ThrowBadToken();
             }
-            
+
             return false;
         }
 
