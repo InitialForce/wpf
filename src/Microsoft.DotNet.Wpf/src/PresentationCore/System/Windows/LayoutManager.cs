@@ -936,14 +936,14 @@ namespace System.Windows
 
             internal void RemoveOrphans(UIElement parent)
             {
-                ulong childTreeLevel = (ulong)parent.TreeLevel + 1;
                 Request r = _head;
                 while(r != null)
                 {
                     UIElement child = r.Target;
                     Request next = r.Next;
+                    ulong parentTreeLevel = parent.TreeLevel;
 
-                    if(   (child.TreeLevel == childTreeLevel)
+                    if(   (child.TreeLevel == parentTreeLevel + 1)
                        && (child.GetUIParentWithinLayoutIsland() == parent))
                     {
                         _removeRequest(getRequest(child));
