@@ -1,0 +1,15 @@
+<Project>
+  <!--
+    Empty Directory.Build.props that intentionally does NOT import the
+    parent (/c/work/wpf-perf/Directory.Build.props). MSBuild's auto-import
+    walks up the tree looking for the closest Directory.Build.props and
+    stops at the first one found — so this file shields the microbench
+    project from the WPF Arcade SDK integration.
+
+    The Arcade SDK is designed for projects building WPF from source; our
+    BDN project consumes the SDK's pre-built targeting pack and swaps in
+    a locally-rebuilt PresentationCore.dll at runtime, which is incompatible
+    with several of Arcade's source-build assumptions (DefaultReferenceExclusion
+    for WindowsBase, NuGet package routing, etc.).
+  -->
+</Project>
