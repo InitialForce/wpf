@@ -137,18 +137,24 @@ def run_spike() -> Path:
 
 
 def convert_to_speedscope(nettrace: Path) -> Path:
-    """`dotnet-trace convert --format speedscope` → JSON path."""
+    """`dotnet-trace convert --format speedscope` → JSON path.
+
+    `dotnet-trace convert` always appends `.speedscope.json` to whatever you
+    pass via --output. To get `<stem>.speedscope.json`, we pass the bare stem
+    (without extension) and let the tool add the suffix itself.
+    """
     out = nettrace.with_suffix(".speedscope.json")
     if out.exists() and out.stat().st_mtime > nettrace.stat().st_mtime:
         log(f"  speedscope cached: {out.name}")
         return out
     trace_exe = find_dotnet_trace()
     log(f"  converting {nettrace.name} → speedscope …")
+    out_arg = nettrace.with_suffix("")  # tool appends .speedscope.json
     rc, output = cmd(
         ["cmd.exe", "/c", trace_exe, "convert",
          to_winpath(nettrace),
          "--format", "speedscope",
-         "--output", to_winpath(out)],
+         "--output", to_winpath(out_arg)],
         timeout=CONVERT_TIMEOUT_S,
     )
     if rc != 0 or not out.exists():
@@ -168,32 +174,63 @@ def is_wpf_method(frame_name: str) -> bool:
     return False
 
 
-def aggregate_speedscope(speedscope_path: Path) -> tuple[Counter, int]:
-    """Return (Counter[frame_name] → leaf_sample_count, total_samples)."""
-    data = json.loads(speedscope_path.read_text(encoding="utf-8"))
+def aggregate_speedscope(speedscope_path: Path) -> tuple[Counter, float]:
+    """Return (Counter[frame_name] → inclusive time in ms, total wall time).
 
-    # Speedscope schema: shared.frames[i].name; profiles[].samples[][] is a
-    # list of stacks (each stack is a list of frame indices, root → leaf);
-    # weights[] aligns with samples[] (default 1 if absent).
+    dotnet-trace's TraceEvent speedscope exporter emits **evented** profiles
+    (`type: "evented"`, with `events` of `{type:'O'|'C', frame:idx, at:ms}`),
+    not sampled ones. The leaf frames are dominated by synthetic
+    UNMANAGED_CODE_TIME / CPU_TIME pseudo-frames, which is useless for
+    ranking managed WPF methods. Instead we charge every dt to **every**
+    frame on the stack — this gives inclusive time (how long was the method
+    on the call path), which is what you want when picking optimization
+    targets in a managed framework.
+
+    `total` is wall-clock time of the trace (sum of dt regardless of stack
+    depth), so cpu_pct = inclusive_ms / total_ms can exceed 100% for
+    intermediate frames — that's expected and fine for ranking purposes.
+    """
+    data = json.loads(speedscope_path.read_text(encoding="utf-8"))
     shared = data.get("shared", {})
     frames = shared.get("frames", [])
     profiles = data.get("profiles", [])
 
     counts: Counter = Counter()
-    total = 0
+    total = 0.0
     for prof in profiles:
-        samples = prof.get("samples", [])
-        weights = prof.get("weights", [1] * len(samples))
-        for stack, weight in zip(samples, weights):
-            if not stack:
-                continue
-            # Innermost frame = leaf = where time was spent.
-            leaf_idx = stack[-1]
-            if leaf_idx >= len(frames):
-                continue
-            name = frames[leaf_idx].get("name", "")
-            counts[name] += weight
-            total += weight
+        events = prof.get("events", [])
+        if not events:
+            continue
+        stack: list[int] = []
+        last_t = events[0].get("at", 0.0)
+        for ev in events:
+            now = ev.get("at", last_t)
+            dt = now - last_t
+            if dt > 0 and stack:
+                total += dt
+                # Charge dt to every frame currently on the stack.
+                # Avoid double-charging if the same frame appears twice
+                # (recursion) — count it once per stack-occurrence.
+                seen: set[int] = set()
+                for fidx in stack:
+                    if fidx in seen:
+                        continue
+                    seen.add(fidx)
+                    if 0 <= fidx < len(frames):
+                        name = frames[fidx].get("name", "")
+                        counts[name] += dt
+            etype = ev.get("type")
+            fidx = ev.get("frame")
+            if etype == "O":
+                stack.append(fidx)
+            elif etype == "C":
+                # Pop until we find the matching frame (defensive — rare in
+                # well-formed speedscope output but cheap to tolerate).
+                while stack and stack[-1] != fidx:
+                    stack.pop()
+                if stack:
+                    stack.pop()
+            last_t = now
     return counts, total
 
 
@@ -201,25 +238,62 @@ def aggregate_speedscope(speedscope_path: Path) -> tuple[Counter, int]:
 
 
 def existing_benchmarks() -> dict[str, str]:
-    """Scan microbench/Benchmarks/*.cs for `[Benchmark(...)]` attributes and
-    map known method patterns → bdn_filter glob.
+    """Scan microbench/Benchmarks/*.cs and return {Type.Method: bdn_glob}.
 
-    Heuristic: a benchmark file whose name matches `<Type>Benchmark.cs` and
-    contains a comment block referencing a hot-path method is treated as
-    covering that method. Inner Claude can refer to the bench filter directly;
-    the orchestrator's benchmark-writer pass adds new entries as needed.
+    For each benchmark file `<Stem>Benchmark.cs`, harvest every
+    `Type.Method(` call that looks like a WPF API (matches a known WPF
+    namespace prefix in surrounding `using` lines, OR ends in a recognized
+    Type-name pattern). The map key is the bare `Type.Method` string;
+    callers use substring containment to match against profile entries
+    that arrive in `Module!FullyQualifiedName(...)` form.
     """
     out: dict[str, str] = {}
     if not MICROBENCH_DIR.exists():
         return out
+    # Common WPF-API class names whose appearance in benchmark code we can
+    # safely treat as covered. Extend this list as new benchmarks land.
+    KNOWN_WPF_TYPES = (
+        "Geometry", "PathGeometry", "StreamGeometry",
+        "Brush", "SolidColorBrush", "LinearGradientBrush",
+        "Transform", "MatrixTransform", "TransformGroup",
+        "FrameworkElement", "UIElement", "Visual",
+        "DependencyObject", "DependencyProperty",
+        "Dispatcher", "DispatcherOperation",
+        "Color", "Matrix", "Rect", "Size", "Point", "Vector",
+        "XamlReader", "XamlWriter",
+        "Border", "Panel", "Grid", "StackPanel",
+    )
     for f in MICROBENCH_DIR.glob("*.cs"):
         text = f.read_text(encoding="utf-8")
-        # Look for "Geometry.Parse" / "LayoutManager.UpdateLayout" comments.
-        for m in re.finditer(r"([A-Z][\w.]+\.[A-Z]\w+)\s*\(", text):
-            method = m.group(1)
-            if is_wpf_method(method) and method not in out:
-                out[method] = f"*{f.stem.replace('Benchmark', '')}*"
+        glob = f"*{f.stem.replace('Benchmark', '')}*"
+        for m in re.finditer(r"\b([A-Z]\w+)\.([A-Z]\w+)\s*\(", text):
+            type_name, method_name = m.group(1), m.group(2)
+            if type_name not in KNOWN_WPF_TYPES:
+                continue
+            key = f"{type_name}.{method_name}"
+            if key not in out:
+                out[key] = glob
     return out
+
+
+def find_bench_filter(method: str, benchmarks: dict[str, str]) -> str | None:
+    """Return the bdn_filter glob if any known `Type.Method` substring
+    appears in the profile method name, else None.
+
+    Profile entries arrive as `Module!FullyQualifiedName(args)`, e.g.
+    `PresentationCore!System.Windows.Media.Geometry.Parse(class System.String)`.
+    A benchmark covers the entry if the entry's name contains the
+    benchmark's `Type.Method` followed by `(` — accept either a leading
+    dot (real profile entries with namespace) or whitespace/start
+    (synthetic always-include entries).
+    """
+    for type_method, glob in benchmarks.items():
+        for prefix in (".", " ", "!"):
+            if f"{prefix}{type_method}(" in method:
+                return glob
+        if method.startswith(f"{type_method}("):
+            return glob
+    return None
 
 
 # ─── Output ───────────────────────────────────────────────────────────────────
@@ -242,10 +316,10 @@ def write_profile_json(ranked: list[tuple[str, int, float]],
         "hot_paths": [
             {
                 "method": method,
-                "samples": int(samples),
+                "samples": round(samples, 2),
                 "cpu_pct_total": round(pct, 2),
-                "bdn_filter": benchmarks.get(method),
-                "needs_benchmark": method not in benchmarks,
+                "bdn_filter": find_bench_filter(method, benchmarks),
+                "needs_benchmark": find_bench_filter(method, benchmarks) is None,
             }
             for method, samples, pct in ranked
         ],
@@ -277,11 +351,11 @@ def main() -> int:
 
     speedscope = convert_to_speedscope(nettrace)
     counts, total = aggregate_speedscope(speedscope)
-    log(f"  total samples: {total}; unique frames: {len(counts)}")
+    log(f"  total time: {total:.1f}ms; unique frames: {len(counts)}")
 
     wpf_counts = Counter({k: v for k, v in counts.items() if is_wpf_method(k)})
     wpf_total = sum(wpf_counts.values())
-    log(f"  WPF samples: {wpf_total} ({100*wpf_total/total:.1f}% of total)")
+    log(f"  WPF time: {wpf_total:.1f}ms ({100*wpf_total/total:.1f}% of total)" if total else "  no time captured")
 
     ranked = []
     for method, samples in wpf_counts.most_common(args.top_k):
@@ -292,6 +366,23 @@ def main() -> int:
     log(f"  existing benchmarks cover {len(benchmarks)} method(s): "
         f"{list(benchmarks.values())[:5]}")
 
+    # Ensure any benchmarked Type.Method appears in the output even if it
+    # wasn't a leaf in this trace — inner Claude needs at least one testable
+    # entry to make progress, and the bench tells us this method matters
+    # somewhere even if not in the play-take scenario.
+    covered_in_ranked = {
+        m for m, _, _ in ranked if find_bench_filter(m, benchmarks) is not None
+    }
+    for type_method in benchmarks:
+        if any(f".{type_method}(" in m for m in covered_in_ranked):
+            continue
+        # Synthesize a method label from the Type.Method key. cpu_pct_total
+        # left as 0.0 — bench is included for testability, not impact.
+        # Append `()` so find_bench_filter's `Type.Method(` substring match
+        # treats the synthetic entry as covered.
+        synthetic = f"(benchmarked) {type_method}()"
+        ranked.append((synthetic, 0.0, 0.0))
+
     write_profile_json(
         ranked, benchmarks,
         source=f"profile.py from {nettrace.name} ({nettrace.stat().st_size//1024}KB)",
@@ -299,10 +390,10 @@ def main() -> int:
 
     # Print summary table
     log("Top hot paths:")
-    log(f"  {'samples':>7s}  {'cpu%':>6s}  {'bench':>5s}  method")
+    log(f"  {'time_ms':>9s}  {'cpu%':>6s}  {'bench':>5s}  method")
     for method, samples, pct in ranked[:15]:
         bench = "✓" if method in benchmarks else "—"
-        log(f"  {samples:>7d}  {pct:>6.2f}  {bench:>5s}  {method}")
+        log(f"  {samples:>9.1f}  {pct:>6.2f}  {bench:>5s}  {method}")
 
     return 0
 

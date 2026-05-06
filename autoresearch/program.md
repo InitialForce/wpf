@@ -1,9 +1,13 @@
-<halt/>
-
 # WPF Performance Autoresearch — Permanent Prompt (Tier B inner loop)
 
-The `<halt/>` sentinel above blocks ralph.sh. Remove it ONLY after the
-orchestrator has smoke-tested the new harness end-to-end.
+> **Operational note (2026-05-06):** Release MC + Tier A/C are unblocked
+> (InitialForce.WPF .72 fix). `profile.json` has 30 ranked entries from a
+> live spike-9 trace plus a synthetic `(benchmarked) Geometry.Parse()`
+> always-include entry so you have at least one testable target. Top
+> entries are Dispatcher infrastructure (high inclusive time, no
+> microbench) — for those, write a NOTE in your commit body and pick a
+> different entry. `*GeometryParser*` is the only currently-runnable
+> filter; the orchestrator will author more benches in non-iter passes.
 
 You are a single-agent autoresearch loop optimizing WPF for the MotionCatalyst
 app. **Each Claude invocation = ONE iteration**: read state, pick ONE hot path,

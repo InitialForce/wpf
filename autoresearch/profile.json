@@ -1,28 +1,238 @@
 {
   "schema_version": 1,
-  "phase": 0,
-  "captured_at": "2026-05-06T10:30:00Z",
-  "source": "manual seed (will be replaced by Tier A profile.py output once authored)",
+  "phase": 1,
+  "captured_at": "2026-05-06T20:17:09Z",
+  "source": "profile.py from profile.nettrace (226154KB)",
   "notes": [
-    "Phase 0: only entries with a matching microbench benchmark are listed.",
-    "Adding new entries requires authoring a corresponding BDN benchmark in",
-    "microbench/Benchmarks/ — orchestrator-only task, not inner-loop work."
+    "Tier A profile: top-K WPF methods by CPU sample-count from a",
+    "single spike-9 run. CPU only \u2014 allocation attribution Phase 2.",
+    "Entries with bdn_filter:null have no covering microbenchmark.",
+    "The orchestrator's benchmark-writer pass scaffolds new ones."
   ],
   "hot_paths": [
     {
-      "id": "geometry-parser",
-      "method": "System.Windows.Media.Geometry.Parse",
-      "files": [
-        "src/Microsoft.DotNet.Wpf/src/PresentationCore/System/Windows/Media/Geometry.cs",
-        "src/Microsoft.DotNet.Wpf/src/PresentationCore/System/Windows/Media/Parsers.cs",
-        "src/Microsoft.DotNet.Wpf/src/PresentationCore/System/Windows/Media/ParsersCommon.cs"
-      ],
+      "method": "WindowsBase!System.Windows.Threading.Dispatcher.Invoke(class System.Action)",
+      "samples": 18018.87,
+      "cpu_pct_total": 1.71,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "WindowsBase!System.Windows.Threading.Dispatcher.Invoke(class System.Action,value class System.Windows.Threading.DispatcherPriority,value class System.Threading.CancellationToken,value class System.TimeSpan)",
+      "samples": 18018.87,
+      "cpu_pct_total": 1.71,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "WindowsBase!System.Windows.Threading.Dispatcher.InvokeImpl(class System.Windows.Threading.DispatcherOperation,value class System.Threading.CancellationToken,value class System.TimeSpan)",
+      "samples": 18018.87,
+      "cpu_pct_total": 1.71,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "WindowsBase!System.Windows.Threading.DispatcherOperation.Wait()",
+      "samples": 18018.87,
+      "cpu_pct_total": 1.71,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "WindowsBase!System.Windows.Threading.DispatcherOperation.Wait(value class System.TimeSpan)",
+      "samples": 18018.87,
+      "cpu_pct_total": 1.71,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "WindowsBase!System.Windows.Threading.DispatcherOperation+DispatcherOperationEvent.WaitOne()",
+      "samples": 18018.87,
+      "cpu_pct_total": 1.71,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "WindowsBase!System.Windows.Threading.ExceptionWrapper.InternalRealCall(class System.Delegate,class System.Object,int32)",
+      "samples": 18001.71,
+      "cpu_pct_total": 1.71,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "WindowsBase!MS.Win32.HwndSubclass.SubclassWndProc(int,int32,int,int)",
+      "samples": 18000.34,
+      "cpu_pct_total": 1.71,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "WindowsBase!System.Windows.Threading.ExceptionWrapper.TryCatchWhen(class System.Object,class System.Delegate,class System.Object,int32,class System.Delegate)",
+      "samples": 18000.34,
+      "cpu_pct_total": 1.71,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "WindowsBase!MS.Win32.HwndWrapper.WndProc(int,int32,int,int,bool&)",
+      "samples": 18000.21,
+      "cpu_pct_total": 1.71,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "WindowsBase!System.Windows.Threading.Dispatcher.ProcessQueue()",
+      "samples": 18000.21,
+      "cpu_pct_total": 1.71,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "WindowsBase!System.Windows.Threading.DispatcherOperation.Invoke()",
+      "samples": 18000.21,
+      "cpu_pct_total": 1.71,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "WindowsBase!MS.Internal.CulturePreservingExecutionContext.CallbackWrapper(class System.Object)",
+      "samples": 18000.21,
+      "cpu_pct_total": 1.71,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "WindowsBase!System.Windows.Threading.DispatcherOperation.InvokeImpl()",
+      "samples": 18000.21,
+      "cpu_pct_total": 1.71,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "WindowsBase!System.Windows.Threading.Dispatcher.PushFrameImpl(class System.Windows.Threading.DispatcherFrame)",
+      "samples": 18000.0,
+      "cpu_pct_total": 1.71,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "PresentationFramework!System.Windows.Window.ShowDialog()",
+      "samples": 18000.0,
+      "cpu_pct_total": 1.71,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "PresentationFramework!System.Windows.Window.Show()",
+      "samples": 18000.0,
+      "cpu_pct_total": 1.71,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "PresentationFramework!System.Windows.Window.ShowHelper(class System.Object)",
+      "samples": 18000.0,
+      "cpu_pct_total": 1.71,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "WindowsBase!System.Windows.Threading.DispatcherOperation.InvokeDelegateCore()",
+      "samples": 17995.49,
+      "cpu_pct_total": 1.7,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "PresentationFramework!System.Windows.Application.RunInternal(class System.Windows.Window)",
+      "samples": 17993.65,
+      "cpu_pct_total": 1.7,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "PresentationFramework!System.Windows.Application.RunDispatcher(class System.Object)",
+      "samples": 17993.65,
+      "cpu_pct_total": 1.7,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "PresentationFramework!System.Windows.Application.Run(class System.Windows.Window)",
+      "samples": 17993.41,
+      "cpu_pct_total": 1.7,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "PresentationFramework!System.Windows.Application.Run()",
+      "samples": 17992.3,
+      "cpu_pct_total": 1.7,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "PresentationCore!System.Windows.Media.MediaContext.RenderMessageHandlerCore(class System.Object)",
+      "samples": 17256.71,
+      "cpu_pct_total": 1.63,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "PresentationCore!System.Windows.Media.MediaContext.RenderMessageHandler(class System.Object)",
+      "samples": 17213.96,
+      "cpu_pct_total": 1.63,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "PresentationCore!System.Windows.Media.MediaContext.FireInvokeOnRenderCallbacks()",
+      "samples": 16910.96,
+      "cpu_pct_total": 1.6,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "PresentationCore!System.Windows.ContextLayoutManager.UpdateLayoutCallback(class System.Object)",
+      "samples": 16910.96,
+      "cpu_pct_total": 1.6,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "PresentationCore!System.Windows.ContextLayoutManager.UpdateLayout()",
+      "samples": 16910.96,
+      "cpu_pct_total": 1.6,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "PresentationCore!System.Windows.ContextLayoutManager.fireLayoutUpdateEvent()",
+      "samples": 15619.52,
+      "cpu_pct_total": 1.48,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "PresentationFramework!System.Windows.Documents.AdornerLayer.UpdateAdorner(class System.Windows.UIElement)",
+      "samples": 11936.6,
+      "cpu_pct_total": 1.13,
+      "bdn_filter": null,
+      "needs_benchmark": true
+    },
+    {
+      "method": "(benchmarked) Geometry.Parse()",
+      "samples": 0.0,
+      "cpu_pct_total": 0.0,
       "bdn_filter": "*GeometryParser*",
-      "alloc_bytes_per_op": 110685,
-      "cpu_ns_per_op": 368100,
-      "alloc_pct_total": null,
-      "cpu_pct_total": null,
-      "notes": "SVG path mini-language parser. Heavy alloc — substring slicing, double parsing intermediates, Figure/Segment/PathFigure construction. Pure compute, no Dispatcher needed. Baseline measured 2026-05-06 on AMD 5950X .NET 10.0.6: 368.1 μs/op, 108 KB/op, 3.4% CV."
+      "needs_benchmark": false
+    },
+    {
+      "method": "(benchmarked) Size.Equals()",
+      "samples": 0.0,
+      "cpu_pct_total": 0.0,
+      "bdn_filter": "*Smoke*",
+      "needs_benchmark": false
     }
   ]
 }
