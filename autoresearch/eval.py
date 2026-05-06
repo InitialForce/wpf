@@ -38,7 +38,7 @@ PC_BUILD_OUT = WPF_REPO / "artifacts" / "bin" / "PresentationCore" / "x64" / "Re
 FORK_STAGE = WPF_REPO / "artifacts" / "fork-swap-out"
 SWAP_TOOL = WPF_REPO / "tools" / "swap-wpf" / "swap-wpf.ps1"
 BUILD_PC_SCRIPT = WPF_REPO / "build-pc-perf.ps1"
-MC_BUILD = Path("/c/work/desktop/wpf-test/src/motioncatalyst/BUILD/x64_Debug")
+MC_BUILD = Path("/c/work/desktop/wpf-test/src/motioncatalyst/BUILD/x64_Release")
 SPIKE = Path("/c/work/wpf-perf/tools/poc/spike-9-play-take.py")
 
 RESULTS_TSV = ROOT / "results.tsv"

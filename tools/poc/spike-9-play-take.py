@@ -41,7 +41,7 @@ UIMCP_BIN = (
     "/c/work/desktop/wpf-test/Tools/ui-mcp-host/bin/Release/"
     "net10.0-windows10.0.19041.0/UiMcpHost.exe"
 )
-MC_BUILD = "/c/work/desktop/wpf-test/src/motioncatalyst/BUILD/x64_Debug"
+MC_BUILD = "/c/work/desktop/wpf-test/src/motioncatalyst/BUILD/x64_Release"
 PERF_HIVE_SRC = Path("/c/work/wpf-perf/scenarios/perf-hive")
 # Real-video takes for playback profiling. The .take fixtures bundled in
 # the test repo (Tests/SwingCatalyst.Test.Integration.Windows/Assets/Takes)

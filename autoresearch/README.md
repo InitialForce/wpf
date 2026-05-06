@@ -23,7 +23,7 @@ strict Pareto gate, and accepts or reverts.
 1. **Verify paths in `eval.py`** match your tree. Especially:
    - `WPF_REPO` (default `/c/work/wpf-perf`)
    - `WPF_BUILD_OUT` (the artifacts/lib/net10.0 path)
-   - `MC_BUILD` (MotionCatalyst BUILD/x64_Debug)
+   - `MC_BUILD` (MotionCatalyst BUILD/x64_Release — production-true config)
    - `SPIKE` (path to spike-9-play-take.py)
 
 2. **Capture baseline** (~10 minutes):
