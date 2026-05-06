@@ -5,7 +5,6 @@
 //
 //            This file contains all the code that is shared between PresentationBuildTasks and PresentationCore
 //            Changes to this file will likely result in a compiler update.
-//  (autoresearch smoke test marker — comment-only edit to validate Tier B A/B harness)
 
 using System;
 using System.IO;
