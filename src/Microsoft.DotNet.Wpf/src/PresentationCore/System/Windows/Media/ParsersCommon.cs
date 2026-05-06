@@ -297,17 +297,31 @@ namespace MS.Internal.Markup
             return false;
         }
 
-        private void SkipDigits(bool signAllowed)
+        private void SkipDigits()
         {
             // Hoist fields to locals so the JIT proves they don't change across
             // the loop and folds away per-iteration field loads + null-checks
-            // on the string indexer. _curIndex is only written back at the end.
+            // on the string indexer. Small body (no sign branch) lets the JIT
+            // inline at the two call sites that don't allow signs.
             string s = _pathString;
             int end = _pathLength;
             int i = _curIndex;
 
-            // Allow for a sign
-            if (signAllowed && i < end && (s[i] == '-' || s[i] == '+'))
+            while (i < end && s[i] >= '0' && s[i] <= '9')
+            {
+                i++;
+            }
+
+            _curIndex = i;
+        }
+
+        private void SkipDigitsAllowSign()
+        {
+            string s = _pathString;
+            int end = _pathLength;
+            int i = _curIndex;
+
+            if (i < end && (s[i] == '-' || s[i] == '+'))
             {
                 i++;
             }
@@ -395,14 +409,14 @@ namespace MS.Internal.Markup
             }
             else
             {
-                SkipDigits(! AllowSign);
+                SkipDigits();
 
                 // Optional period, followed by more digits
                 if (More() && (_pathString[_curIndex] == '.'))
                 {
                     simple = false;
                     _curIndex ++;
-                    SkipDigits(! AllowSign);
+                    SkipDigits();
                 }
 
                 // Exponent
@@ -410,7 +424,7 @@ namespace MS.Internal.Markup
                 {
                     simple = false;
                     _curIndex ++;
-                    SkipDigits(AllowSign);
+                    SkipDigitsAllowSign();
                 }
             }
 
