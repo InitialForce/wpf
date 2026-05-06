@@ -360,9 +360,11 @@ namespace System.Windows.Controls
         /// In addition to the child, Border renders a background + border.  The background is drawn inside the border.
         /// </summary>
         protected override void OnRender(DrawingContext dc)
-        {           
+        {
             bool useLayoutRounding = this.UseLayoutRounding;
-            DpiScale dpi = GetDpi();
+            // dpi is only consumed inside `if (useLayoutRounding)` branches below;
+            // GetDpi() takes UIElement.DpiLock so skip it when rounding is off.
+            DpiScale dpi = useLayoutRounding ? GetDpi() : default;
 
             if (_useComplexRenderCodePath)
             {
