@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "phase": 0,
+  "captured_at": "2026-05-06T10:30:00Z",
+  "source": "manual seed (will be replaced by Tier A profile.py output once authored)",
+  "notes": [
+    "Phase 0: only entries with a matching microbench benchmark are listed.",
+    "Adding new entries requires authoring a corresponding BDN benchmark in",
+    "microbench/Benchmarks/ — orchestrator-only task, not inner-loop work."
+  ],
+  "hot_paths": [
+    {
+      "id": "geometry-parser",
+      "method": "System.Windows.Media.Geometry.Parse",
+      "files": [
+        "src/Microsoft.DotNet.Wpf/src/PresentationCore/System/Windows/Media/Geometry.cs",
+        "src/Microsoft.DotNet.Wpf/src/PresentationCore/System/Windows/Media/Parsers.cs",
+        "src/Microsoft.DotNet.Wpf/src/PresentationCore/System/Windows/Media/ParsersCommon.cs"
+      ],
+      "bdn_filter": "*GeometryParser*",
+      "alloc_bytes_per_op": 110685,
+      "cpu_ns_per_op": 368100,
+      "alloc_pct_total": null,
+      "cpu_pct_total": null,
+      "notes": "SVG path mini-language parser. Heavy alloc — substring slicing, double parsing intermediates, Figure/Segment/PathFigure construction. Pure compute, no Dispatcher needed. Baseline measured 2026-05-06 on AMD 5950X .NET 10.0.6: 368.1 μs/op, 108 KB/op, 3.4% CV."
+    }
+  ]
+}
