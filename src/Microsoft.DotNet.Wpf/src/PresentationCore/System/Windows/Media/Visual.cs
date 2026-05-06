@@ -4386,6 +4386,10 @@ namespace System.Windows.Media
             if (isSimple0 && isSimple1)
             {
                 MatrixUtil.MultiplyMatrix(ref m0, ref m1);
+                if (m0.IsIdentity)
+                {
+                    return Transform.Identity;
+                }
                 MatrixTransform m = new MatrixTransform(m0);
                 m.Freeze();
                 return m;
@@ -4435,6 +4439,10 @@ namespace System.Windows.Media
 
             if (isSimple)
             {
+                if (simpleTransform.IsIdentity)
+                {
+                    return Transform.Identity;
+                }
                 MatrixTransform matrixTransform = new MatrixTransform(simpleTransform);
                 matrixTransform.Freeze();
                 return matrixTransform;
