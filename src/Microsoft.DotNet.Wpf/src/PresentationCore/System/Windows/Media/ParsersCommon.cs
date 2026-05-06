@@ -163,7 +163,7 @@ namespace MS.Internal.Markup
     /// SVG path spec is closely followed http://www.w3.org/TR/SVG11/paths.html
     /// 3/23/2006, new parser for performance (fyuan)
     /// </summary>
-    internal struct AbbreviatedGeometryParser
+    internal sealed class AbbreviatedGeometryParser
     {
         private const bool      AllowSign    = true;
         private const bool      AllowComma   = true;
