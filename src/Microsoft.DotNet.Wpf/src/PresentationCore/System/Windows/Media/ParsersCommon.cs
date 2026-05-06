@@ -349,14 +349,17 @@ namespace MS.Internal.Markup
             
             bool simple = true;
             int start = _curIndex;
-            
+
             //
             // Allow for a sign
-            // 
+            //
             // There are numbers that cannot be preceded with a sign, for instance, -NaN, but it's
             // fine to ignore that at this point, since the CLR parser will catch this later.
             //
-            if (More() && ((_pathString[_curIndex] == '-') || _pathString[_curIndex] == '+'))
+            // IsNumber already loaded _pathString[_curIndex] into _token and proved we're in
+            // bounds, so reuse it instead of re-doing More() + two string indexer fetches.
+            char first = _token;
+            if (first == '-' || first == '+')
             {
                 _curIndex ++;
             }
