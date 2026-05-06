@@ -969,7 +969,7 @@ namespace System.Windows
                     if(l < treeLevel)
                     {
                         treeLevel = l;
-                        found = r.Target;
+                        found = t;
                     }
                 }
 
