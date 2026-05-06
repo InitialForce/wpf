@@ -397,20 +397,35 @@ namespace MS.Internal.Markup
             {
                 SkipDigits(! AllowSign);
 
-                // Optional period, followed by more digits
-                if (More() && (_pathString[_curIndex] == '.'))
+                // Fold the post-integer "optional period" and "optional exponent"
+                // peeks into one More()+indexer load. Pure-integer paths (the
+                // dominant corpus shape) take neither branch, so the original
+                // code paid 2 More() checks + up to 3 string indexer reads to
+                // discover that. One peek + cascade of compares does the same
+                // work with half the field reads on the not-taken path.
+                if (More())
                 {
-                    simple = false;
-                    _curIndex ++;
-                    SkipDigits(! AllowSign);
-                }
+                    char ch = _pathString[_curIndex];
 
-                // Exponent
-                if (More() && ((_pathString[_curIndex] == 'E') || (_pathString[_curIndex] == 'e')))
-                {
-                    simple = false;
-                    _curIndex ++;
-                    SkipDigits(AllowSign);
+                    if (ch == '.')
+                    {
+                        simple = false;
+                        _curIndex ++;
+                        SkipDigits(! AllowSign);
+
+                        // Period was followed by digits; re-peek for exponent.
+                        if (More() && ((ch = _pathString[_curIndex]) == 'E' || ch == 'e'))
+                        {
+                            _curIndex ++;
+                            SkipDigits(AllowSign);
+                        }
+                    }
+                    else if (ch == 'E' || ch == 'e')
+                    {
+                        simple = false;
+                        _curIndex ++;
+                        SkipDigits(AllowSign);
+                    }
                 }
             }
 
