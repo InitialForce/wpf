@@ -493,6 +493,41 @@ def decide_and_revert(decision: str, payload: dict) -> int:
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 
+def start_display_keepalive() -> subprocess.Popen | None:
+    """Spawn the keep-display-awake.ps1 helper. WPF's D3D9 video preview path
+    fails with D3DERR_INVALIDCALL when monitors are asleep, sending MC into
+    InteropBitmap (CPU) fallback — the spike then captures <1000 frames per
+    rep instead of >10000 and SPIKE-FAILs on the 8000 floor. Holding
+    ES_DISPLAY_REQUIRED for the duration of eval keeps D3D9 working overnight.
+    """
+    helper = ROOT / "keep-display-awake.ps1"
+    if not helper.is_file():
+        log("WARN: keep-display-awake.ps1 not found; D3D9 may fail if display sleeps")
+        return None
+    try:
+        p = subprocess.Popen(
+            ["cmd.exe", "/c", "powershell", "-ExecutionPolicy", "Bypass",
+             "-NoProfile", "-File", to_winpath(helper)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        log(f"display keepalive started (PID {p.pid})")
+        return p
+    except Exception as e:
+        log(f"WARN: failed to start display keepalive: {e}")
+        return None
+
+
+def stop_display_keepalive(p: subprocess.Popen | None) -> None:
+    if p is None:
+        return
+    try:
+        p.kill()
+        p.wait(timeout=5)
+        log("display keepalive stopped")
+    except Exception as e:
+        log(f"WARN: failed to stop display keepalive: {e}")
+
+
 def main() -> int:
     if not BASELINE_PATH.is_file():
         log(f"FATAL: baseline missing at {BASELINE_PATH}. Run bootstrap.py first.")
@@ -506,25 +541,30 @@ def main() -> int:
 
     log(f"=== iter {iter_num} sha={sha[:8]} ===")
 
-    if not build_presentation_core():
-        return decide_and_revert("BUILD-FAIL", {**base_payload, "reason": "wpf build failed"})
+    keepalive = start_display_keepalive()
 
-    if not do_swap():
-        return decide_and_revert("BUILD-FAIL", {**base_payload, "reason": "swap-wpf failed"})
-
-    per_rep: list[dict] = []
     try:
-        for i in range(REPS):
-            m = run_spike(rep=i, iter_num=iter_num)
-            if m is None:
-                return decide_and_revert(
-                    "SPIKE-FAIL",
-                    {**base_payload, "reason": f"rep {i} failed",
-                     "per_rep": per_rep},
-                )
-            per_rep.append(m)
+        if not build_presentation_core():
+            return decide_and_revert("BUILD-FAIL", {**base_payload, "reason": "wpf build failed"})
+
+        if not do_swap():
+            return decide_and_revert("BUILD-FAIL", {**base_payload, "reason": "swap-wpf failed"})
+
+        per_rep: list[dict] = []
+        try:
+            for i in range(REPS):
+                m = run_spike(rep=i, iter_num=iter_num)
+                if m is None:
+                    return decide_and_revert(
+                        "SPIKE-FAIL",
+                        {**base_payload, "reason": f"rep {i} failed",
+                         "per_rep": per_rep},
+                    )
+                per_rep.append(m)
+        finally:
+            do_restore()
     finally:
-        do_restore()
+        stop_display_keepalive(keepalive)
 
     medians, stds = aggregate(per_rep)
     z, components = composite_z(medians, baseline)
