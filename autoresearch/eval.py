@@ -55,6 +55,17 @@ BUILD_TIMEOUT_S = int(os.environ.get("WPF_AR_BUILD_TIMEOUT", "600"))
 MIN_RENDER_PASSES = int(os.environ.get("WPF_AR_MIN_PASSES", "8000"))
 MAX_REP_ATTEMPTS = int(os.environ.get("WPF_AR_MAX_REP_ATTEMPTS", "3"))
 
+# Inner-loop commits may ONLY touch product source under these prefixes.
+# Mirrored in microbench.py — keep in sync. Both consensus models flagged the
+# benchmark/baseline mutability risk as the single biggest stop-the-line.
+ALLOWED_PATH_PREFIXES = (
+    "src/Microsoft.DotNet.Wpf/src/PresentationCore/",
+    "src/Microsoft.DotNet.Wpf/src/PresentationFramework/",
+    "src/Microsoft.DotNet.Wpf/src/WindowsBase/",
+    "src/Microsoft.DotNet.Wpf/src/System.Xaml/",
+    "src/Microsoft.DotNet.Wpf/src/Shared/",
+)
+
 # Metric extraction: each entry is (key) → (dotted path into analysis.json).
 # Steady-state metrics drop the first 30 frames (warmup, JIT, layout cascade,
 # VBlank channel registration race) and reflect user-perceived smoothness in
@@ -105,6 +116,21 @@ def iter_count() -> int:
     if not RESULTS_TSV.exists():
         return 0
     return max(0, sum(1 for _ in RESULTS_TSV.open()) - 1)  # minus header
+
+
+def files_touched_by(sha: str) -> list[str]:
+    rc, out = cmd(["git", "diff-tree", "--no-commit-id", "--name-only", "-r", sha],
+                  cwd=WPF_REPO)
+    if rc != 0:
+        return []
+    return [line for line in out.splitlines() if line.strip()]
+
+
+def check_path_allowlist(sha: str) -> tuple[bool, list[str]]:
+    """Inner-loop commits may only touch product source. Returns (ok, violations)."""
+    files = files_touched_by(sha)
+    violations = [f for f in files if not any(f.startswith(p) for p in ALLOWED_PATH_PREFIXES)]
+    return len(violations) == 0, violations
 
 
 def last_kept_z() -> float:
@@ -451,8 +477,9 @@ def decide_and_revert(decision: str, payload: dict) -> int:
     log(f"DECISION: {decision} — {payload.get('reason', '')}")
 
     exit_codes = {"KEEP": 0, "REVERT": 1, "REJECT-PARETO": 2,
-                  "BUILD-FAIL": 3, "SPIKE-FAIL": 4}
-    rc = exit_codes[decision]
+                  "BUILD-FAIL": 3, "SPIKE-FAIL": 4,
+                  "REJECT-ALLOWLIST": 6}
+    rc = exit_codes.get(decision, 1)  # unknown decision → REVERT semantics
 
     if rc != 0:
         iter_sha = payload.get("git_sha")
@@ -616,6 +643,22 @@ def main() -> int:
     base_payload = {"iter": iter_num, "ts": ts, "git_sha": sha}
 
     log(f"=== iter {iter_num} sha={sha[:8]} ===")
+
+    # Path allowlist: inner-loop commits may only touch product source.
+    # Reject before spending build/spike time.
+    ok, violations = check_path_allowlist(sha)
+    if not ok:
+        log("FATAL: HEAD commit touches forbidden paths. Allowed prefixes:")
+        for p in ALLOWED_PATH_PREFIXES:
+            log(f"  {p}")
+        log("Violating files:")
+        for v in violations:
+            log(f"  {v}")
+        return decide_and_revert(
+            "REJECT-ALLOWLIST",
+            {**base_payload, "reason": "commit touches non-product paths",
+             "violations": violations},
+        )
 
     keepalive = start_display_keepalive()
 
