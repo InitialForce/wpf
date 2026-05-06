@@ -299,16 +299,25 @@ namespace MS.Internal.Markup
 
         private void SkipDigits(bool signAllowed)
         {
+            // Hoist fields to locals so the JIT proves they don't change across
+            // the loop and folds away per-iteration field loads + null-checks
+            // on the string indexer. _curIndex is only written back at the end.
+            string s = _pathString;
+            int end = _pathLength;
+            int i = _curIndex;
+
             // Allow for a sign
-            if (signAllowed && More() && ((_pathString[_curIndex] == '-') || _pathString[_curIndex] == '+'))
+            if (signAllowed && i < end && (s[i] == '-' || s[i] == '+'))
             {
-                _curIndex++;
+                i++;
             }
-        
-            while (More() && (_pathString[_curIndex] >= '0') && (_pathString[_curIndex] <= '9'))
+
+            while (i < end && s[i] >= '0' && s[i] <= '9')
             {
-                _curIndex ++;
+                i++;
             }
+
+            _curIndex = i;
         }
         
 //       
