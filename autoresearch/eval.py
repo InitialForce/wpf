@@ -513,7 +513,9 @@ def is_session_connected() -> bool:
         )
     except Exception:
         return False
-    if rc != 0:
+    # Note: `query session` often returns rc=1 in WSL cmd.exe interop even on
+    # success; trust the output rather than rc.
+    if not out.strip():
         return False
     user = os.environ.get("USER", os.environ.get("USERNAME", "")).lower()
     for line in out.splitlines():
