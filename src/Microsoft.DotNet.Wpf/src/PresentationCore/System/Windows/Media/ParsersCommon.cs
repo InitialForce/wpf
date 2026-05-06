@@ -408,17 +408,19 @@ namespace MS.Internal.Markup
             if (simple && (_curIndex <= (start + 8))) // 32-bit integer
             {
                 int sign = 1;
-                
-                if (_pathString[start] == '+')
+
+                // Reuse the sign char already cached by IsNumber/ReadNumber's
+                // sign block instead of re-reading _pathString[start] twice.
+                if (first == '+')
                 {
                     start ++;
                 }
-                else if (_pathString[start] == '-')
+                else if (first == '-')
                 {
                     start ++;
                     sign = -1;
-                }                                        
-                
+                }
+
                 int value = 0;
                 
                 while (start < _curIndex)
