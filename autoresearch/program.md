@@ -115,7 +115,11 @@ DO NOT edit (eval.py reverts automatically if these change):
 ## Hard rules
 
 - **ONE iteration per Claude invocation.** Read state → form hypothesis →
-  edit → commit → run `eval.py` → read verdict → summarize → **EXIT**.
+  edit → commit → run `eval.py` ONCE → read verdict → summarize → **EXIT**.
+  Do NOT call `eval.py` more than once per session — it builds, swaps DLLs,
+  and runs 5 reps; a second concurrent call corrupts the swap state and
+  produces meaningless data. If the first call appears slow (10+ min is
+  normal: build + 5 spike reps + restore), WAIT. Do not retry.
   ralph.sh will spawn the next Claude with a fresh context window. "NEVER
   STOP" applies to the *loop* (ralph.sh keeps invoking you), not to a
   single Claude session — staying in one session past one iteration
