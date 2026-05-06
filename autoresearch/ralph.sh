@@ -41,12 +41,36 @@ echo "[ralph] starting loop, max_iters=${MAX_ITERS}"
 echo "[ralph] claude bin: $CLAUDE_BIN"
 echo "[ralph] press Ctrl-C to stop"
 
+# Check user session has an attached display. WPF's D3D9 video preview path
+# returns NOTAVAILABLE in disconnected RDP sessions and the spike scenario
+# truncates to <1000 frames vs the 8000 floor — every iter SPIKE-FAILs and
+# burns API quota for nothing. Block until display returns.
+session_connected() {
+    cmd.exe /c "query session" 2>/dev/null \
+        | grep -E "^>" \
+        | grep -qE " (Active|Conn) "
+}
+
 fast_fail_count=0
+disc_wait_count=0
 
 for ((i = 1; i <= MAX_ITERS; i++)); do
     if grep -q "<halt/>" program.md; then
         echo "[ralph] <halt/> sentinel detected in program.md — stopping"
         break
+    fi
+    if ! session_connected; then
+        # 5/10/15/20/30 min escalation, capped at 30 min
+        wait_s=$(( disc_wait_count < 4 ? 300 * (disc_wait_count + 1) : 1800 ))
+        disc_wait_count=$(( disc_wait_count + 1 ))
+        echo
+        echo "[ralph] user session disconnected (D3D9 unavailable) — sleeping ${wait_s}s. Reconnect to resume; check #${disc_wait_count}."
+        sleep "$wait_s"
+        continue
+    fi
+    if (( disc_wait_count > 0 )); then
+        echo "[ralph] session reconnected — resuming iters"
+        disc_wait_count=0
     fi
     echo
     echo "─── ralph iter $i / $MAX_ITERS ───"

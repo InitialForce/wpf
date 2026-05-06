@@ -493,6 +493,47 @@ def decide_and_revert(decision: str, payload: dict) -> int:
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 
+def is_session_connected() -> bool:
+    """Return True iff the user's interactive session is connected (has a
+    physical or RDP display attached). WPF's D3D9 video preview fails with
+    D3DERR_NOTAVAILABLE in disconnected sessions, sending MC into the
+    CPU-rendered InteropBitmap fallback — every spike then truncates to
+    <1000 frames and SPIKE-FAILs the 8000 floor. Without this guard ralph
+    burns API quota on guaranteed-fail iters until the user reconnects.
+
+    `query session` output: STATE column reads 'Active' / 'Conn' / 'Disc'.
+    We require Active or Conn for the user-named session that owns this
+    process tree. Anything else (no session, query failure) → assume bad
+    and let ralph back off.
+    """
+    try:
+        rc, out = cmd(
+            ["cmd.exe", "/c", "query", "session"],
+            timeout=15,
+        )
+    except Exception:
+        return False
+    if rc != 0:
+        return False
+    user = os.environ.get("USER", os.environ.get("USERNAME", "")).lower()
+    for line in out.splitlines():
+        cols = line.split()
+        if len(cols) < 4:
+            continue
+        # query session output is positional; USERNAME may be missing on disc
+        # rows, so search for the user token if present, otherwise rely on
+        # state token.
+        joined = line.lower()
+        if user and user in joined:
+            if " active " in f" {joined} " or "active" in cols:
+                return True
+            if " conn " in f" {joined} " or "conn" in cols:
+                return True
+            return False
+    # Fallback: if we see any 'Active' / 'Conn' state at all, assume good.
+    return any(s in out for s in (" Active ", " Conn "))
+
+
 def start_display_keepalive() -> subprocess.Popen | None:
     """Spawn the keep-display-awake.ps1 helper. WPF's D3D9 video preview path
     fails with D3DERR_INVALIDCALL when monitors are asleep, sending MC into
@@ -533,6 +574,16 @@ def main() -> int:
         log(f"FATAL: baseline missing at {BASELINE_PATH}. Run bootstrap.py first.")
         return 5
     baseline = json.loads(BASELINE_PATH.read_text())
+
+    # Bail out early if the user's session is disconnected — D3D9 is broken
+    # in that state and any iter would SPIKE-FAIL on scenario truncation.
+    # Returning fast lets ralph.sh's backoff put the loop to sleep until the
+    # user reconnects (or the system comes back). NEVER spends quota on a
+    # guaranteed-fail iter.
+    if not is_session_connected():
+        log("FATAL: user session disconnected — D3D9 unavailable. "
+            "Skipping iter; ralph.sh will back off.")
+        return 6
 
     iter_num = iter_count() + 1
     ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
