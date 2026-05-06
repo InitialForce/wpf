@@ -46,9 +46,18 @@ echo "[ralph] press Ctrl-C to stop"
 # truncates to <1000 frames vs the 8000 floor — every iter SPIKE-FAILs and
 # burns API quota for nothing. Block until display returns.
 session_connected() {
-    cmd.exe /c "query session" 2>/dev/null \
-        | grep -E "^>" \
-        | grep -qE " (Active|Conn) "
+    local out
+    out="$(cmd.exe /c "query session" 2>/dev/null)"
+    if [[ -z "$out" ]]; then
+        echo "[ralph][debug] session_connected: query session produced empty output (cmd.exe interop?)" >&2
+        return 1
+    fi
+    if echo "$out" | grep -E "^>" | grep -qE " (Active|Conn) "; then
+        return 0
+    fi
+    # Debug aid: print the > line and exit code on a Disc result
+    echo "[ralph][debug] session line: $(echo "$out" | grep -E '^>' | head -1)" >&2
+    return 1
 }
 
 fast_fail_count=0
