@@ -271,8 +271,11 @@ namespace MS.Internal.Markup
 
             if (More())
             {
+                // _token is intentionally NOT updated here: IsNumber's callers
+                // (the per-command "while (IsNumber(...))" loops and ReadNumber)
+                // never read _token before the next ReadToken/ReadBool overwrites
+                // it, so the field write is dead in the hot path.
                 char t = _pathString[_curIndex];
-                _token = t;
 
                 // Path data is digit-dominated; check the digit range first
                 // via single subtract+unsigned-compare so the hot path takes
