@@ -433,12 +433,14 @@ namespace MS.Internal.Markup
                     sign = -1;
                 }
 
+                // Walk the digits via a Span. AsSpan does one bounds check;
+                // the indexed for-loop pattern lets the JIT prove k < Length
+                // and elide the per-element bound check on every digit.
+                ReadOnlySpan<char> digits = s.AsSpan(start, end - start);
                 int value = 0;
-
-                while (start < end)
+                for (int k = 0; k < digits.Length; k++)
                 {
-                    value = value * 10 + (s[start] - '0');
-                    start ++;
+                    value = value * 10 + (digits[k] - '0');
                 }
 
                 return value * sign;
