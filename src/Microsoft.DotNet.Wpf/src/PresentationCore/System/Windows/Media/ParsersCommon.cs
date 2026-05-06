@@ -299,28 +299,16 @@ namespace MS.Internal.Markup
 
         private void SkipDigits(bool signAllowed)
         {
-            // Hoist field reads to locals so the JIT can elide bounds checks
-            // against s.Length and keep the loop body in registers.
-            string s = _pathString;
-            int idx = _curIndex;
-
             // Allow for a sign
-            if (signAllowed && idx < s.Length)
+            if (signAllowed && More() && ((_pathString[_curIndex] == '-') || _pathString[_curIndex] == '+'))
             {
-                char c = s[idx];
-                if (c == '-' || c == '+')
-                {
-                    idx++;
-                }
+                _curIndex++;
             }
-
-            // Single sub+ucmp per char beats two range compares.
-            while (idx < s.Length && (uint)(s[idx] - '0') <= 9u)
+        
+            while (More() && (_pathString[_curIndex] >= '0') && (_pathString[_curIndex] <= '9'))
             {
-                idx++;
+                _curIndex ++;
             }
-
-            _curIndex = idx;
         }
         
 //       
