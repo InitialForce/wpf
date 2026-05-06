@@ -563,8 +563,8 @@ namespace System.Windows
         {
             bool etwTracingEnabled = false;
             long perfElementID = 0;
-            ContextLayoutManager layoutManager = ContextLayoutManager.From(Dispatcher);
-            if (layoutManager.AutomationEvents.Count != 0)
+            ContextLayoutManager ContextLayoutManager = ContextLayoutManager.From(Dispatcher);
+            if (ContextLayoutManager.AutomationEvents.Count != 0)
                 UIElementHelper.InvalidateAutomationAncestors(this);
 
             if (EventTrace.IsEnabled(EventTrace.Keyword.KeywordLayout, EventTrace.Level.Verbose))
@@ -607,7 +607,7 @@ namespace System.Windows
                     {
                         //reset measure request.
                         if (MeasureRequest != null)
-                            layoutManager.MeasureQueue.Remove(this);
+                            ContextLayoutManager.From(Dispatcher).MeasureQueue.Remove(this);
 
                         //  remember though that parent tried to measure at this size
                         //  in case when later this element is called to measure incrementally
@@ -645,6 +645,8 @@ namespace System.Windows
                     MeasureInProgress = true;
 
                     Size desiredSize = new Size(0, 0);
+
+                    ContextLayoutManager layoutManager = ContextLayoutManager.From(Dispatcher);
 
                     bool gotException = true;
 
@@ -710,7 +712,7 @@ namespace System.Windows
                     MeasureDirty = false;
                     //reset measure request.
                     if (MeasureRequest != null)
-                        layoutManager.MeasureQueue.Remove(this);
+                        ContextLayoutManager.From(Dispatcher).MeasureQueue.Remove(this);
 
                     //cache desired size
                     _desiredSize = desiredSize;
@@ -796,8 +798,8 @@ namespace System.Windows
             bool etwTracingEnabled = false;
             long perfElementID = 0;
 
-            ContextLayoutManager layoutManager = ContextLayoutManager.From(Dispatcher);
-            if (layoutManager.AutomationEvents.Count != 0)
+            ContextLayoutManager ContextLayoutManager = ContextLayoutManager.From(Dispatcher);
+            if (ContextLayoutManager.AutomationEvents.Count != 0)
                 UIElementHelper.InvalidateAutomationAncestors(this);
 
             if (EventTrace.IsEnabled(EventTrace.Keyword.KeywordLayout, EventTrace.Level.Verbose))
@@ -840,7 +842,7 @@ namespace System.Windows
                     {
                         //reset arrange request.
                         if (ArrangeRequest != null)
-                            layoutManager.ArrangeQueue.Remove(this);
+                            ContextLayoutManager.From(Dispatcher).ArrangeQueue.Remove(this);
 
                         //  remember though that parent tried to arrange at this rect
                         //  in case when later this element is called to arrange incrementally
@@ -889,6 +891,8 @@ namespace System.Windows
                         bool firstArrange = NeverArranged;
                         NeverArranged = false;
                         ArrangeInProgress = true;
+
+                        ContextLayoutManager layoutManager = ContextLayoutManager.From(Dispatcher);
 
                         Size oldSize = RenderSize;
                         bool sizeChanged = false;
@@ -959,7 +963,7 @@ namespace System.Windows
 
                         //reset request.
                         if (ArrangeRequest != null)
-                            layoutManager.ArrangeQueue.Remove(this);
+                            ContextLayoutManager.From(Dispatcher).ArrangeQueue.Remove(this);
 
                         if ((sizeChanged || RenderingInvalidated || firstArrange) && IsRenderable())
                         {
