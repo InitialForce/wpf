@@ -109,8 +109,11 @@ def git_sha(ref: str = "HEAD", cwd: Path = WPF_REPO) -> str:
 
 
 def working_tree_clean() -> bool:
-    rc, out = git("status", "--porcelain")
-    return rc == 0 and out.strip() == ""
+    """True iff no TRACKED file differs from HEAD. Untracked files are ignored
+    (the wpf-perf repo has many pre-existing untracked POC scripts that are
+    irrelevant to autoresearch state)."""
+    rc, _ = git("diff-index", "--quiet", "HEAD", "--")
+    return rc == 0
 
 
 def files_touched_by(sha: str) -> list[str]:
