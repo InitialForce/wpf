@@ -4272,7 +4272,7 @@ namespace System.Windows
 
             // If using layout rounding, check whether rounding needs to compensate for high DPI
             bool useLayoutRounding = this.UseLayoutRounding;
-            DpiScale dpi = GetDpi();
+            DpiScale dpi = useLayoutRounding ? GetDpi() : default;
             if (useLayoutRounding)
             {
                 if (!CheckFlagsAnd(VisualFlags.UseLayoutRounding))
@@ -4494,7 +4494,7 @@ namespace System.Windows
         {
             // If using layout rounding, check whether rounding needs to compensate for high DPI
             bool useLayoutRounding = this.UseLayoutRounding;
-            DpiScale dpi = GetDpi();
+            DpiScale dpi = useLayoutRounding ? GetDpi() : default;
             LayoutTransformData ltd = LayoutTransformDataField.GetValue(this);
             Size transformedUnroundedDS = Size.Empty;
 
@@ -4848,7 +4848,7 @@ namespace System.Windows
         protected override Geometry GetLayoutClip(Size layoutSlotSize)
         {
             bool useLayoutRounding = this.UseLayoutRounding;
-            DpiScale dpi = GetDpi();
+            DpiScale dpi = useLayoutRounding ? GetDpi() : default;
             if (useLayoutRounding)
             {
                 if (!CheckFlagsAnd(VisualFlags.UseLayoutRounding))
