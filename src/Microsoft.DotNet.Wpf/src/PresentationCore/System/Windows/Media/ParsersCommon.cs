@@ -358,6 +358,7 @@ namespace MS.Internal.Markup
             
             bool simple = true;
             int start = _curIndex;
+            int sign = 1;
 
             //
             // Allow for a sign
@@ -367,11 +368,19 @@ namespace MS.Internal.Markup
             //
             // IsNumber already loaded _pathString[_curIndex] into _token and proved we're in
             // bounds, so reuse it instead of re-doing More() + two string indexer fetches.
+            // Track sign + digitStart here so the simple-int fast path below doesn't redo a
+            // sign branch + s[start] re-read inside its accumulator loop.
             char first = _token;
-            if (first == '-' || first == '+')
+            if (first == '-')
+            {
+                sign = -1;
+                _curIndex ++;
+            }
+            else if (first == '+')
             {
                 _curIndex ++;
             }
+            int digitStart = _curIndex;
 
             // Check for Infinity (or -Infinity).
             if (More() && (_pathString[_curIndex] == 'I'))
@@ -414,31 +423,22 @@ namespace MS.Internal.Markup
                 }
             }
 
-            if (simple && (_curIndex <= (start + 8))) // 32-bit integer
+            if (simple && (_curIndex <= (digitStart + 8))) // 32-bit integer (8 digit chars max → ≤ 99999999)
             {
                 // Hoist _pathString to a local so the JIT proves the ref is
                 // stable across the loop and folds away per-iteration field
-                // loads + null-checks on the string indexer.
+                // loads + null-checks on the string indexer. Sign was already
+                // resolved above into 'sign' + 'digitStart', so the loop is
+                // pure digit accumulation with no per-iter sign branch.
                 string s = _pathString;
                 int end = _curIndex;
-                int sign = 1;
-
-                if (s[start] == '+')
-                {
-                    start ++;
-                }
-                else if (s[start] == '-')
-                {
-                    start ++;
-                    sign = -1;
-                }
-
+                int i = digitStart;
                 int value = 0;
 
-                while (start < end)
+                while (i < end)
                 {
-                    value = value * 10 + (s[start] - '0');
-                    start ++;
+                    value = value * 10 + (s[i] - '0');
+                    i ++;
                 }
 
                 return value * sign;
