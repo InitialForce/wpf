@@ -20,17 +20,15 @@ namespace WpfMicrobenchmarks.Benchmarks;
 ///
 /// Threading: a dedicated STA thread is created in GlobalSetup. That thread calls
 /// Dispatcher.CurrentDispatcher to auto-create a Dispatcher bound to itself. Each [Benchmark]
-/// method posts a batch of StaBatch invocations to the STA thread and waits for completion.
-/// BDN measures the full round-trip per batch call; per-invoke cost = measured_ns / StaBatch.
-/// Cross-thread signaling (~200-500 ns) is amortized to &lt;1 ns/op at StaBatch=1024.
-/// Note: BDN 0.14.* does not have [OperationsPerInvoke]; per-invoke cost is computed post-hoc.
+/// method posts a single op to the STA thread; BDN calls the method OperationsPerInvoke=1024
+/// times and divides the total time by 1024. Cross-thread signaling (~200-500 ns) is amortized
+/// across BDN's iteration window; the per-op CV drops ~10× vs the prior manual StaBatch pattern.
 ///
 /// Corpus: 64 distinct Action delegates (seeded RNG, each with a unique XOR capture).
 /// </summary>
 [Config(typeof(AutoresearchConfig))]
 public class DispatcherInvokeActionBenchmark : IDisposable
 {
-    internal const int StaBatch = 1024;
     private const int CorpusSize = 64;
     private const int CorpusMask = CorpusSize - 1;
 
@@ -79,9 +77,9 @@ public class DispatcherInvokeActionBenchmark : IDisposable
         if (_dispatcher == null)
             throw new InvalidOperationException("STA thread did not create a Dispatcher");
 
-        // Pre-warm: run a few batches before BDN starts measuring to stabilize JIT and STA thread state
-        for (int w = 0; w < 3; w++)
-            DispatchBatch(StaBatch, invokeMode: 0);
+        // Pre-warm: run a few single ops before BDN starts measuring to stabilize JIT and STA thread state
+        for (int w = 0; w < 64; w++)
+            DispatchSingle(invokeMode: 0);
     }
 
     [GlobalCleanup]
@@ -105,87 +103,60 @@ public class DispatcherInvokeActionBenchmark : IDisposable
     }
 
     // ── Benchmark methods ──────────────────────────────────────────────────────
-    // Each method posts StaBatch dispatcher operations to the STA thread.
-    // BDN measures total batch time; per-invoke cost = reported_ns / StaBatch.
+    // Each method posts a single dispatcher operation to the STA thread.
+    // BDN calls the method OperationsPerInvoke=1024 times and divides total time by 1024,
+    // amortizing cross-thread signaling variance across the timing window.
 
     /// <summary>
     /// Entry 2.1: Dispatcher.Invoke(Action) — 1-arg overload.
     /// Delegates to 4-arg overload at Send priority + same thread = fast path.
-    /// Batch size: StaBatch=1024. Per-invoke cost = batch_ns / 1024.
+    /// OperationsPerInvoke=1024: BDN calls this 1024× per measurement, reports per-op cost.
     /// </summary>
-    [Benchmark(Description = "Dispatcher.Invoke(Action) — Send priority fast path (batch/1024)")]
+    [Benchmark(Description = "Dispatcher.Invoke(Action) — Send priority fast path", OperationsPerInvoke = 1024)]
     public void InvokeAction()
     {
-        DispatchBatch(StaBatch, invokeMode: 0);
+        DispatchSingle(invokeMode: 0);
     }
 
     /// <summary>
     /// Entry 2.2: Dispatcher.Invoke(Action, DispatcherPriority, CancellationToken, TimeSpan) — 4-arg.
     /// Canonical fast-path entry; all simpler overloads delegate to it.
-    /// Batch size: StaBatch=1024. Per-invoke cost = batch_ns / 1024.
+    /// OperationsPerInvoke=1024: BDN calls this 1024× per measurement, reports per-op cost.
     /// </summary>
-    [Benchmark(Description = "Dispatcher.Invoke(Action,Priority,CT,Timeout) — 4-arg Send fast path (batch/1024)")]
+    [Benchmark(Description = "Dispatcher.Invoke(Action,Priority,CT,Timeout) — 4-arg Send fast path", OperationsPerInvoke = 1024)]
     public void InvokeAction4Arg()
     {
-        DispatchBatch(StaBatch, invokeMode: 1);
+        DispatchSingle(invokeMode: 1);
     }
 
     /// <summary>
     /// Negative control: direct Action() call on the STA thread (no Dispatcher overhead).
     /// Delta vs InvokeAction reveals the SynchronizationContext swap cost.
-    /// Batch size: StaBatch=1024. Per-call cost = batch_ns / 1024.
+    /// OperationsPerInvoke=1024: BDN calls this 1024× per measurement, reports per-op cost.
     /// </summary>
-    [Benchmark(Description = "negative-control: direct Action() on STA thread (no Dispatcher, batch/1024)")]
+    [Benchmark(Description = "negative-control: direct Action() on STA thread (no Dispatcher)", OperationsPerInvoke = 1024)]
     public void NegativeControlDirectCall()
     {
-        DispatchBatch(StaBatch, invokeMode: 2);
+        DispatchSingle(invokeMode: 2);
     }
 
     // ── STA dispatch infrastructure ────────────────────────────────────────────
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private void DispatchBatch(int batchSize, int invokeMode)
+    private void DispatchSingle(int invokeMode)
     {
-        // Capture locals so lambda doesn't box 'this' fields on each call
         var dispatcher = _dispatcher!;
         var actions = _actions;
-        int startIdx = _index;
+        int idx = _index++;
 
         _pendingWork = invokeMode switch
         {
-            0 => () =>
-            {
-                int idx = startIdx;
-                for (int i = 0; i < batchSize; i++)
-                {
-                    dispatcher.Invoke(actions[idx & CorpusMask]);
-                    idx++;
-                }
-                _index = idx;
-            },
-            1 => () =>
-            {
-                int idx = startIdx;
-                for (int i = 0; i < batchSize; i++)
-                {
-                    dispatcher.Invoke(actions[idx & CorpusMask],
-                        DispatcherPriority.Send,
-                        CancellationToken.None,
-                        TimeSpan.FromMilliseconds(-1));
-                    idx++;
-                }
-                _index = idx;
-            },
-            _ => () =>
-            {
-                int idx = startIdx;
-                for (int i = 0; i < batchSize; i++)
-                {
-                    actions[idx & CorpusMask]();
-                    idx++;
-                }
-                _index = idx;
-            }
+            0 => () => dispatcher.Invoke(actions[idx & CorpusMask]),
+            1 => () => dispatcher.Invoke(actions[idx & CorpusMask],
+                    DispatcherPriority.Send,
+                    CancellationToken.None,
+                    TimeSpan.FromMilliseconds(-1)),
+            _ => () => actions[idx & CorpusMask](),
         };
 
         _workDone.Reset();
@@ -250,18 +221,17 @@ public class DispatcherInvokeActionBenchmark : IDisposable
 ///
 /// Proxy strategy (Option B variant): DispatcherOperation and its constructors are internal.
 /// We access them via reflection — MethodInfo and ConstructorInfo cached in GlobalSetup.
-/// A fresh DispatcherOperation is constructed per batch-element to use the full
+/// A fresh DispatcherOperation is constructed per op to use the full
 /// _executionContext code path (vs null path taken after first Invoke on same instance).
 ///
-/// Threading: a dedicated STA thread owns the Dispatcher. Benchmarks post batches to the STA
-/// thread. Per-invoke cost = reported_ns / StaBatch.
+/// Threading: a dedicated STA thread owns the Dispatcher. Benchmarks post single ops to the STA
+/// thread. BDN calls each method OperationsPerInvoke=256 times and reports per-op cost.
 ///
 /// Corpus: 64 distinct Action delegates (seeded RNG). Each op uses actions[i % 64].
 /// </summary>
 [Config(typeof(AutoresearchConfig))]
 public class DispatcherOperationInvokeBenchmark : IDisposable
 {
-    internal const int StaBatch = 256;
     private const int CorpusSize = 64;
     private const int CorpusMask = CorpusSize - 1;
 
@@ -343,8 +313,8 @@ public class DispatcherOperationInvokeBenchmark : IDisposable
         // Pre-warm: stabilize JIT and STA thread state before BDN measures
         if (_reflectionAvailable)
         {
-            for (int w = 0; w < 3; w++)
-                DispatchBatch();
+            for (int w = 0; w < 32; w++)
+                DispatchSingle();
         }
     }
 
@@ -373,51 +343,45 @@ public class DispatcherOperationInvokeBenchmark : IDisposable
     /// <summary>
     /// Entries 2.4 + 2.5 (proxy): DispatcherOperation.Invoke() via reflection.
     /// Fresh DispatcherOperation per operation; exercises full ExecutionContext path.
-    /// Batch size: StaBatch=256. Per-invoke cost = batch_ns / 256.
+    /// OperationsPerInvoke=256: BDN calls this 256× per measurement, reports per-op cost.
     /// </summary>
-    [Benchmark(Description = "DispatcherOperation.Invoke() proxy — reflection, fresh op per call (batch/256)")]
+    [Benchmark(Description = "DispatcherOperation.Invoke() proxy — reflection, fresh op per call", OperationsPerInvoke = 256)]
     public void DispatcherOperationInvoke()
     {
         if (!_reflectionAvailable) return;
-        DispatchBatch();
+        DispatchSingle();
     }
 
     /// <summary>
     /// Negative control: direct Action() call (no DispatcherOperation overhead).
     /// Delta vs DispatcherOperationInvoke shows cost of construction + ExecutionContext.Run.
-    /// Batch size: StaBatch=256.
+    /// OperationsPerInvoke=256: BDN calls this 256× per measurement, reports per-op cost.
     /// </summary>
-    [Benchmark(Description = "negative-control: direct Action() call (no DispatcherOperation, batch/256)")]
+    [Benchmark(Description = "negative-control: direct Action() call (no DispatcherOperation)", OperationsPerInvoke = 256)]
     public void NegativeControlDirectCall()
     {
-        DispatchDirectBatch();
+        DispatchDirectSingle();
     }
 
     // ── STA dispatch infrastructure ────────────────────────────────────────────
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private void DispatchBatch()
+    private void DispatchSingle()
     {
         var dispatcher = _dispatcher!;
         var actions = _actions;
         var opCtor = _opCtor!;
         var opInvoke = _opInvoke!;
-        int startIdx = _index;
+        int idx = _index++;
         var ctorArgs = new object?[3];
         ctorArgs[0] = dispatcher;
         ctorArgs[1] = DispatcherPriority.Normal;
+        ctorArgs[2] = actions[idx & CorpusMask];
 
         _pendingWork = () =>
         {
-            int idx = startIdx;
-            for (int i = 0; i < StaBatch; i++)
-            {
-                ctorArgs[2] = actions[idx & CorpusMask];
-                idx++;
-                var op = opCtor.Invoke(ctorArgs);
-                opInvoke.Invoke(op, null);
-            }
-            _index = idx;
+            var op = opCtor.Invoke(ctorArgs);
+            opInvoke.Invoke(op, null);
         };
 
         _workDone.Reset();
@@ -426,21 +390,12 @@ public class DispatcherOperationInvokeBenchmark : IDisposable
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private void DispatchDirectBatch()
+    private void DispatchDirectSingle()
     {
         var actions = _actions;
-        int startIdx = _index;
+        int idx = _index++;
 
-        _pendingWork = () =>
-        {
-            int idx = startIdx;
-            for (int i = 0; i < StaBatch; i++)
-            {
-                actions[idx & CorpusMask]();
-                idx++;
-            }
-            _index = idx;
-        };
+        _pendingWork = () => actions[idx & CorpusMask]();
 
         _workDone.Reset();
         _workReady.Set();

@@ -165,9 +165,6 @@ internal static class WpfStaHost
 [Config(typeof(WindowLifecycleConfig))]
 public class WindowLifecycleBenchmark : IDisposable
 {
-    // Number of Show+Hide iterations per BDN invocation (amortizes Dispatcher.Invoke overhead)
-    internal const int BatchSize = 50;
-
     // Window used for Show/Hide and UpdateLayout benchmarks
     private Window? _window;
 
@@ -190,9 +187,9 @@ public class WindowLifecycleBenchmark : IDisposable
             _window.Hide();
         });
 
-        // Pre-warm: 3 batches before BDN starts measuring to stabilize JIT + Win32 HWND state
-        for (int w = 0; w < 3; w++)
-            InvokeOnSta(RunShowHideBatch);
+        // Pre-warm: 50 single Show+Hide ops before BDN starts measuring to stabilize JIT + Win32 HWND state
+        for (int w = 0; w < 50; w++)
+            InvokeOnSta(RunShowHideSingle);
     }
 
     [GlobalCleanup]
@@ -219,15 +216,15 @@ public class WindowLifecycleBenchmark : IDisposable
     /// <summary>
     /// Proxy for Entries 1-4 (Application.Run*, RunDispatcher, RunInternal): Window.Show + Window.Hide
     /// round-trip on a warm STA host. Exercises UpdateVisibilityProperty → ShowHelper → Win32 ShowWindow.
-    /// Batch size: BatchSize=50 iterations per invocation. Per-call cost = reported_ns / 50.
+    /// OperationsPerInvoke=50: BDN calls this 50× per measurement and reports per Show+Hide cost.
     ///
     /// All four Application.Run* entries are structural ancestors of Dispatcher.Run();
     /// their 100% sample cost is inherited from Dispatcher.PushFrameImpl. See overlap note above.
     /// </summary>
-    [Benchmark(Description = "Window.Show+Hide proxy — covers Application.Run*/RunDispatcher (batch/50)")]
+    [Benchmark(Description = "Window.Show+Hide proxy — covers Application.Run*/RunDispatcher", OperationsPerInvoke = 50)]
     public void WindowShowHideProxy()
     {
-        InvokeOnSta(RunShowHideBatch);
+        InvokeOnSta(RunShowHideSingle);
     }
 
     /// <summary>
@@ -256,14 +253,11 @@ public class WindowLifecycleBenchmark : IDisposable
     // ── Batch work items (run on STA thread via Dispatcher.Invoke) ─────────────
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private void RunShowHideBatch()
+    private void RunShowHideSingle()
     {
         var w = _window!;
-        for (int i = 0; i < BatchSize; i++)
-        {
-            w.Show();
-            w.Hide();
-        }
+        w.Show();
+        w.Hide();
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
