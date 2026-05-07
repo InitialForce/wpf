@@ -73,6 +73,13 @@ orchestrator will author additions in a separate non-iter pass.
 
 ## Iteration protocol
 
+0. **Check for halt sentinel.**
+   ```bash
+   ls /c/work/wpf-perf/autoresearch/HALT 2>/dev/null && cat /c/work/wpf-perf/autoresearch/HALT
+   ```
+   If the file exists: read it, write one-sentence summary of the reason, then
+   EXIT. Do not proceed further in this iteration.
+
 1. **Read state.**
    - `cat /c/work/wpf-perf/autoresearch/profile.json` (the hot-path menu)
    - `tail -20 /c/work/wpf-perf/autoresearch/results.jsonl` (recent attempts;
@@ -159,10 +166,19 @@ orchestrator will author additions in a separate non-iter pass.
 - **NEVER push to a remote.** Local-only.
 - **NEVER touch the user's MC instance** — microbench doesn't spawn MC; only
   Tier C (which you don't run) does.
+- **HALT SENTINEL.** If `/c/work/wpf-perf/autoresearch/HALT` exists, stop
+  immediately (see Step 0). Never delete or modify the HALT file — that is the
+  orchestrator's job.
+- **NEVER WRITE to `autoresearch/`** — you may READ any file there, but writing
+  any file in that directory (including HALT, cooldown.json, results.jsonl, etc.)
+  is forbidden.
 
 ## Quick reference
 
 ```
+# Check halt sentinel
+ls /c/work/wpf-perf/autoresearch/HALT 2>/dev/null
+
 # State
 cat   /c/work/wpf-perf/autoresearch/profile.json
 tail -20 /c/work/wpf-perf/autoresearch/results.jsonl
