@@ -233,11 +233,8 @@ namespace MS.Internal.Markup
                     // Avoid calling IsWhiteSpace for ch in (' ' .. 'z']
                     if (((ch >' ') && (ch <= 'z')) || ! Char.IsWhiteSpace(ch))
                     {
-                        // Stash the stopping char so IsNumber/ReadToken/ReadBool
-                        // don't have to reload _pathString[_curIndex] right after.
-                        _token = ch;
                         return commaMet;
-                    }
+                    }                        
                     break;
                 }
                 
@@ -274,10 +271,8 @@ namespace MS.Internal.Markup
 
             if (More())
             {
-                // SkipWhiteSpace stashed the stopping char into _token, so we
-                // can avoid the second _pathString indexer load + the _token
-                // field write that used to happen here.
-                char t = _token;
+                char t = _pathString[_curIndex];
+                _token = t;
 
                 // Path data is digit-dominated; check the digit range first
                 // via single subtract+unsigned-compare so the hot path takes
