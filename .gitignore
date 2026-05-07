@@ -360,3 +360,6 @@ __pycache__/
 .ruff_cache/
 .venv/
 *.egg-info/
+
+# Autoresearch per-run state (not source)
+autoresearch/cooldown.json

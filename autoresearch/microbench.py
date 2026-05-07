@@ -34,6 +34,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import shutil
@@ -57,6 +58,7 @@ MICROBENCH_RESULTS = MICROBENCH_PUBLISH / "BenchmarkDotNet.Artifacts" / "results
 STAGING = ROOT / "microbench-staging"
 RESULTS_TSV = ROOT / "results.tsv"
 RESULTS_JSONL = ROOT / "results.jsonl"
+COOLDOWN_JSON = ROOT / "cooldown.json"
 
 BUILD_TIMEOUT_S = int(os.environ.get("WPF_AR_BUILD_TIMEOUT", "600"))
 BENCH_TIMEOUT_S = int(os.environ.get("WPF_AR_BENCH_TIMEOUT", "300"))
@@ -369,6 +371,102 @@ def write_halt_sentinel(tail_rows: list[dict]) -> None:
     HALT_FILE.write_text("\n".join(lines) + "\n")
 
 
+# ─── Cooldown snapshot ───────────────────────────────────────────────────────
+
+
+def compute_cooldown_state() -> dict:
+    """Compute per-filter cooldown state from results.jsonl.
+
+    Mirrors the algorithm in tools/cool-list.py so the JSON snapshot agrees
+    with the standalone helper.  The two scripts are intentionally independent
+    (no shared import).
+
+    Algorithm (design doc §1 "Query algorithm"):
+    1. Read all tier-B rows from results.jsonl.
+    2. For each unique filter, find the two most recent rows.
+    3. If both are REJECT-UNCLEAR AND fewer than 5 tier-B rows have been written
+       since the second-most-recent REJECT-UNCLEAR, that filter is COOLED.
+
+    Returns a dict with schema:
+      {
+        "computed_at": "<UTC ISO timestamp>",
+        "cool_filters": [
+          { "filter": "...", "cooled_at_row": int, "rows_since": int,
+            "eligible_after_row": int }
+        ],
+        "all_filters": [<list of all unique filter strings ever seen>]
+      }
+    """
+    cooldown_window = 5  # tier-B rows; matches design doc
+
+    tier_b_rows: list[dict] = []
+    if RESULTS_JSONL.exists():
+        with open(RESULTS_JSONL, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("tier") == "B":
+                    tier_b_rows.append(row)
+
+    total_b = len(tier_b_rows)
+
+    # Group by filter: list of (tier_b_index, verdict) in file order
+    filter_indices: dict[str, list[tuple[int, str]]] = {}
+    for i, row in enumerate(tier_b_rows):
+        filt = row.get("filter", "<no-filter>")
+        verdict = row.get("verdict", "<unknown>")
+        filter_indices.setdefault(filt, []).append((i, verdict))
+
+    cool_filters: list[dict] = []
+    for filt, entries in filter_indices.items():
+        if len(entries) < 2:
+            continue
+        idx_second_last, v_second_last = entries[-2]
+        idx_last, v_last = entries[-1]
+        if v_last == "REJECT-UNCLEAR" and v_second_last == "REJECT-UNCLEAR":
+            # Count tier-B rows written AFTER the second-most-recent REJECT-UNCLEAR
+            rows_since = total_b - 1 - idx_second_last
+            if rows_since < cooldown_window:
+                eligible_after_row = idx_second_last + cooldown_window
+                cool_filters.append({
+                    "filter": filt,
+                    "cooled_at_row": idx_second_last,
+                    "rows_since": rows_since,
+                    "eligible_after_row": eligible_after_row,
+                })
+
+    # Sort cool_filters by cooled_at_row for deterministic output
+    cool_filters.sort(key=lambda x: x["cooled_at_row"])
+
+    return {
+        "computed_at": datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+        "cool_filters": cool_filters,
+        "all_filters": sorted(filter_indices.keys()),
+    }
+
+
+def write_cooldown_snapshot() -> None:
+    """Write the current cooldown state to cooldown.json.
+
+    This is diagnostic data only — inner Claude does NOT read this file.
+    Failure to write is non-fatal: we log a warning and continue.
+    """
+    try:
+        state = compute_cooldown_state()
+        COOLDOWN_JSON.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        log(f"cooldown snapshot written → {COOLDOWN_JSON.name}"
+            f" ({len(state['cool_filters'])} cooled, {len(state['all_filters'])} total filters)")
+    except Exception as exc:
+        log(f"WARNING: failed to write cooldown snapshot ({COOLDOWN_JSON}): {exc}")
+
+
 # ─── Main flow ────────────────────────────────────────────────────────────────
 
 
@@ -554,7 +652,11 @@ def main() -> int:
             f" — writing HALT sentinel ({HALT_FILE})",
             file=sys.stderr,
         )
+        write_cooldown_snapshot()
         return 7
+
+    # ── Cooldown snapshot (diagnostic; always written) ──────────────────────
+    write_cooldown_snapshot()
 
     return rc_out
 
