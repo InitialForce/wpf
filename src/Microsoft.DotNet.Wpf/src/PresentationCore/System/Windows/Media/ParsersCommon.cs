@@ -203,12 +203,20 @@ namespace MS.Internal.Markup
         // Skip white space, one comma if allowed
         private bool SkipWhiteSpace(bool allowComma)
         {
+            // Hoist fields to locals so the JIT proves they don't change across
+            // the loop and folds away per-iteration field loads + null-checks on
+            // the string indexer. _curIndex is only written back at exit. Same
+            // pattern already applied to SkipDigits.
+            string s = _pathString;
+            int end = _pathLength;
+            int i = _curIndex;
+
             bool commaMet = false;
-            
-            while (More())
+
+            while (i < end)
             {
-                char ch = _pathString[_curIndex];
-                
+                char ch = s[i];
+
                 switch (ch)
                 {
                 case ' ' :
@@ -216,7 +224,7 @@ namespace MS.Internal.Markup
                 case '\r':
                 case '\t': // SVG whitespace
                     break;
-            
+
                 case ',':
                     if (allowComma)
                     {
@@ -225,22 +233,25 @@ namespace MS.Internal.Markup
                     }
                     else
                     {
+                        _curIndex = i;
                         ThrowBadToken();
                     }
                     break;
-                    
+
                 default:
                     // Avoid calling IsWhiteSpace for ch in (' ' .. 'z']
                     if (((ch >' ') && (ch <= 'z')) || ! Char.IsWhiteSpace(ch))
                     {
+                        _curIndex = i;
                         return commaMet;
-                    }                        
+                    }
                     break;
                 }
-                
-                _curIndex ++;
+
+                i++;
             }
-            
+
+            _curIndex = i;
             return commaMet;
         }
 
