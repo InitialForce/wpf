@@ -612,39 +612,41 @@ namespace MS.Internal.Markup
                     break;
 
                 case 'c': case 'C': // cubic Bezier
+                case 's': case 'S': // smooth cublic Bezier
                     EnsureFigure();
-
+                    
                     do
                     {
-                        Point p = ReadPoint(cmd, ! AllowComma);
+                        Point p;
+                        
+                        if ((cmd == 's') || (cmd == 'S'))
+                        {
+                            if (last_cmd == 'C')
+                            {
+                                p = Reflect();
+                            }
+                            else
+                            {
+                                p = _lastPoint;
+                            }
 
-                        _secondLastPoint = ReadPoint(cmd, AllowComma);
-                        _lastPoint       = ReadPoint(cmd, AllowComma);
+                            _secondLastPoint = ReadPoint(cmd, ! AllowComma);
+                        }
+                        else
+                        {
+                            p = ReadPoint(cmd, ! AllowComma);
+
+                            _secondLastPoint = ReadPoint(cmd, AllowComma);
+                        }
+                            
+                        _lastPoint = ReadPoint(cmd, AllowComma);
 
                         context.BezierTo(p, _secondLastPoint, _lastPoint, IsStroked, ! IsSmoothJoin);
-
+                        
                         last_cmd = 'C';
                     }
                     while (IsNumber(AllowComma));
-
-                    break;
-
-                case 's': case 'S': // smooth cubic Bezier
-                    EnsureFigure();
-
-                    do
-                    {
-                        Point p = (last_cmd == 'C') ? Reflect() : _lastPoint;
-
-                        _secondLastPoint = ReadPoint(cmd, ! AllowComma);
-                        _lastPoint       = ReadPoint(cmd, AllowComma);
-
-                        context.BezierTo(p, _secondLastPoint, _lastPoint, IsStroked, ! IsSmoothJoin);
-
-                        last_cmd = 'C';
-                    }
-                    while (IsNumber(AllowComma));
-
+                    
                     break;
                     
                 case 'q': case 'Q': // quadratic Bezier
