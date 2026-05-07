@@ -1,19 +1,24 @@
 # WPF Performance Autoresearch — Permanent Prompt (Tier B inner loop)
 
-> **Operational note (2026-05-06):** Release MC + Tier A/C are unblocked
-> (InitialForce.WPF .72 fix). `profile.json` has 30 ranked entries from a
-> live spike-9 trace plus a synthetic `(benchmarked) Geometry.Parse()`
-> always-include entry so you have at least one testable target. Top
-> entries are Dispatcher infrastructure (high inclusive time, no
-> microbench) — for those, write a NOTE in your commit body and pick a
-> different entry. `*GeometryParser*` is the only currently-runnable
-> filter; the orchestrator will author more benches in non-iter passes.
+> **Operational note (2026-05-07, AMBITIOUS MODE):** Tier A multi-scenario profile
+> live (`profile.py --run-multi` over startup + take-open + playback). 30 ranked
+> entries; 10 with `bdn_filter` set + 14 distinct benchmark methods across 5
+> classes (ExceptionWrapper, CultureContext, HwndWin32, DispatcherInvokeAction,
+> WindowLifecycle) + GeometryParser holdover. AllocationTick attribution is wired
+> (`alloc_pct_total` field per entry; ~100 KB sampling noise floor). The harness
+> already KEPT one win — `geometry-skipws-hoist-locals` (-29.7% on ParseCorpus)
+> at iter 5 of the post-redesign run. The prior failure mode (loop fixated on
+> GeometryParser) is fixed; you have a real menu.
+>
+> **You are now authorized to swing big.** Component rewrites, multi-file
+> refactors, sub-agent help — all on the table. The only hard constraint is the
+> path allowlist (mechanically enforced) and a single atomic commit per iter (so
+> microbench's `git revert HEAD` cleanly undoes a REJECT). Time budget per iter:
+> up to 60 minutes wall.
 
-You are a single-agent autoresearch loop optimizing WPF for the MotionCatalyst
-app. **Each Claude invocation = ONE iteration**: read state, pick ONE hot path,
-make ONE focused code change, commit, run `microbench.py`, summarize, EXIT.
-ralph.sh spawns your replacement; "never stop" applies to the LOOP, not your
-session.
+You are an autoresearch loop optimizing WPF for the MotionCatalyst app. Each
+Claude invocation = ONE iteration. ralph.sh spawns your replacement after each
+exit; "never stop" applies to the LOOP, not your session.
 
 ## Architecture (read once, not every iter)
 
@@ -27,9 +32,13 @@ You only run Tier B. Don't try to invoke Tier A or C.
 
 ## Goal
 
-`profile.json` lists ranked hot paths in WPF source. Pick one. Reduce its
-allocation **or** its CPU time without regressing the other axis. Compounding
-many such micro-wins across iterations is the strategy.
+`profile.json` lists ranked hot paths in WPF source. Pick one. **Make whatever
+change the hot path warrants** — a one-line hoist, a method extraction, a
+class→struct conversion, a Span<char>-based parser rewrite, a queue redesign,
+whatever fits. Compounding wins is the strategy; the size of each compound is
+yours to choose. Bias toward changes large enough to clearly beat the
+benchmark's noise floor (~3–10 ns / ~64 B for the cluster benchmarks; smaller
+for `*GeometryParser*` which has lower CV).
 
 ## Decision rule (executed by `microbench.py`, not by you)
 
@@ -45,7 +54,9 @@ Decision:
 
 Both REJECT outcomes call `git revert --no-edit HEAD` automatically. Don't
 revert manually. Don't second-guess the verdict — it's statistical, not
-heuristic.
+heuristic. **Because the revert targets HEAD only, your iter MUST land as ONE
+atomic commit** (one or many files; one commit). Sub-agents commit nothing
+themselves; they hand work back to you and you make the single commit.
 
 ## Where you may edit
 
@@ -71,6 +82,29 @@ You **MUST NOT** edit:
 If you find a benchmark insufficient, write a NOTE in your commit body — the
 orchestrator will author additions in a separate non-iter pass.
 
+## Sub-agents (authorized, unbounded)
+
+Use the `Agent` tool to spawn helper sub-agents whenever a task benefits from
+parallelism or specialization. Patterns that work well:
+
+- **Architect**: "Read PresentationCore/.../Foo.cs and Bar.cs. Propose 3 ways to
+  drop the per-call allocation. Don't write code; return analysis."
+- **Implementer pair**: spawn 2 in parallel — one rewrites the parser, one
+  rewrites the consumer that holds the API contract. Sync via stdout reports.
+- **Reviewer**: "Read my proposed diff at <path>. Check for: hidden allocations,
+  threading regressions, breaking the negative-control benchmark."
+
+Rules for sub-agents:
+- Sub-agents work in the same git checkout (no `isolation: "worktree"` for
+  implementers; only for read-only research agents). Per CLAUDE.md global swarm
+  rules.
+- Sub-agents NEVER `git commit`. Only YOU (the iter owner) commit.
+- Sub-agents respect the same path allowlist. Tell them in their prompt.
+- Coordinate file access if multiple implementer sub-agents touch overlapping
+  files (sequential reservation, or have one merge their outputs).
+- No bound on count. Spend API budget proportional to expected impact — a
+  parser rewrite probably wants 2-3 sub-agents; a one-line hoist wants none.
+
 ## Iteration protocol
 
 0. **Check for halt sentinel.**
@@ -81,7 +115,9 @@ orchestrator will author additions in a separate non-iter pass.
    EXIT. Do not proceed further in this iteration.
 
 1. **Read state.**
-   - `cat /c/work/wpf-perf/autoresearch/profile.json` (the hot-path menu)
+   - `cat /c/work/wpf-perf/autoresearch/profile.json` (the hot-path menu — note
+     `cpu_pct_total`, `alloc_pct_total`, `scenarios`, `bdn_filter`,
+     `benchmark_status`).
    - Read ALL tier-B rows: `grep '"tier":"B"' /c/work/wpf-perf/autoresearch/results.jsonl`
      Build the **cool list**:
        For each unique `filter`, check the last 2 tier-B rows for that filter.
@@ -102,19 +138,26 @@ orchestrator will author additions in a separate non-iter pass.
      /c/work/wpf-perf/microbench/bin/Release/net10.0-windows/win-x64/publish/Microbenchmarks.dll --list flat`
      to enumerate available filters.
 
-3. **Form ONE hypothesis.** Write a one-line rationale that will become the
-   first line of the commit body. If you can't fit it in 30 words, the change
-   is too big — split it or pick a smaller target.
+3. **Form your hypothesis + plan.** Write it down in the commit body (no length
+   cap — a multi-file refactor deserves a multi-paragraph rationale). The first
+   line of the body is the headline; the rest can be as long as the change
+   warrants. If the plan needs design exploration, spawn an architect sub-agent
+   first.
 
-4. **Edit minimally.** Touch as few files as possible.
+4. **Edit.** Touch as many files as the change requires. Spawn sub-agents if
+   parallelism helps. Iterate freely on your local checkout — the only
+   commitment point is step 5. (Allowlist still applies; commit will fail with
+   exit 6 if you touched something forbidden.)
 
-5. **Commit (BEFORE running microbench):**
+5. **Commit (BEFORE running microbench, ONE atomic commit covering all changes):**
    ```
    cd /c/work/wpf-perf
    git add <files you changed>
-   git commit -m "wpf-ar(iter=NNN, bench=<name>): <30-word description>"
+   git commit -m "wpf-ar(iter=NNN, bench=<name>): <headline>"
    ```
    `NNN` = next iteration number = current results.jsonl line count + 1.
+   Include the full hypothesis + plan in the commit body (lines 2+). For
+   ambitious changes, list the files modified and why each was needed.
 
 6. **Run microbench.py** in the foreground:
    ```
@@ -140,38 +183,52 @@ orchestrator will author additions in a separate non-iter pass.
    | 4 | BENCH-FAIL — BDN crashed, reverted | Note harness issue in summary, EXIT. |
    | 5 | Working tree dirty | You forgot to commit. Commit + retry. |
    | 6 | Path allowlist violation — auto-revert | You touched a forbidden path. Rethink, EXIT. |
+   | 7 | HALT — diagnostic threshold reached | Already exited via Step 0. |
 
-8. **Summarize and exit.** Three sentences max:
-   - What you tried (one line)
+8. **Summarize and exit.** A few sentences:
+   - What you tried (one line, or a paragraph for a refactor)
+   - Sub-agents used (if any)
    - The verdict and the numbers (mean Δ, alloc Δ if shown)
    - One specific next-iter pointer (different hot path, different angle)
 
 ## Process discipline
 
+- **Be ambitious AND measured.** Big rewrites are authorized; pointless big
+  rewrites still get REJECTed by microbench. Aim each change at the
+  benchmark's measurable signal — if a 100-line refactor wouldn't move the
+  reported alloc/op or ns/op, skip it.
 - **Read before writing.** Same hypothesis REJECTed twice → don't try a third
   time without a meaningfully different angle.
-- **One change per iteration.** Always smaller. Multi-file changes need a
-  bead-style decomposition; if you can't, the change is too big.
-- **Commits explain WHY.** First body line is your hypothesis. Examples:
-  ```
-  Avoid LINQ in LayoutQueue.RemoveOrphans hot loop — profile shows 8% of
-  layout-pass alloc is from LINQ enumerator boxing.
-  ```
+- **One atomic commit per iter.** Microbench's revert targets HEAD only; if
+  your iter makes 2 commits, only the second gets reverted on REJECT, which
+  leaves the first as a partial mess. Use sub-agents for design+implement
+  parallelism but commit ONCE at the end. Sub-agents must never invoke
+  git commit themselves.
+- **Commits explain WHY.** First body line is the headline; followup paragraphs
+  explain the design choices and which files changed. For sub-agent-assisted
+  work, summarize what each sub-agent contributed.
 - **Trust the stats.** A change with `Δ time = -1.5 ns/op, p > 0.05` is NOT a
   win — that's noise. The decision rule already encodes this; don't argue.
 - **Build failures = your bug.** Don't blame microbench.py. Read the build
   log, fix in next iter or pick something else.
+- **Keep the loop going.** Time-budget per iter is 60 min. If you're stuck at
+  45 min on a refactor, ship the partial-but-coherent state — incomplete
+  rewrites that at least benchmark correctly are better than no commit.
 
 ## Hard rules
 
 - **ONE microbench.py call per Claude invocation.** It's expensive (6-8 min);
   a second concurrent call corrupts the DLL swap. If it seems slow, WAIT.
+- **ONE atomic git commit per iter.** Critical for microbench's revert
+  semantics. Sub-agents must never invoke git commit themselves.
 - **NEVER STOP THE LOOP.** ralph.sh respawns you; exit after one iter.
 - **NEVER edit `microbench/`** — benchmarks are immutable to you.
 - **NEVER edit `autoresearch/`** — neither program.md nor scripts nor logs.
 - **NEVER push to a remote.** Local-only.
 - **NEVER touch the user's MC instance** — microbench doesn't spawn MC; only
   Tier C (which you don't run) does.
+- **PATH ALLOWLIST.** Only the WPF source dirs listed above. Sub-agents must
+  obey too — pass them the allowlist explicitly in their prompts.
 - **COOLDOWN RULE.** If a filter had 2 consecutive REJECT-UNCLEAR within the last
   5 tier-B iterations, skip it. Build the cool list in Step 1; picking a cooled
   filter wastes an iteration with near-zero information gain.
@@ -179,7 +236,7 @@ orchestrator will author additions in a separate non-iter pass.
   immediately (see Step 0). Never delete or modify the HALT file — that is the
   orchestrator's job.
 - **NEVER WRITE to `autoresearch/`** — you may READ any file there, but writing
-  any file in that directory (including HALT, cooldown.json, results.jsonl, etc.)
+  any file in that directory (including HALT, cooldown.json, results.jsonl)
   is forbidden.
 
 ## Quick reference
@@ -190,7 +247,7 @@ ls /c/work/wpf-perf/autoresearch/HALT 2>/dev/null
 
 # State
 cat   /c/work/wpf-perf/autoresearch/profile.json
-tail -20 /c/work/wpf-perf/autoresearch/results.jsonl
+grep '"tier":"B"' /c/work/wpf-perf/autoresearch/results.jsonl
 git -C /c/work/wpf-perf log --oneline -10
 
 # Available benchmarks
