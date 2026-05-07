@@ -1,2 +1,9 @@
 method	reason	skip_date	retry_after
 HwndWin32Benchmark.WndProc4Hooks	cv=46.4% bimodal (STA pump shutdown mid-run; 23us+87us clusters)	2026-05-07	stabilize STA pump lifecycle
+DispatcherOperationInvokeBenchmark.DispatcherOperationInvoke	cv=59.2% bimodal (reflection ctor + GC pressure; Gen0 GC pauses mid-batch; proxy-only entry)	2026-05-07	add InternalsVisibleTo("Microbenchmarks") to WindowsBase; pre-allocate ops in GlobalSetup
+Dispatcher.InvokeImpl(DispatcherOperation,CancellationToken,TimeSpan)	needs-pump: private method; mandatory Dispatcher queue drain via pump	2026-05-07	never (Option C)
+DispatcherOperation.Wait()	needs-pump: cross-thread wait on ManualResetEvent; requires pump to drain and signal	2026-05-07	never (Option C)
+DispatcherOperation+DispatcherOperationEvent.WaitOne()	needs-pump: private nested class; covered transitively by DispatcherOperation.Wait()	2026-05-07	never (Option C)
+DispatcherOperation.Wait(TimeSpan)	needs-pump: deduplicated with DispatcherOperation.Wait(); same cross-thread wait path	2026-05-07	never (Option C)
+Dispatcher.ProcessQueue()	needs-pump: private + IsInputPending() requires real HWND Win32 message queue	2026-05-07	never (Option C)
+Dispatcher.PushFrameImpl(DispatcherFrame)	skipped: method IS the Win32 GetMessage/DispatchMessage loop; no meaningful proxy	2026-05-07	never (skipped)

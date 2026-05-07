@@ -1,0 +1,5 @@
+{
+  "cluster": "media",
+  "status": "skipped",
+  "reason": "empty cluster - no entries in bench-queue.json"
+}

@@ -1,0 +1,87 @@
+{
+  "cluster": "dispatcher",
+  "ran_at": "2026-05-07T18:35:00Z",
+  "bdn_version": "0.14.0",
+  "runtime": ".NET 10.0.7 (10.0.726.21808), X64 RyuJIT AVX2",
+  "machine": "AMD Ryzen 9 5950X, Windows 11 (10.0.26200.8246)",
+  "note": "batch design: each [Benchmark] call posts StaBatch operations to a dedicated STA thread. BDN reports cost per batch call; per-invoke = mean_ns / StaBatch. Cross-thread ManualResetEventSlim signaling introduces ~10% CV. CPU pinned to core 0 + 3-batch pre-warm in GlobalSetup (Gate 3 retry). OperationsPerInvoke attribute not available in BDN 0.14.",
+  "benchmarks": [
+    {
+      "class": "DispatcherInvokeActionBenchmark",
+      "filter": "*DispatcherInvokeAction*",
+      "sta_batch_size": 1024,
+      "methods": [
+        {
+          "name": "InvokeAction",
+          "profile_entry": "Dispatcher.Invoke(class System.Action) (cpu_pct=2.09%)",
+          "mean_batch_ns": 28903,
+          "ns_per_invoke": 28.2,
+          "alloc_b_per_batch": 41072,
+          "alloc_b_per_invoke": 40.1,
+          "cv_pct": 10.01,
+          "verdict": "high-cv",
+          "note": "cv=10.0% — cross-thread ManualResetEventSlim signaling noise; per-invoke ~28ns is 6x over direct call (~5ns). Bimodal variance is structural to STA-batch design; per-invoke estimate is valid."
+        },
+        {
+          "name": "InvokeAction4Arg",
+          "profile_entry": "Dispatcher.Invoke(Action,DispatcherPriority,CancellationToken,TimeSpan) (cpu_pct=2.09%)",
+          "mean_batch_ns": 28254,
+          "ns_per_invoke": 27.6,
+          "alloc_b_per_batch": 41072,
+          "alloc_b_per_invoke": 40.1,
+          "cv_pct": 10.04,
+          "verdict": "high-cv",
+          "note": "cv=10.0% — same STA-batch variance as InvokeAction; canonical 4-arg fast-path entry"
+        },
+        {
+          "name": "NegativeControlDirectCall",
+          "profile_entry": "negative-control: direct Action() call on STA thread",
+          "mean_batch_ns": 4715,
+          "ns_per_invoke": 4.6,
+          "alloc_b_per_batch": 112,
+          "alloc_b_per_invoke": 0.1,
+          "cv_pct": 8.69,
+          "verdict": "high-cv",
+          "note": "direct call overhead only; delta vs InvokeAction (~23ns) captures SyncContext swap cost"
+        }
+      ]
+    },
+    {
+      "class": "DispatcherOperationInvokeBenchmark",
+      "filter": "*DispatcherOperationInvoke*",
+      "sta_batch_size": 256,
+      "methods": [
+        {
+          "name": "DispatcherOperationInvoke",
+          "profile_entry": "DispatcherOperation.Invoke() (cpu_pct=2.09%, proxy-only)",
+          "mean_batch_ns": 109774,
+          "ns_per_invoke": 428.8,
+          "alloc_b_per_batch": 98504,
+          "alloc_b_per_invoke": 384.8,
+          "cv_pct": 59.19,
+          "verdict": "failed",
+          "note": "cv=59% bimodal — reflection ctor (ConstructorInfo.Invoke) per element + Gen0 GC pressure causes pause spikes. Bimodal: 59-72us cluster vs 135-212us cluster. Added to bench-skipped.tsv. Fix: add InternalsVisibleTo(Microbenchmarks) to WindowsBase + pre-allocate operations in GlobalSetup."
+        },
+        {
+          "name": "NegativeControlDirectCall",
+          "profile_entry": "negative-control: direct Action() call (no DispatcherOperation)",
+          "mean_batch_ns": 3309,
+          "ns_per_invoke": 12.9,
+          "alloc_b_per_batch": 104,
+          "alloc_b_per_invoke": 0.4,
+          "cv_pct": 7.45,
+          "verdict": "high-cv",
+          "note": "stable relative to DispatcherOperationInvoke; establishes baseline"
+        }
+      ]
+    }
+  ],
+  "skipped_entries": [
+    {"method": "Dispatcher.InvokeImpl", "reason": "needs-pump: private + mandatory queue drain via pump (entry 2.3)"},
+    {"method": "DispatcherOperation.Wait()", "reason": "needs-pump: cross-thread MRE wait; requires pump (entry 2.6)"},
+    {"method": "DispatcherOperation+DispatcherOperationEvent.WaitOne()", "reason": "needs-pump: covered by 2.6 (entry 2.7)"},
+    {"method": "DispatcherOperation.Wait(TimeSpan)", "reason": "needs-pump: deduplicated with 2.6 (entry 2.8)"},
+    {"method": "Dispatcher.ProcessQueue()", "reason": "needs-pump: private + IsInputPending() Win32 dependency (entry 2.9)"},
+    {"method": "Dispatcher.PushFrameImpl", "reason": "skipped: method IS the message loop (entry 2.10)"}
+  ]
+}

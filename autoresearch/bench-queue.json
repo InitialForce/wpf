@@ -18,7 +18,8 @@
             "take-open",
             "playback"
           ],
-          "status": "pending"
+          "status": "skipped",
+          "skip_reason": "IS the message loop (skipped)"
         },
         {
           "method": "WindowsBase!System.Windows.Threading.DispatcherOperation.Wait()",
@@ -29,7 +30,8 @@
             "take-open",
             "playback"
           ],
-          "status": "pending"
+          "status": "skipped",
+          "skip_reason": "needs-pump"
         },
         {
           "method": "WindowsBase!System.Windows.Threading.DispatcherOperation+DispatcherOperationEvent.WaitOne()",
@@ -40,7 +42,8 @@
             "take-open",
             "playback"
           ],
-          "status": "pending"
+          "status": "skipped",
+          "skip_reason": "needs-pump"
         },
         {
           "method": "WindowsBase!System.Windows.Threading.DispatcherOperation.Wait(value class System.TimeSpan)",
@@ -51,7 +54,8 @@
             "take-open",
             "playback"
           ],
-          "status": "pending"
+          "status": "skipped",
+          "skip_reason": "needs-pump"
         },
         {
           "method": "WindowsBase!System.Windows.Threading.Dispatcher.InvokeImpl(class System.Windows.Threading.DispatcherOperation,value class System.Threading.CancellationToken,value class System.TimeSpan)",
@@ -62,7 +66,8 @@
             "take-open",
             "playback"
           ],
-          "status": "pending"
+          "status": "skipped",
+          "skip_reason": "needs-pump"
         },
         {
           "method": "WindowsBase!System.Windows.Threading.DispatcherOperation.Invoke()",
@@ -73,7 +78,10 @@
             "take-open",
             "playback"
           ],
-          "status": "pending"
+          "status": "authored",
+          "bench_class": "DispatcherOperationInvokeBenchmark",
+          "verdict": "failed",
+          "cv_pct": 59.2
         },
         {
           "method": "WindowsBase!System.Windows.Threading.Dispatcher.ProcessQueue()",
@@ -84,7 +92,8 @@
             "take-open",
             "playback"
           ],
-          "status": "pending"
+          "status": "skipped",
+          "skip_reason": "needs-pump"
         },
         {
           "method": "WindowsBase!System.Windows.Threading.DispatcherOperation.InvokeImpl()",
@@ -95,7 +104,11 @@
             "take-open",
             "playback"
           ],
-          "status": "pending"
+          "status": "authored",
+          "bench_class": "DispatcherOperationInvokeBenchmark",
+          "note": "covered transitively by DispatcherOperationInvoke benchmark",
+          "verdict": "failed",
+          "cv_pct": 59.2
         },
         {
           "method": "WindowsBase!System.Windows.Threading.Dispatcher.Invoke(class System.Action)",
@@ -106,7 +119,10 @@
             "take-open",
             "playback"
           ],
-          "status": "pending"
+          "status": "authored",
+          "bench_class": "DispatcherInvokeActionBenchmark",
+          "verdict": "high-cv",
+          "cv_pct": 10.0
         },
         {
           "method": "WindowsBase!System.Windows.Threading.Dispatcher.Invoke(class System.Action,value class System.Windows.Threading.DispatcherPriority,value class System.Threading.CancellationToken,value class System.TimeSpan)",
@@ -117,7 +133,10 @@
             "take-open",
             "playback"
           ],
-          "status": "pending"
+          "status": "authored",
+          "bench_class": "DispatcherInvokeActionBenchmark",
+          "verdict": "high-cv",
+          "cv_pct": 10.0
         }
       ]
     },
