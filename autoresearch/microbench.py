@@ -22,6 +22,10 @@ Exit codes:
   2  REJECT-UNCLEAR  — eval calls `git revert --no-edit HEAD` (sub-noise)
   3  BUILD-FAIL      — could not build either side; reverted
   4  BENCH-FAIL      — BDN crashed / no JSON output; reverted
+  5  DIRTY-TREE      — working tree not clean; no action taken
+  6  PATH-VIOLATION  — HEAD commit touches forbidden paths; reverted
+  7  HALT            — diagnostic threshold reached (10 consecutive REJECT-UNCLEAR
+                       across all tier-B rows). HALT sentinel file written.
 
 Usage:
   python3 microbench.py --filter '*LayoutManager*' --bench-name 'layout-update'
@@ -56,6 +60,13 @@ RESULTS_JSONL = ROOT / "results.jsonl"
 
 BUILD_TIMEOUT_S = int(os.environ.get("WPF_AR_BUILD_TIMEOUT", "600"))
 BENCH_TIMEOUT_S = int(os.environ.get("WPF_AR_BENCH_TIMEOUT", "300"))
+
+# Diagnostic halt: if the last N consecutive tier-B rows are all REJECT-UNCLEAR,
+# stop the loop and write a HALT sentinel. Default is 10; tunable via env var
+# WPF_AR_HALT_UNCLEAR_THRESHOLD (e.g., export WPF_AR_HALT_UNCLEAR_THRESHOLD=5
+# for a shorter patience window during testing).
+HALT_FILE = ROOT / "HALT"
+HALT_UNCLEAR_THRESHOLD = int(os.environ.get("WPF_AR_HALT_UNCLEAR_THRESHOLD", "10"))
 
 # Absolute floors to avoid trivial wins. Alloc: 64 bytes/op = 1 reference + 1
 # header. Time: 5 ns/op ≈ 16 cycles on a 3.4 GHz CPU. Below these, even a
@@ -291,6 +302,73 @@ def decide(baseline: dict, candidate: dict) -> tuple[str, str]:
     return "REJECT-UNCLEAR", f"no significant signal: time Δ {time_delta:+.2f} ns ({'sig' if time_significant else 'noise'}, {'meaningful' if time_meaningful else 'sub-floor'}); alloc Δ {alloc_delta:+.0f} B/op"
 
 
+# ─── Halt threshold ───────────────────────────────────────────────────────────
+
+
+def check_halt_threshold() -> bool:
+    """Return True iff the last HALT_UNCLEAR_THRESHOLD tier-B rows are all REJECT-UNCLEAR.
+
+    Reads results.jsonl line by line, filters to tier=="B" rows, takes the
+    tail of HALT_UNCLEAR_THRESHOLD rows, and returns True only when:
+      - the tail length exactly equals HALT_UNCLEAR_THRESHOLD, AND
+      - every row in that tail has verdict == "REJECT-UNCLEAR".
+
+    Returns False whenever fewer than HALT_UNCLEAR_THRESHOLD tier-B rows exist
+    so the loop is never halted prematurely on a fresh results file.
+    """
+    if not RESULTS_JSONL.exists():
+        return False
+    tier_b_rows: list[dict] = []
+    with open(RESULTS_JSONL) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("tier") == "B":
+                tier_b_rows.append(row)
+    tail = tier_b_rows[-HALT_UNCLEAR_THRESHOLD:]
+    if len(tail) < HALT_UNCLEAR_THRESHOLD:
+        return False
+    return all(r.get("verdict") == "REJECT-UNCLEAR" for r in tail)
+
+
+def write_halt_sentinel(tail_rows: list[dict]) -> None:
+    """Write a plain-text HALT sentinel file to HALT_FILE.
+
+    Format follows the design doc §2 "Sentinel file format": a HEAD line,
+    written-at timestamp, last-N tier-B rows summary, possible causes, and
+    recovery instructions.
+    """
+    written_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    lines: list[str] = [
+        f"HALT: WPF autoresearch loop stopped — {HALT_UNCLEAR_THRESHOLD} consecutive REJECT-UNCLEAR across all paths.",
+        f"Written: {written_at}",
+        f"Last {HALT_UNCLEAR_THRESHOLD} tier-B rows:",
+    ]
+    for r in tail_rows:
+        ts = r.get("ts", "?")
+        filt = r.get("filter", "?")
+        verdict = r.get("verdict", "?")
+        bench = r.get("bench_name", "?")
+        lines.append(f"  [{ts}] {filt}  {verdict}  {bench}")
+    lines += [
+        "Possible causes:",
+        "  1. All easy wins on covered paths are exhausted — the benchmark-author pass needs to",
+        "     cover new hot paths from profile.json.",
+        "  2. The benchmark noise floor is too high — BDN iteration count may need tuning.",
+        "  3. The profiler data in profile.json is stale — re-run Tier A.",
+        "Recovery:",
+        "  - Delete this file to allow the loop to resume.",
+        "  - Add a NOTE to program.md explaining what changed (new benchmarks, new profile, etc.).",
+        "  - Increase WPF_AR_HALT_UNCLEAR_THRESHOLD if you want a longer patience window.",
+    ]
+    HALT_FILE.write_text("\n".join(lines) + "\n")
+
+
 # ─── Main flow ────────────────────────────────────────────────────────────────
 
 
@@ -453,6 +531,30 @@ def main() -> int:
 
     if rc_out != 0 and not args.no_revert:
         revert_head()
+
+    # ── Halt threshold check ────────────────────────────────────────────────
+    if check_halt_threshold():
+        # Re-read the tail rows for the sentinel summary (they are now on disk).
+        tier_b_tail: list[dict] = []
+        with open(RESULTS_JSONL) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if r.get("tier") == "B":
+                    tier_b_tail.append(r)
+        tail_rows = tier_b_tail[-HALT_UNCLEAR_THRESHOLD:]
+        write_halt_sentinel(tail_rows)
+        print(
+            f"[microbench] HALT: {HALT_UNCLEAR_THRESHOLD} consecutive REJECT-UNCLEAR"
+            f" — writing HALT sentinel ({HALT_FILE})",
+            file=sys.stderr,
+        )
+        return 7
 
     return rc_out
 
