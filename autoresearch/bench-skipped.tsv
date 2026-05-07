@@ -1,1 +1,2 @@
 method	reason	skip_date	retry_after
+HwndWin32Benchmark.WndProc4Hooks	cv=46.4% bimodal (STA pump shutdown mid-run; 23us+87us clusters)	2026-05-07	stabilize STA pump lifecycle

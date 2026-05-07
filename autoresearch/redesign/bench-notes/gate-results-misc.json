@@ -1,0 +1,85 @@
+{
+  "cluster": "misc",
+  "ran_at": "2026-05-07T18:02:00Z",
+  "benchmarks": [
+    {
+      "class": "ExceptionWrapperBenchmark",
+      "filter": "*ExceptionWrapper*",
+      "methods": [
+        {
+          "name": "TryCatchWhenAction",
+          "cv_pct": 6.08,
+          "ns_per_op": 8.189,
+          "alloc_b_per_op": 0,
+          "verdict": "high-cv",
+          "note": "cv=6.1% — low iter count (5) causes wide CI; structurally stable on 67M unrolled ops"
+        },
+        {
+          "name": "TryCatchWhenDoc",
+          "cv_pct": 8.57,
+          "ns_per_op": 13.905,
+          "alloc_b_per_op": 24,
+          "verdict": "high-cv",
+          "note": "cv=8.6% — int boxing (state=_index) allocates 24B/op; bimodal on 5 iters"
+        },
+        {
+          "name": "NegativeControlDynamicInvoke",
+          "cv_pct": 2.38,
+          "ns_per_op": 46.419,
+          "alloc_b_per_op": 0,
+          "verdict": "pass"
+        }
+      ]
+    },
+    {
+      "class": "CultureContextBenchmark",
+      "filter": "*CultureContext*",
+      "methods": [
+        {
+          "name": "CpecCaptureAndRun",
+          "cv_pct": 0.42,
+          "ns_per_op": 102.901,
+          "alloc_b_per_op": 88,
+          "verdict": "pass",
+          "note": "dominated by MethodInfo.Invoke overhead (~100ns); CPEC type is internal so reflection required"
+        },
+        {
+          "name": "RawExecutionContextRun",
+          "cv_pct": 0.44,
+          "ns_per_op": 5.486,
+          "alloc_b_per_op": 0,
+          "verdict": "pass"
+        }
+      ]
+    },
+    {
+      "class": "HwndWin32Benchmark",
+      "filter": "*HwndWin32*",
+      "methods": [
+        {
+          "name": "WndProc1Hook",
+          "cv_pct": 2.17,
+          "ns_per_op": 87271.0,
+          "alloc_b_per_op": 40,
+          "verdict": "pass",
+          "note": "87us/op is cross-thread SendMessage overhead (BDN thread -> STA pump); expected per HIGH-CARE caveat"
+        },
+        {
+          "name": "WndProc4Hooks",
+          "cv_pct": 46.4,
+          "ns_per_op": 67700.0,
+          "alloc_b_per_op": 40,
+          "verdict": "failed",
+          "note": "bimodal: STA pump shutting down mid-run produces 23us and 87us clusters; cv=46.4%"
+        },
+        {
+          "name": "NegativeControlDefWndProc",
+          "cv_pct": 0.04,
+          "ns_per_op": 17.351,
+          "alloc_b_per_op": 0,
+          "verdict": "pass"
+        }
+      ]
+    }
+  ]
+}
