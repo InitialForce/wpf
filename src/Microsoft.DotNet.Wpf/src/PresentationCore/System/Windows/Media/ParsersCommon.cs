@@ -358,6 +358,7 @@ namespace MS.Internal.Markup
             
             bool simple = true;
             int start = _curIndex;
+            int simpleIntValue = 0;
 
             //
             // Allow for a sign
@@ -395,7 +396,25 @@ namespace MS.Internal.Markup
             }
             else
             {
-                SkipDigits(! AllowSign);
+                // Single-pass digit walk: accumulate the integer value while
+                // advancing _curIndex, fusing what was previously SkipDigits()
+                // followed by a re-walk over the same digits in the simple-int
+                // branch below. >8-digit inputs overflow harmlessly because the
+                // simple-int gate falls through to double.Parse on the whole
+                // substring.
+                {
+                    string s = _pathString;
+                    int end = _pathLength;
+                    int i = _curIndex;
+                    int value = 0;
+                    while (i < end && (uint)(s[i] - '0') <= 9u)
+                    {
+                        value = value * 10 + (s[i] - '0');
+                        i++;
+                    }
+                    _curIndex = i;
+                    simpleIntValue = value;
+                }
 
                 // Optional period, followed by more digits
                 if (More() && (_pathString[_curIndex] == '.'))
@@ -416,32 +435,8 @@ namespace MS.Internal.Markup
 
             if (simple && (_curIndex <= (start + 8))) // 32-bit integer
             {
-                // Hoist _pathString to a local so the JIT proves the ref is
-                // stable across the loop and folds away per-iteration field
-                // loads + null-checks on the string indexer.
-                string s = _pathString;
-                int end = _curIndex;
-                int sign = 1;
-
-                if (s[start] == '+')
-                {
-                    start ++;
-                }
-                else if (s[start] == '-')
-                {
-                    start ++;
-                    sign = -1;
-                }
-
-                int value = 0;
-
-                while (start < end)
-                {
-                    value = value * 10 + (s[start] - '0');
-                    start ++;
-                }
-
-                return value * sign;
+                int sign = (first == '-') ? -1 : 1;
+                return simpleIntValue * sign;
             }
             else
             {
