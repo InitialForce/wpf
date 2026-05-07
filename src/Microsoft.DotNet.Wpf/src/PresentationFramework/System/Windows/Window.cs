@@ -5437,7 +5437,7 @@ namespace System.Windows
             try
             {
                 _visibilitySetInternally = true;
-                SetValue(VisibilityProperty, VisibilityBoxes.Box(value));
+                SetValue(VisibilityProperty, value);
             }
             finally
             {
