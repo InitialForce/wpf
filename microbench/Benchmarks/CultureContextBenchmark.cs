@@ -15,9 +15,15 @@ namespace WpfMicrobenchmarks.Benchmarks;
 ///
 /// Access strategy: reflection — CPEC is internal to the MS.Internal namespace
 /// (compiled into WindowsBase). Cache MethodInfo references in GlobalSetup and
-/// invoke via MethodInfo.Invoke. This adds ~100 ns of reflection overhead per
-/// call (baseline establishes the raw ExecutionContext.Run cost at the same
-/// overhead level to keep the comparison fair).
+/// invoke via MethodInfo.Invoke. This adds ~100 ns of reflection overhead per call.
+///
+/// Reflection asymmetry: CpecCaptureAndRun calls both Capture() and Run() via
+/// MethodInfo.Invoke (~100 ns overhead total). RawExecutionContextRun calls
+/// ExecutionContext.Run DIRECTLY — no reflection. The ~97 ns delta between the
+/// two benchmarks (102.9 ns vs 5.5 ns) therefore includes ~100 ns of
+/// MethodInfo.Invoke overhead on top of pure CPEC cost. The comparison is NOT
+/// apples-to-apples: it shows an upper bound on the overhead attributable to the
+/// CPEC reflection-access path, not the isolated CPEC culture-preservation cost.
 ///
 /// Benchmark measures Capture() + Run() together because, in production, the
 /// CPEC is disposed after DispatcherOperation.Invoke() returns and a fresh
@@ -71,9 +77,9 @@ public class CultureContextBenchmark
 
     /// <summary>
     /// Hot path: Capture() + Run() via CulturePreservingExecutionContext.
-    /// Measures the cost of culture-preservation overhead per dispatcher callback cycle.
-    /// Both calls use MethodInfo.Invoke; the negative-control uses the same path
-    /// to keep reflection overhead equal on both sides.
+    /// Both Capture() and Run() are invoked via MethodInfo.Invoke (CPEC is internal).
+    /// Measures the reflection-access cost of the CPEC capture+run path. See class
+    /// summary for details on the reflection asymmetry vs RawExecutionContextRun.
     /// </summary>
     [Benchmark(Description = "CPEC.Capture + CPEC.Run with noop callback")]
     public void CpecCaptureAndRun()
@@ -85,9 +91,11 @@ public class CultureContextBenchmark
 
     /// <summary>
     /// Negative control: raw ExecutionContext.Run with no culture preservation.
-    /// Uses MethodInfo.Invoke at the same level as the CPEC benchmark to keep
-    /// reflection overhead equal. Reveals how much overhead CPEC adds compared
-    /// to the base EC.Run cost.
+    /// Calls ExecutionContext.Run DIRECTLY (no reflection). This is intentionally
+    /// asymmetric with CpecCaptureAndRun, which uses MethodInfo.Invoke. The delta
+    /// includes ~100 ns of MethodInfo.Invoke overhead; it represents an upper bound
+    /// on CPEC overhead via the reflection-access path, not the isolated culture-
+    /// preservation cost.
     /// </summary>
     [Benchmark(Description = "negative-control: raw ExecutionContext.Run (no culture preservation)")]
     public void RawExecutionContextRun()

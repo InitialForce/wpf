@@ -17,6 +17,8 @@
       "cpu_pct_total": 2.28,
       "bdn_filter": null,
       "needs_benchmark": true,
+      "benchmark_status": "skipped-is-message-loop",
+      "skip_reference": "see bench-notes/bench-skipped.tsv: Dispatcher.PushFrameImpl(DispatcherFrame)",
       "scenarios": [
         "startup"
       ],
@@ -32,6 +34,9 @@
       "cpu_pct_total": 2.28,
       "bdn_filter": null,
       "needs_benchmark": true,
+      "benchmark_status": "proxy-only",
+      "skip_reference": "see bench-notes/bench-skipped.tsv: Application.RunDispatcher(object)",
+      "benchmark_class": "WindowLifecycleBenchmark",
       "scenarios": [
         "startup"
       ],
@@ -47,6 +52,9 @@
       "cpu_pct_total": 2.28,
       "bdn_filter": null,
       "needs_benchmark": true,
+      "benchmark_status": "proxy-only",
+      "skip_reference": "see bench-notes/bench-skipped.tsv: Application.RunInternal(Window)",
+      "benchmark_class": "WindowLifecycleBenchmark",
       "scenarios": [
         "startup"
       ],
@@ -62,6 +70,9 @@
       "cpu_pct_total": 2.28,
       "bdn_filter": null,
       "needs_benchmark": true,
+      "benchmark_status": "proxy-only",
+      "skip_reference": "see bench-notes/bench-skipped.tsv: Application.Run(Window)",
+      "benchmark_class": "WindowLifecycleBenchmark",
       "scenarios": [
         "startup"
       ],
@@ -77,6 +88,9 @@
       "cpu_pct_total": 2.27,
       "bdn_filter": null,
       "needs_benchmark": true,
+      "benchmark_status": "proxy-only",
+      "skip_reference": "see bench-notes/bench-skipped.tsv: Application.Run()",
+      "benchmark_class": "WindowLifecycleBenchmark",
       "scenarios": [
         "startup"
       ],
@@ -92,6 +106,8 @@
       "cpu_pct_total": 1.89,
       "bdn_filter": null,
       "needs_benchmark": true,
+      "benchmark_status": "not-yet-scheduled",
+      "skip_reference": "not assigned to a cluster in B3-B5; private Win32 GetMessage wrapper inside PushFrameImpl loop",
       "scenarios": [
         "startup"
       ],
@@ -105,8 +121,9 @@
       "method": "WindowsBase!MS.Win32.HwndWrapper.WndProc(int,int32,int,int,bool&)",
       "samples": 9601.05,
       "cpu_pct_total": 0.66,
-      "bdn_filter": null,
-      "needs_benchmark": true,
+      "bdn_filter": "*HwndWin32*",
+      "needs_benchmark": false,
+      "benchmark_class": "HwndWin32Benchmark",
       "scenarios": [
         "startup"
       ],
@@ -120,8 +137,9 @@
       "method": "WindowsBase!System.Windows.Threading.ExceptionWrapper.InternalRealCall(class System.Delegate,class System.Object,int32)",
       "samples": 9596.36,
       "cpu_pct_total": 0.65,
-      "bdn_filter": null,
-      "needs_benchmark": true,
+      "bdn_filter": "*ExceptionWrapper*",
+      "needs_benchmark": false,
+      "benchmark_class": "ExceptionWrapperBenchmark",
       "scenarios": [
         "startup"
       ],
@@ -135,8 +153,9 @@
       "method": "WindowsBase!System.Windows.Threading.ExceptionWrapper.TryCatchWhen(class System.Object,class System.Delegate,class System.Object,int32,class System.Delegate)",
       "samples": 9585.78,
       "cpu_pct_total": 0.65,
-      "bdn_filter": null,
-      "needs_benchmark": true,
+      "bdn_filter": "*ExceptionWrapper*",
+      "needs_benchmark": false,
+      "benchmark_class": "ExceptionWrapperBenchmark",
       "scenarios": [
         "startup"
       ],
@@ -150,8 +169,9 @@
       "method": "WindowsBase!MS.Win32.HwndSubclass.SubclassWndProc(int,int32,int,int)",
       "samples": 9565.16,
       "cpu_pct_total": 0.65,
-      "bdn_filter": null,
-      "needs_benchmark": true,
+      "bdn_filter": "*HwndWin32*",
+      "needs_benchmark": false,
+      "benchmark_class": "HwndWin32Benchmark",
       "scenarios": [
         "startup"
       ],
@@ -167,6 +187,8 @@
       "cpu_pct_total": 0.65,
       "bdn_filter": null,
       "needs_benchmark": true,
+      "benchmark_status": "needs-pump",
+      "skip_reference": "see bench-notes/bench-skipped.tsv: Dispatcher.ProcessQueue()",
       "scenarios": [
         "startup"
       ],
@@ -182,6 +204,9 @@
       "cpu_pct_total": 0.64,
       "bdn_filter": null,
       "needs_benchmark": true,
+      "benchmark_status": "high-cv",
+      "skip_reference": "see bench-notes/bench-skipped.tsv: DispatcherOperationInvokeBenchmark.DispatcherOperationInvoke",
+      "benchmark_class": "DispatcherOperationInvokeBenchmark",
       "scenarios": [
         "startup"
       ],
@@ -195,8 +220,9 @@
       "method": "WindowsBase!MS.Internal.CulturePreservingExecutionContext.CallbackWrapper(class System.Object)",
       "samples": 9379.27,
       "cpu_pct_total": 0.64,
-      "bdn_filter": null,
-      "needs_benchmark": true,
+      "bdn_filter": "*CultureContext*",
+      "needs_benchmark": false,
+      "benchmark_class": "CultureContextBenchmark",
       "scenarios": [
         "startup"
       ],
@@ -212,6 +238,9 @@
       "cpu_pct_total": 0.64,
       "bdn_filter": null,
       "needs_benchmark": true,
+      "benchmark_status": "high-cv",
+      "skip_reference": "see bench-notes/bench-skipped.tsv: DispatcherOperationInvokeBenchmark.DispatcherOperationInvoke",
+      "benchmark_class": "DispatcherOperationInvokeBenchmark",
       "scenarios": [
         "startup"
       ],
@@ -225,8 +254,9 @@
       "method": "WindowsBase!System.Windows.Threading.Dispatcher.Invoke(class System.Action)",
       "samples": 7807.2,
       "cpu_pct_total": 0.53,
-      "bdn_filter": null,
-      "needs_benchmark": true,
+      "bdn_filter": "*DispatcherInvokeAction*",
+      "needs_benchmark": false,
+      "benchmark_class": "DispatcherInvokeActionBenchmark",
       "scenarios": [
         "startup"
       ],
@@ -240,8 +270,9 @@
       "method": "WindowsBase!System.Windows.Threading.Dispatcher.Invoke(class System.Action,value class System.Windows.Threading.DispatcherPriority,value class System.Threading.CancellationToken,value class System.TimeSpan)",
       "samples": 7807.2,
       "cpu_pct_total": 0.53,
-      "bdn_filter": null,
-      "needs_benchmark": true,
+      "bdn_filter": "*DispatcherInvokeAction*",
+      "needs_benchmark": false,
+      "benchmark_class": "DispatcherInvokeActionBenchmark",
       "scenarios": [
         "startup"
       ],
@@ -257,6 +288,8 @@
       "cpu_pct_total": 0.53,
       "bdn_filter": null,
       "needs_benchmark": true,
+      "benchmark_status": "needs-pump",
+      "skip_reference": "see bench-notes/bench-skipped.tsv: Dispatcher.InvokeImpl(DispatcherOperation,CancellationToken,TimeSpan)",
       "scenarios": [
         "startup"
       ],
@@ -272,6 +305,8 @@
       "cpu_pct_total": 0.53,
       "bdn_filter": null,
       "needs_benchmark": true,
+      "benchmark_status": "needs-pump",
+      "skip_reference": "see bench-notes/bench-skipped.tsv: DispatcherOperation.Wait()",
       "scenarios": [
         "startup"
       ],
@@ -287,6 +322,8 @@
       "cpu_pct_total": 0.53,
       "bdn_filter": null,
       "needs_benchmark": true,
+      "benchmark_status": "needs-pump",
+      "skip_reference": "see bench-notes/bench-skipped.tsv: DispatcherOperation.Wait(TimeSpan)",
       "scenarios": [
         "startup"
       ],
@@ -302,6 +339,8 @@
       "cpu_pct_total": 0.53,
       "bdn_filter": null,
       "needs_benchmark": true,
+      "benchmark_status": "needs-pump",
+      "skip_reference": "see bench-notes/bench-skipped.tsv: DispatcherOperation+DispatcherOperationEvent.WaitOne()",
       "scenarios": [
         "startup"
       ],
@@ -315,8 +354,9 @@
       "method": "PresentationFramework!System.Windows.Window.ShowHelper(class System.Object)",
       "samples": 6568.56,
       "cpu_pct_total": 0.45,
-      "bdn_filter": null,
-      "needs_benchmark": true,
+      "bdn_filter": "*WindowLifecycle*",
+      "needs_benchmark": false,
+      "benchmark_class": "WindowLifecycleBenchmark",
       "scenarios": [
         "startup"
       ],
@@ -330,8 +370,9 @@
       "method": "PresentationFramework!System.Windows.Window.Show()",
       "samples": 6557.74,
       "cpu_pct_total": 0.45,
-      "bdn_filter": null,
-      "needs_benchmark": true,
+      "bdn_filter": "*WindowLifecycle*",
+      "needs_benchmark": false,
+      "benchmark_class": "WindowLifecycleBenchmark",
       "scenarios": [
         "startup"
       ],
@@ -347,6 +388,8 @@
       "cpu_pct_total": 0.44,
       "bdn_filter": null,
       "needs_benchmark": true,
+      "benchmark_status": "not-yet-scheduled",
+      "skip_reference": "not assigned to a cluster in B3-B5; private method in DispatcherOperation.Invoke() call chain",
       "scenarios": [
         "startup"
       ],
@@ -362,6 +405,9 @@
       "cpu_pct_total": 0.37,
       "bdn_filter": null,
       "needs_benchmark": true,
+      "benchmark_status": "high-cv",
+      "skip_reference": "see bench-notes/bench-skipped.tsv: Window.ShowDialog()",
+      "benchmark_class": "WindowLifecycleBenchmark",
       "scenarios": [
         "startup"
       ],
@@ -377,6 +423,8 @@
       "cpu_pct_total": 0.2,
       "bdn_filter": null,
       "needs_benchmark": true,
+      "benchmark_status": "not-yet-scheduled",
+      "skip_reference": "not assigned to a cluster in B3-B5; private callback in HwndSubclass message-dispatch path",
       "scenarios": [
         "startup"
       ],
@@ -392,6 +440,8 @@
       "cpu_pct_total": 0.2,
       "bdn_filter": null,
       "needs_benchmark": true,
+      "benchmark_status": "not-yet-scheduled",
+      "skip_reference": "not assigned to a cluster in B3-B5; legacy Delegate-based Dispatcher.Invoke overload path",
       "scenarios": [
         "startup"
       ],
@@ -407,6 +457,8 @@
       "cpu_pct_total": 0.2,
       "bdn_filter": null,
       "needs_benchmark": true,
+      "benchmark_status": "not-yet-scheduled",
+      "skip_reference": "not assigned to a cluster in B3-B5; internal Dispatcher.WrappedInvoke called by LegacyInvokeImpl",
       "scenarios": [
         "startup"
       ],
@@ -422,6 +474,8 @@
       "cpu_pct_total": 0.2,
       "bdn_filter": null,
       "needs_benchmark": true,
+      "benchmark_status": "not-yet-scheduled",
+      "skip_reference": "not assigned to a cluster in B3-B5; Dispatcher WndProc hook inside HwndWrapper message loop",
       "scenarios": [
         "startup"
       ],
@@ -437,6 +491,8 @@
       "cpu_pct_total": 0.2,
       "bdn_filter": null,
       "needs_benchmark": true,
+      "benchmark_status": "not-yet-scheduled",
+      "skip_reference": "not assigned to a cluster in B3-B5; P/Invoke wrapper for Win32 GetMessage inside PushFrameImpl",
       "scenarios": [
         "startup"
       ],
@@ -450,8 +506,9 @@
       "method": "WindowsBase!MS.Internal.CulturePreservingExecutionContext.Run(class MS.Internal.CulturePreservingExecutionContext,class System.Threading.ContextCallback,class System.Object)",
       "samples": 2870.1,
       "cpu_pct_total": 0.2,
-      "bdn_filter": null,
-      "needs_benchmark": true,
+      "bdn_filter": "*CultureContext*",
+      "needs_benchmark": false,
+      "benchmark_class": "CultureContextBenchmark",
       "scenarios": [
         "startup"
       ],

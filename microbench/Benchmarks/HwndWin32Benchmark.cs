@@ -107,6 +107,11 @@ public class HwndWin32Benchmark : IDisposable
     /// <summary>
     /// Hot path: SendMessage to HwndWrapper with 1 registered hook.
     /// Exercises HwndWrapper.WndProc fast path (1-hook WeakReferenceList iteration).
+    ///
+    /// Note: 87µs/op is cross-thread SendMessage round-trip cost (BDN thread to STA pump);
+    /// it is NOT intra-thread hook-dispatch cost. The hook-dispatch delta is visible via the
+    /// WndProc1Hook vs WndProc4Hooks comparison (pending WndProc4Hooks stabilization).
+    /// See bench-skipped.tsv entry for WndProc4Hooks.
     /// </summary>
     [Benchmark(Description = "HwndWrapper.WndProc — 1 hook (fast path)")]
     public IntPtr WndProc1Hook()

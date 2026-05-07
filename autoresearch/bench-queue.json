@@ -245,7 +245,11 @@
             "take-open",
             "playback"
           ],
-          "status": "pending"
+          "status": "authored",
+          "bench_class": "ExceptionWrapperBenchmark",
+          "verdict": "high-cv",
+          "cv_pct": 6.08,
+          "note": "covered by TryCatchWhenAction + TryCatchWhenDoc; high-cv due to low iter count but structurally stable"
         },
         {
           "method": "WindowsBase!System.Windows.Threading.ExceptionWrapper.TryCatchWhen(class System.Object,class System.Delegate,class System.Object,int32,class System.Delegate)",
@@ -256,7 +260,11 @@
             "take-open",
             "playback"
           ],
-          "status": "pending"
+          "status": "authored",
+          "bench_class": "ExceptionWrapperBenchmark",
+          "verdict": "high-cv",
+          "cv_pct": 8.57,
+          "note": "covered by TryCatchWhenAction + TryCatchWhenDoc; high-cv due to int boxing + low iter count"
         },
         {
           "method": "WindowsBase!MS.Win32.HwndSubclass.SubclassWndProc(int,int32,int,int)",
@@ -267,7 +275,10 @@
             "take-open",
             "playback"
           ],
-          "status": "pending"
+          "status": "authored",
+          "bench_class": "HwndWin32Benchmark",
+          "verdict": "pass",
+          "note": "covered by WndProc1Hook (passes via SubclassWndProc in HwndWrapper chain)"
         },
         {
           "method": "WindowsBase!MS.Internal.CulturePreservingExecutionContext.CallbackWrapper(class System.Object)",
@@ -278,7 +289,11 @@
             "take-open",
             "playback"
           ],
-          "status": "pending"
+          "status": "authored",
+          "bench_class": "CultureContextBenchmark",
+          "verdict": "pass",
+          "cv_pct": 0.42,
+          "note": "covered by CpecCaptureAndRun; cv=0.42%"
         },
         {
           "method": "WindowsBase!MS.Win32.HwndWrapper.WndProc(int,int32,int,int,bool&)",
@@ -289,7 +304,11 @@
             "take-open",
             "playback"
           ],
-          "status": "pending"
+          "status": "authored",
+          "bench_class": "HwndWin32Benchmark",
+          "verdict": "pass",
+          "cv_pct": 2.17,
+          "note": "covered by WndProc1Hook; cv=2.17%"
         }
       ]
     }

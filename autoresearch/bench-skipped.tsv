@@ -1,5 +1,5 @@
 method	reason	skip_date	retry_after
-HwndWin32Benchmark.WndProc4Hooks	cv=46.4% bimodal (STA pump shutdown mid-run; 23us+87us clusters)	2026-05-07	stabilize STA pump lifecycle
+HwndWin32Benchmark.WndProc4Hooks	cv=46.4% bimodal (STA pump shutdown mid-run; 23us+87us clusters)	2026-05-07	post WM_QUIT to pump and wait for drain before next benchmark class (replace _staRunning=false+PostMessage with synchronous drain)
 DispatcherOperationInvokeBenchmark.DispatcherOperationInvoke	cv=59.2% bimodal (reflection ctor + GC pressure; Gen0 GC pauses mid-batch; proxy-only entry)	2026-05-07	add InternalsVisibleTo("Microbenchmarks") to WindowsBase; pre-allocate ops in GlobalSetup
 Dispatcher.InvokeImpl(DispatcherOperation,CancellationToken,TimeSpan)	needs-pump: private method; mandatory Dispatcher queue drain via pump	2026-05-07	never (Option C)
 DispatcherOperation.Wait()	needs-pump: cross-thread wait on ManualResetEvent; requires pump to drain and signal	2026-05-07	never (Option C)

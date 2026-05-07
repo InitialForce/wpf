@@ -271,8 +271,10 @@ public class WindowLifecycleBenchmark : IDisposable
     {
         var d = WpfStaHost.Dispatcher;
 
-        // Create a fresh minimal window for this iteration — ShowDialog requires a non-visible,
-        // non-modal window. Re-creation cost is intentional; window setup is startup-once in prod.
+        // Note: ShowDialog window is freshly allocated per iteration by design — a single instance
+        // cannot be reused for ShowDialog because ShowDialog may not be called on an already-visible
+        // or already-closed window (WPF throws InvalidOperationException in both cases).
+        // The per-iteration Window construction cost (~35KB alloc/op) is structural, not accidental.
         var dlg = MakeMinimalWindow();
 
         // Pre-enqueue the close BEFORE ShowDialog blocks the nested pump. The BeginInvoke at Send

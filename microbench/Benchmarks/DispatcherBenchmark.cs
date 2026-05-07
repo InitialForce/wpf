@@ -47,13 +47,16 @@ public class DispatcherInvokeActionBenchmark : IDisposable
 
     private Action[] _actions = Array.Empty<Action>();
     private int _index;
+    private IntPtr _originalAffinity;
 
     [GlobalSetup]
     public void Setup()
     {
-        // Pin to a single logical core to minimize OS scheduler variance
-        // (same pattern as Gate 3 retry recommendation in bench-author-prompt.md)
-        System.Diagnostics.Process.GetCurrentProcess().ProcessorAffinity = new IntPtr(1);
+        // Save and pin to a single logical core to minimize OS scheduler variance.
+        // Restored in GlobalCleanup so subsequent benchmark classes don't inherit core-0 pinning.
+        var proc = System.Diagnostics.Process.GetCurrentProcess();
+        _originalAffinity = proc.ProcessorAffinity;
+        proc.ProcessorAffinity = new IntPtr(1);
 
         var rng = new Random(42);
         _actions = new Action[CorpusSize];
@@ -85,6 +88,9 @@ public class DispatcherInvokeActionBenchmark : IDisposable
     public void Cleanup()
     {
         Dispose();
+        // Restore original ProcessorAffinity so subsequent benchmark classes don't inherit core-0 pinning.
+        if (_originalAffinity != IntPtr.Zero)
+            System.Diagnostics.Process.GetCurrentProcess().ProcessorAffinity = _originalAffinity;
     }
 
     public void Dispose()
@@ -271,6 +277,7 @@ public class DispatcherOperationInvokeBenchmark : IDisposable
 
     private Action[] _actions = Array.Empty<Action>();
     private int _index;
+    private IntPtr _originalAffinity;
 
     // Reflection handles — cached once in GlobalSetup
     private ConstructorInfo? _opCtor;   // DispatcherOperation(Dispatcher, DispatcherPriority, Action)
@@ -280,8 +287,11 @@ public class DispatcherOperationInvokeBenchmark : IDisposable
     [GlobalSetup]
     public void Setup()
     {
-        // Pin to a single logical core to minimize OS scheduler variance
-        System.Diagnostics.Process.GetCurrentProcess().ProcessorAffinity = new IntPtr(1);
+        // Save and pin to a single logical core to minimize OS scheduler variance.
+        // Restored in GlobalCleanup so subsequent benchmark classes don't inherit core-0 pinning.
+        var proc = System.Diagnostics.Process.GetCurrentProcess();
+        _originalAffinity = proc.ProcessorAffinity;
+        proc.ProcessorAffinity = new IntPtr(1);
 
         var rng = new Random(42);
         _actions = new Action[CorpusSize];
@@ -342,6 +352,9 @@ public class DispatcherOperationInvokeBenchmark : IDisposable
     public void Cleanup()
     {
         Dispose();
+        // Restore original ProcessorAffinity so subsequent benchmark classes don't inherit core-0 pinning.
+        if (_originalAffinity != IntPtr.Zero)
+            System.Diagnostics.Process.GetCurrentProcess().ProcessorAffinity = _originalAffinity;
     }
 
     public void Dispose()
