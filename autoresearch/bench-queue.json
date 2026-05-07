@@ -1,0 +1,261 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-05-07T00:00:00Z",
+  "source_profile": "autoresearch/profile.json",
+  "source_profile_entries": 20,
+  "clusters": [
+    {
+      "slug": "dispatcher",
+      "description": "Dispatcher.Invoke / Wait / PushFrame / ProcessQueue / DispatcherOperation.Invoke \u2014 require Win32 message pump",
+      "feasibility_default": "needs-pump",
+      "entries": [
+        {
+          "method": "WindowsBase!System.Windows.Threading.Dispatcher.PushFrameImpl(class System.Windows.Threading.DispatcherFrame)",
+          "cpu_pct_total": 2.2,
+          "alloc_pct_total": 0.0,
+          "scenarios": [
+            "startup",
+            "take-open",
+            "playback"
+          ],
+          "status": "pending"
+        },
+        {
+          "method": "WindowsBase!System.Windows.Threading.DispatcherOperation.Wait()",
+          "cpu_pct_total": 2.11,
+          "alloc_pct_total": 0.0,
+          "scenarios": [
+            "startup",
+            "take-open",
+            "playback"
+          ],
+          "status": "pending"
+        },
+        {
+          "method": "WindowsBase!System.Windows.Threading.DispatcherOperation+DispatcherOperationEvent.WaitOne()",
+          "cpu_pct_total": 2.11,
+          "alloc_pct_total": 0.0,
+          "scenarios": [
+            "startup",
+            "take-open",
+            "playback"
+          ],
+          "status": "pending"
+        },
+        {
+          "method": "WindowsBase!System.Windows.Threading.DispatcherOperation.Wait(value class System.TimeSpan)",
+          "cpu_pct_total": 2.11,
+          "alloc_pct_total": 0.0,
+          "scenarios": [
+            "startup",
+            "take-open",
+            "playback"
+          ],
+          "status": "pending"
+        },
+        {
+          "method": "WindowsBase!System.Windows.Threading.Dispatcher.InvokeImpl(class System.Windows.Threading.DispatcherOperation,value class System.Threading.CancellationToken,value class System.TimeSpan)",
+          "cpu_pct_total": 2.11,
+          "alloc_pct_total": 0.0,
+          "scenarios": [
+            "startup",
+            "take-open",
+            "playback"
+          ],
+          "status": "pending"
+        },
+        {
+          "method": "WindowsBase!System.Windows.Threading.DispatcherOperation.Invoke()",
+          "cpu_pct_total": 2.09,
+          "alloc_pct_total": 0.0,
+          "scenarios": [
+            "startup",
+            "take-open",
+            "playback"
+          ],
+          "status": "pending"
+        },
+        {
+          "method": "WindowsBase!System.Windows.Threading.Dispatcher.ProcessQueue()",
+          "cpu_pct_total": 2.09,
+          "alloc_pct_total": 0.0,
+          "scenarios": [
+            "startup",
+            "take-open",
+            "playback"
+          ],
+          "status": "pending"
+        },
+        {
+          "method": "WindowsBase!System.Windows.Threading.DispatcherOperation.InvokeImpl()",
+          "cpu_pct_total": 2.09,
+          "alloc_pct_total": 0.0,
+          "scenarios": [
+            "startup",
+            "take-open",
+            "playback"
+          ],
+          "status": "pending"
+        },
+        {
+          "method": "WindowsBase!System.Windows.Threading.Dispatcher.Invoke(class System.Action)",
+          "cpu_pct_total": 2.09,
+          "alloc_pct_total": 0.0,
+          "scenarios": [
+            "startup",
+            "take-open",
+            "playback"
+          ],
+          "status": "pending"
+        },
+        {
+          "method": "WindowsBase!System.Windows.Threading.Dispatcher.Invoke(class System.Action,value class System.Windows.Threading.DispatcherPriority,value class System.Threading.CancellationToken,value class System.TimeSpan)",
+          "cpu_pct_total": 2.09,
+          "alloc_pct_total": 0.0,
+          "scenarios": [
+            "startup",
+            "take-open",
+            "playback"
+          ],
+          "status": "pending"
+        }
+      ]
+    },
+    {
+      "slug": "window-app",
+      "description": "Application.Run / RunDispatcher / RunInternal / Window.ShowDialog \u2014 block until message loop exits",
+      "feasibility_default": "needs-pump",
+      "entries": [
+        {
+          "method": "PresentationFramework!System.Windows.Application.RunDispatcher(class System.Object)",
+          "cpu_pct_total": 2.2,
+          "alloc_pct_total": 0.0,
+          "scenarios": [
+            "startup",
+            "take-open",
+            "playback"
+          ],
+          "status": "pending"
+        },
+        {
+          "method": "PresentationFramework!System.Windows.Application.Run(class System.Windows.Window)",
+          "cpu_pct_total": 2.19,
+          "alloc_pct_total": 0.0,
+          "scenarios": [
+            "startup",
+            "take-open",
+            "playback"
+          ],
+          "status": "pending"
+        },
+        {
+          "method": "PresentationFramework!System.Windows.Application.RunInternal(class System.Windows.Window)",
+          "cpu_pct_total": 2.19,
+          "alloc_pct_total": 0.0,
+          "scenarios": [
+            "startup",
+            "take-open",
+            "playback"
+          ],
+          "status": "pending"
+        },
+        {
+          "method": "PresentationFramework!System.Windows.Application.Run()",
+          "cpu_pct_total": 2.18,
+          "alloc_pct_total": 0.0,
+          "scenarios": [
+            "startup",
+            "take-open",
+            "playback"
+          ],
+          "status": "pending"
+        },
+        {
+          "method": "PresentationFramework!System.Windows.Window.ShowDialog()",
+          "cpu_pct_total": 2.09,
+          "alloc_pct_total": 0.0,
+          "scenarios": [
+            "startup",
+            "take-open",
+            "playback"
+          ],
+          "status": "pending"
+        }
+      ]
+    },
+    {
+      "slug": "layout",
+      "description": "ContextLayoutManager / UpdateLayout / LayoutCallback / MeasureCore / ArrangeCore \u2014 visual tree traversal",
+      "feasibility_default": "runnable",
+      "entries": []
+    },
+    {
+      "slug": "media",
+      "description": "MediaContext / RenderMessageHandler / DrawingContext \u2014 compositor thread, throughput proxy only",
+      "feasibility_default": "proxy-only",
+      "entries": []
+    },
+    {
+      "slug": "misc",
+      "description": "Win32 wrappers + execution context (ExceptionWrapper, CulturePreservingExecutionContext, HwndSubclass, HwndWrapper)",
+      "feasibility_default": "runnable",
+      "entries": [
+        {
+          "method": "WindowsBase!System.Windows.Threading.ExceptionWrapper.InternalRealCall(class System.Delegate,class System.Object,int32)",
+          "cpu_pct_total": 2.09,
+          "alloc_pct_total": 0.0,
+          "scenarios": [
+            "startup",
+            "take-open",
+            "playback"
+          ],
+          "status": "pending"
+        },
+        {
+          "method": "WindowsBase!System.Windows.Threading.ExceptionWrapper.TryCatchWhen(class System.Object,class System.Delegate,class System.Object,int32,class System.Delegate)",
+          "cpu_pct_total": 2.09,
+          "alloc_pct_total": 0.0,
+          "scenarios": [
+            "startup",
+            "take-open",
+            "playback"
+          ],
+          "status": "pending"
+        },
+        {
+          "method": "WindowsBase!MS.Win32.HwndSubclass.SubclassWndProc(int,int32,int,int)",
+          "cpu_pct_total": 2.09,
+          "alloc_pct_total": 0.0,
+          "scenarios": [
+            "startup",
+            "take-open",
+            "playback"
+          ],
+          "status": "pending"
+        },
+        {
+          "method": "WindowsBase!MS.Internal.CulturePreservingExecutionContext.CallbackWrapper(class System.Object)",
+          "cpu_pct_total": 2.09,
+          "alloc_pct_total": 0.0,
+          "scenarios": [
+            "startup",
+            "take-open",
+            "playback"
+          ],
+          "status": "pending"
+        },
+        {
+          "method": "WindowsBase!MS.Win32.HwndWrapper.WndProc(int,int32,int,int,bool&)",
+          "cpu_pct_total": 2.09,
+          "alloc_pct_total": 0.0,
+          "scenarios": [
+            "startup",
+            "take-open",
+            "playback"
+          ],
+          "status": "pending"
+        }
+      ]
+    }
+  ]
+}
