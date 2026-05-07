@@ -359,80 +359,68 @@ namespace MS.Internal.Markup
             bool simple = true;
             int start = _curIndex;
 
+            //
+            // Allow for a sign
+            //
+            // There are numbers that cannot be preceded with a sign, for instance, -NaN, but it's
+            // fine to ignore that at this point, since the CLR parser will catch this later.
+            //
             // IsNumber already loaded _pathString[_curIndex] into _token and proved we're in
             // bounds, so reuse it instead of re-doing More() + two string indexer fetches.
             char first = _token;
-
-            // Hoist string ref, length, and cursor to locals so the JIT keeps them
-            // stable across the digit / period / exponent walk. SkipDigits is inlined
-            // at all three call sites so we avoid two _curIndex writeback+reload
-            // round-trips between the integer-digits, post-period, and post-exponent
-            // sub-walks. Single _curIndex writeback at the end.
-            string s = _pathString;
-            int end = _pathLength;
-            int i = start;
-
             if (first == '-' || first == '+')
             {
-                i++;
+                _curIndex ++;
             }
 
             // Check for Infinity (or -Infinity).
-            if (i < end && s[i] == 'I')
+            if (More() && (_pathString[_curIndex] == 'I'))
             {
+                //
                 // Don't bother reading the characters, as the CLR parser will
                 // do this for us later.
-                i = Math.Min(i + 8, end); // "Infinity" has 8 characters
+                //
+                _curIndex = Math.Min(_curIndex+8, _pathLength); // "Infinity" has 8 characters
                 simple = false;
             }
             // Check for NaN
-            else if (i < end && s[i] == 'N')
+            else if (More() && (_pathString[_curIndex] == 'N'))
             {
-                i = Math.Min(i + 3, end); // "NaN" has 3 characters
+                //
+                // Don't bother reading the characters, as the CLR parser will
+                // do this for us later.
+                //
+                _curIndex = Math.Min(_curIndex+3, _pathLength); // "NaN" has 3 characters
                 simple = false;
             }
             else
             {
-                // Inlined SkipDigits(!AllowSign): integer digits (sign already consumed)
-                while (i < end && s[i] >= '0' && s[i] <= '9')
-                {
-                    i++;
-                }
+                SkipDigits(! AllowSign);
 
                 // Optional period, followed by more digits
-                if (i < end && s[i] == '.')
+                if (More() && (_pathString[_curIndex] == '.'))
                 {
                     simple = false;
-                    i++;
-                    while (i < end && s[i] >= '0' && s[i] <= '9')
-                    {
-                        i++;
-                    }
+                    _curIndex ++;
+                    SkipDigits(! AllowSign);
                 }
 
                 // Exponent
-                if (i < end && (s[i] == 'E' || s[i] == 'e'))
+                if (More() && ((_pathString[_curIndex] == 'E') || (_pathString[_curIndex] == 'e')))
                 {
                     simple = false;
-                    i++;
-                    // Inlined SkipDigits(AllowSign): exponent may carry +/-
-                    if (i < end && (s[i] == '-' || s[i] == '+'))
-                    {
-                        i++;
-                    }
-                    while (i < end && s[i] >= '0' && s[i] <= '9')
-                    {
-                        i++;
-                    }
+                    _curIndex ++;
+                    SkipDigits(AllowSign);
                 }
             }
 
-            _curIndex = i;
-
-            if (simple && (i <= (start + 8))) // 32-bit integer
+            if (simple && (_curIndex <= (start + 8))) // 32-bit integer
             {
-                // s and i are still in scope from the digit walk above; reuse them
-                // instead of reloading _pathString and _curIndex.
+                // Hoist _pathString to a local so the JIT proves the ref is
+                // stable across the loop and folds away per-iteration field
+                // loads + null-checks on the string indexer.
+                string s = _pathString;
+                int end = _curIndex;
                 int sign = 1;
 
                 if (s[start] == '+')
@@ -447,7 +435,7 @@ namespace MS.Internal.Markup
 
                 int value = 0;
 
-                while (start < i)
+                while (start < end)
                 {
                     value = value * 10 + (s[start] - '0');
                     start ++;
