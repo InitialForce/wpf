@@ -418,38 +418,30 @@ namespace MS.Internal.Markup
             {
                 // Hoist _pathString to a local so the JIT proves the ref is
                 // stable across the loop and folds away per-iteration field
-                // loads + null-checks on the string indexer. Split sign by
-                // path so the dominant unsigned branch returns `value`
-                // directly (no per-call `* sign` imul).
+                // loads + null-checks on the string indexer.
                 string s = _pathString;
                 int end = _curIndex;
-                char first = s[start];
+                int sign = 1;
 
-                if (first == '-')
+                if (s[start] == '+')
                 {
                     start ++;
-                    int neg = 0;
-                    while (start < end)
-                    {
-                        neg = neg * 10 + (s[start] - '0');
-                        start ++;
-                    }
-                    return -neg;
                 }
-
-                if (first == '+')
+                else if (s[start] == '-')
                 {
                     start ++;
+                    sign = -1;
                 }
 
                 int value = 0;
+
                 while (start < end)
                 {
                     value = value * 10 + (s[start] - '0');
                     start ++;
                 }
 
-                return value;
+                return value * sign;
             }
             else
             {
