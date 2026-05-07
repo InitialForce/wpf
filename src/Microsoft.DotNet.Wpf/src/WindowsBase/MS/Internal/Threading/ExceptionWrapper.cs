@@ -36,93 +36,79 @@ namespace System.Windows.Threading
 
         private object InternalRealCall(Delegate callback, object args, int numArgs)
         {
+            object result = null;
+
             Debug.Assert(numArgs == 0 || // old API, no args
                          numArgs == 1 || // old API, 1 arg, the args param is it
                          numArgs == -1); // new API, any number of args, the args param is an array of them
 
-            // Hot paths: skip the variadic (-1) unpack and intermediate locals
-            // when numArgs is the common 0 or 1 case from the dispatcher loop.
-            if (numArgs == 0)
-            {
-                if (callback is Action action)
-                {
-                    action();
-                    return null;
-                }
-                if (callback is Dispatcher.ShutdownCallback shutdownCallback)
-                {
-                    shutdownCallback();
-                    return null;
-                }
-                return callback.DynamicInvoke();
-            }
-
-            if (numArgs == 1)
-            {
-                if (callback is DispatcherOperationCallback dispatcherOperationCallback)
-                {
-                    return dispatcherOperationCallback(args);
-                }
-                if (callback is SendOrPostCallback sendOrPostCallback)
-                {
-                    sendOrPostCallback(args);
-                    return null;
-                }
-                // By pass the args parameter as a single object,
-                // DynamicInvoke will wrap it in an object[] due to the
-                // params keyword.
-                return callback.DynamicInvoke(args);
-            }
-
-            // numArgs == -1: variadic — args is an object[] which may collapse
-            // to the 0-arg or 1-arg fast path after unpacking.
-            object result = null;
+            // Support the fast-path for certain 0-param and 1-param delegates, even
+            // of an arbitrary "params object[]" is passed.
             int numArgsEx = numArgs;
             object singleArg = args;
+            if(numArgs == -1)
             {
                 object[] argsArr = (object[])args;
                 if (argsArr == null || argsArr.Length == 0)
                 {
                     numArgsEx = 0;
                 }
-                else if (argsArr.Length == 1)
+                else if(argsArr.Length == 1)
                 {
                     numArgsEx = 1;
                     singleArg = argsArr[0];
                 }
             }
 
-            if (numArgsEx == 0)
+            // Special-case delegates that we know about to avoid the
+            // expensive DynamicInvoke call.
+            if(numArgsEx == 0)
             {
                 if (callback is Action action)
                 {
                     action();
                 }
-                else if (callback is Dispatcher.ShutdownCallback shutdownCallback)
-                {
-                    shutdownCallback();
-                }
                 else
                 {
-                    // The delegate could return anything.
-                    result = callback.DynamicInvoke();
+                    if (callback is Dispatcher.ShutdownCallback shutdownCallback)
+                    {
+                        shutdownCallback();
+                    }
+                    else
+                    {
+                        // The delegate could return anything.
+                        result = callback.DynamicInvoke();
+                    }
                 }
             }
-            else if (numArgsEx == 1)
+            else if(numArgsEx == 1)
             {
                 if (callback is DispatcherOperationCallback dispatcherOperationCallback)
                 {
                     result = dispatcherOperationCallback(singleArg);
                 }
-                else if (callback is SendOrPostCallback sendOrPostCallback)
-                {
-                    sendOrPostCallback(singleArg);
-                }
                 else
                 {
-                    // Explicitly pass an object[] to DynamicInvoke so that
-                    // it will not try to wrap the arg in another object[].
-                    result = callback.DynamicInvoke((object[])args);
+                    if (callback is SendOrPostCallback sendOrPostCallback)
+                    {
+                        sendOrPostCallback(singleArg);
+                    }
+                    else
+                    {
+                        if (numArgs == -1)
+                        {
+                            // Explicitly pass an object[] to DynamicInvoke so that
+                            // it will not try to wrap the arg in another object[].
+                            result = callback.DynamicInvoke((object[])args);
+                        }
+                        else
+                        {
+                            // By pass the args parameter as a single object,
+                            // DynamicInvoke will wrap it in an object[] due to the
+                            // params keyword.
+                            result = callback.DynamicInvoke(args);
+                        }
+                    }
                 }
             }
             else
