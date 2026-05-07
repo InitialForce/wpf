@@ -548,26 +548,25 @@ namespace MS.Internal.Markup
             _lastStart       = new Point(0, 0);
             
             _figureStarted = false;
-
+            
+            bool  first = true;
+            
             char last_cmd = ' ';
 
-            // Path must start with M|m. Hoist the first-iteration check out
-            // of the outer while-loop so the steady-state per-command path
-            // skips a redundant load-compare-branch on `first`.
-            if (!ReadToken()) // Empty path is allowed in XAML
-            {
-                return;
-            }
-
-            if ((_token != 'M') && (_token != 'm'))
-            {
-                ThrowBadToken();
-            }
-
-            do
+            while (ReadToken()) // Empty path is allowed in XAML
             {
                 char cmd = _token;
 
+                if (first)
+                {
+                    if ((cmd != 'M') && (cmd != 'm'))  // Path starts with M|m
+                    {
+                        ThrowBadToken();
+                    }
+            
+                    first = false;
+                }                    
+                
                 switch (cmd)
                 {
                 case 'm': case 'M':
@@ -732,7 +731,6 @@ namespace MS.Internal.Markup
                     break;
                 }
             }
-            while (ReadToken());
         }
     }
-}
+}    
