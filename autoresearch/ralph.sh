@@ -63,9 +63,18 @@ session_connected() {
 fast_fail_count=0
 disc_wait_count=0
 
+HALT_FILE="$HERE/HALT"
+
 for ((i = 1; i <= MAX_ITERS; i++)); do
     if grep -q "<halt/>" program.md; then
         echo "[ralph] <halt/> sentinel detected in program.md — stopping"
+        break
+    fi
+    if [[ -f "$HALT_FILE" ]]; then
+        echo "[ralph] HALT sentinel present at $HALT_FILE — loop stopped."
+        echo "[ralph] Reason:"
+        sed 's/^/[ralph]   /' "$HALT_FILE"
+        echo "[ralph] Delete the HALT file to resume."
         break
     fi
     if ! session_connected; then
