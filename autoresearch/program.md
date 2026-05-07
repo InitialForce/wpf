@@ -82,17 +82,23 @@ orchestrator will author additions in a separate non-iter pass.
 
 1. **Read state.**
    - `cat /c/work/wpf-perf/autoresearch/profile.json` (the hot-path menu)
-   - `tail -20 /c/work/wpf-perf/autoresearch/results.jsonl` (recent attempts;
-     filter for `tier:"B"` rows). For each hot path, count recent
-     REJECT/REJECT-UNCLEAR — avoid retrying the same approach on the same
-     path more than 2 iters in a row.
+   - Read ALL tier-B rows: `grep '"tier":"B"' /c/work/wpf-perf/autoresearch/results.jsonl`
+     Build the **cool list**:
+       For each unique `filter`, check the last 2 tier-B rows for that filter.
+       If both are REJECT-UNCLEAR AND fewer than 5 tier-B rows total have been
+       written since the second one, the filter is on cooldown.
+       (Only REJECT-UNCLEAR counts — REJECT proper does NOT trigger cooldown.)
+     Log explicitly before picking: `Cool list: [<filter1>, <filter2>, ...]  (empty = all eligible)`
    - `git log --oneline -10` in `/c/work/wpf-perf/`.
 
-2. **Pick ONE hot path** from `profile.json`. Bias toward:
-   - High `alloc_pct_total` or `cpu_pct_total` (real impact)
-   - Few recent REJECT iters on this path (signal-to-noise budget)
-   - Has at least one matching benchmark in `microbench/Benchmarks/` (so
-     the change is testable). If unsure, run `dotnet
+2. **Pick ONE hot path** from `profile.json`. Rules (in order):
+   a. Must have a non-null `bdn_filter` (so it's testable by microbench.py).
+   b. Must NOT be on the cool list (2 consecutive REJECT-UNCLEAR → 5-iter cooldown).
+   c. Among eligible paths, prefer high `alloc_pct_total` or `cpu_pct_total`.
+   d. If ALL non-null `bdn_filter` paths are on cooldown, pick the one with the
+      longest time since its last cooldown trigger (least-recently-rejected). Log
+      that you are overriding cooldown and why.
+   - If unsure which filters are available, run `dotnet
      /c/work/wpf-perf/microbench/bin/Release/net10.0-windows/win-x64/publish/Microbenchmarks.dll --list flat`
      to enumerate available filters.
 
@@ -166,6 +172,9 @@ orchestrator will author additions in a separate non-iter pass.
 - **NEVER push to a remote.** Local-only.
 - **NEVER touch the user's MC instance** — microbench doesn't spawn MC; only
   Tier C (which you don't run) does.
+- **COOLDOWN RULE.** If a filter had 2 consecutive REJECT-UNCLEAR within the last
+  5 tier-B iterations, skip it. Build the cool list in Step 1; picking a cooled
+  filter wastes an iteration with near-zero information gain.
 - **HALT SENTINEL.** If `/c/work/wpf-perf/autoresearch/HALT` exists, stop
   immediately (see Step 0). Never delete or modify the HALT file — that is the
   orchestrator's job.
@@ -190,4 +199,9 @@ dotnet /c/work/wpf-perf/microbench/bin/Release/net10.0-windows/win-x64/publish/M
 # Run microbench (Bash tool: timeout=900000, foreground)
 cd /c/work/wpf-perf/autoresearch
 python3 microbench.py --filter '*<HotPathName>*' --bench-name '<tag>'
+
+# Inspect cool list (human diagnostic)
+cat /c/work/wpf-perf/autoresearch/cooldown.json 2>/dev/null
+# Or the human-readable view:
+python3 /c/work/wpf-perf/tools/cool-list.py
 ```
