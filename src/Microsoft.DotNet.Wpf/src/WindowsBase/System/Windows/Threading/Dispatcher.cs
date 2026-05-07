@@ -589,9 +589,7 @@ namespace System.Windows.Threading
                     {
                         if(BaseCompatibilityPreferences.GetFlowDispatcherSynchronizationContextPriority())
                         {
-                            // Fast path runs at DispatcherPriority.Send only — reuse the per-Dispatcher
-                            // cached Send-priority context to avoid an allocation per Invoke.
-                            newSynchronizationContext = _sendDispatcherSynchronizationContext;
+                            newSynchronizationContext = new DispatcherSynchronizationContext(this, priority);
                         }
                         else
                         {
@@ -733,9 +731,7 @@ namespace System.Windows.Threading
                     {
                         if(BaseCompatibilityPreferences.GetFlowDispatcherSynchronizationContextPriority())
                         {
-                            // Fast path runs at DispatcherPriority.Send only — reuse the per-Dispatcher
-                            // cached Send-priority context to avoid an allocation per Invoke.
-                            newSynchronizationContext = _sendDispatcherSynchronizationContext;
+                            newSynchronizationContext = new DispatcherSynchronizationContext(this, priority);
                         }
                         else
                         {
@@ -1291,9 +1287,7 @@ namespace System.Windows.Threading
                     {
                         if(BaseCompatibilityPreferences.GetFlowDispatcherSynchronizationContextPriority())
                         {
-                            // Fast path runs at DispatcherPriority.Send only — reuse the per-Dispatcher
-                            // cached Send-priority context to avoid an allocation per Invoke.
-                            newSynchronizationContext = _sendDispatcherSynchronizationContext;
+                            newSynchronizationContext = new DispatcherSynchronizationContext(this, priority);
                         }
                         else
                         {
@@ -1737,7 +1731,6 @@ namespace System.Windows.Threading
             _exceptionFilterEventArgs = new DispatcherUnhandledExceptionFilterEventArgs(this);
 
             _defaultDispatcherSynchronizationContext = new DispatcherSynchronizationContext(this);
-            _sendDispatcherSynchronizationContext = new DispatcherSynchronizationContext(this, DispatcherPriority.Send);
 
             // Create the message-only window we use to receive messages
             // that tell us to process the queue.
@@ -2855,12 +2848,6 @@ namespace System.Windows.Threading
         private object _reservedInputManager;
 
         internal DispatcherSynchronizationContext _defaultDispatcherSynchronizationContext;
-
-        // Per-Dispatcher cached sync context at Send priority, reused by the same-thread Send-priority
-        // Invoke fast path when ReuseDispatcherSynchronizationContextInstance=false and
-        // FlowDispatcherSynchronizationContextPriority=true (the .NET Core defaults). Avoids allocating
-        // a fresh DispatcherSynchronizationContext on every fast-path Invoke.
-        private DispatcherSynchronizationContext _sendDispatcherSynchronizationContext;
 
         internal object _instanceLock = new object(); // Also used by DispatcherOperation
         private PriorityQueue<DispatcherOperation> _queue;
