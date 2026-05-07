@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Tier A scenario profile capture.
 
-Two modes:
-  --run     Drive spike-9 with EventPipe sampling, then analyze its trace.
-  --trace   Skip spike; analyze an existing .nettrace file.
+Three modes:
+  --run        Drive spike-9 with EventPipe sampling, then analyze its trace.
+  --trace      Skip spike; analyze an existing .nettrace file.
+  --run-multi  Run all three scenario scripts (startup, take-open, playback),
+               aggregate the union of top-10 per scenario into profile.json.
 
 Output: ranked /c/work/wpf-perf/autoresearch/profile.json with the top-K
 WPF methods by CPU sample count. Allocation attribution is Phase 2.
@@ -19,9 +21,10 @@ not, the entry is marked needs_benchmark=true and the orchestrator's
 benchmark-writer pass will scaffold one.
 
 Usage:
-  python3 profile.py --run                              # full pipeline
+  python3 profile.py --run                              # full pipeline (single scenario)
   python3 profile.py --trace path/to/spike.nettrace     # analyze existing
   python3 profile.py --run --top-k 50                   # broader ranking
+  python3 profile.py --run-multi                        # union of 3 scenarios
 """
 
 from __future__ import annotations
@@ -45,8 +48,21 @@ PROFILE_JSON = ROOT / "profile.json"
 PROFILE_OUTPUT_DIR = ROOT / "profile-output"
 MICROBENCH_DIR = WPF_REPO / "microbench" / "Benchmarks"
 
+# Scenario scripts for --run-multi mode.
+SCENARIO_SCRIPTS: dict[str, Path] = {
+    "startup":   WPF_REPO / "tools" / "poc" / "scenario-startup.py",
+    "take-open": WPF_REPO / "tools" / "poc" / "scenario-take-open.py",
+    "playback":  WPF_REPO / "tools" / "poc" / "scenario-playback.py",
+}
+
 DEFAULT_TOP_K = 30
+# Number of top methods to take from each scenario for the union.
+MULTI_PER_SCENARIO_K = 10
+# Maximum total entries in the unified profile.json.
+MULTI_MAX_ENTRIES = 20
+
 SPIKE_TIMEOUT_S = int(os.environ.get("WPF_AR_PROFILE_SPIKE_TIMEOUT", "300"))
+SCENARIO_TIMEOUT_S = int(os.environ.get("WPF_AR_SCENARIO_TIMEOUT", "600"))
 CONVERT_TIMEOUT_S = 120
 
 # Methods we consider "hot path" candidates for optimization. Anything else
@@ -130,6 +146,45 @@ def run_spike() -> Path:
     if not candidates:
         raise FileNotFoundError(f"no .nettrace produced in {PROFILE_OUTPUT_DIR}")
     log(f"  captured {candidates[0].name}")
+    return candidates[0]
+
+
+# ─── Scenario runner (--run-multi) ───────────────────────────────────────────
+
+
+def run_scenario(slug: str, script_path: Path) -> Path:
+    """Run an arbitrary scenario script and return the .nettrace it produced.
+
+    Sets SCENARIO_RESULT_DIR to PROFILE_OUTPUT_DIR/<slug>/ and SCENARIO_NAME
+    to <slug>.  The scenario script must produce exactly one .nettrace in that
+    directory.  Returns path to the newest .nettrace after the script exits.
+
+    Raises RuntimeError on non-zero exit or missing output.  profile.py does
+    NOT taskkill MC — each scenario script owns its own MC PID lifecycle.
+    """
+    result_dir = PROFILE_OUTPUT_DIR / slug
+    result_dir.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["SCENARIO_RESULT_DIR"] = str(result_dir)
+    env["SCENARIO_NAME"] = slug
+    env["MC_PERF_MODE"] = "1"
+    log(f"running scenario '{slug}' → {result_dir}")
+    p = subprocess.run(
+        ["python3", str(script_path)],
+        cwd=str(WPF_REPO),
+        env=env,
+        timeout=SCENARIO_TIMEOUT_S,
+    )
+    if p.returncode != 0:
+        raise RuntimeError(f"scenario '{slug}' failed (rc={p.returncode})")
+    candidates = sorted(
+        result_dir.glob("*.nettrace"),
+        key=lambda f: f.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        raise FileNotFoundError(f"no .nettrace produced in {result_dir}")
+    log(f"  captured {candidates[0].name} ({candidates[0].stat().st_size // 1024} KB)")
     return candidates[0]
 
 
@@ -234,6 +289,70 @@ def aggregate_speedscope(speedscope_path: Path) -> tuple[Counter, float]:
     return counts, total
 
 
+def aggregate_multi_scenario(
+    scenario_traces: dict[str, Path],
+) -> list[tuple[str, float, float, list[str], dict[str, float]]]:
+    """Union-of-top-K aggregation across multiple scenario traces.
+
+    For each scenario:
+      1. Convert to speedscope + aggregate → (counter, total_ms).
+      2. Filter to WPF methods.
+      3. Take top MULTI_PER_SCENARIO_K methods.
+    Build the union set (dedup by exact method string), then for every
+    surviving method record per-scenario inclusive ms and pct.
+    Rank by max(cpu_pct_total across scenarios), truncate to MULTI_MAX_ENTRIES.
+
+    Returns a list of tuples:
+      (method, samples_sum_ms, cpu_pct_max, scenarios_list, scenario_cpu_pct_dict)
+    """
+    # Per-scenario data: {scenario → (wpf_counter, total_ms)}
+    per_scenario: dict[str, tuple[Counter, float]] = {}
+    for slug, nettrace in scenario_traces.items():
+        log(f"  aggregating scenario '{slug}' …")
+        speedscope = convert_to_speedscope(nettrace)
+        counts, total_ms = aggregate_speedscope(speedscope)
+        wpf_counts: Counter = Counter(
+            {k: v for k, v in counts.items() if is_wpf_method(k)}
+        )
+        per_scenario[slug] = (wpf_counts, total_ms)
+        log(f"    {slug}: total={total_ms:.0f}ms WPF_frames={len(wpf_counts)}")
+
+    # Build the union of top-K per scenario.
+    union_methods: set[str] = set()
+    for slug, (wpf_counts, _total_ms) in per_scenario.items():
+        for method, _ms in wpf_counts.most_common(MULTI_PER_SCENARIO_K):
+            union_methods.add(method)
+    log(f"  union has {len(union_methods)} methods before dedup "
+        f"({len(scenario_traces)} scenarios × top-{MULTI_PER_SCENARIO_K})")
+
+    slugs = list(scenario_traces.keys())
+
+    # For each method in the union, compute per-scenario ms and pct.
+    entries: list[tuple[str, float, float, list[str], dict[str, float]]] = []
+    for method in union_methods:
+        scenario_cpu_pct: dict[str, float] = {}
+        appearing_in: list[str] = []
+        samples_sum = 0.0
+        for slug in slugs:
+            wpf_counts, total_ms = per_scenario[slug]
+            ms = wpf_counts.get(method, 0.0)
+            pct = 100.0 * ms / total_ms if total_ms > 0 else 0.0
+            scenario_cpu_pct[slug] = round(pct, 2)
+            samples_sum += ms
+            if ms > 0:
+                appearing_in.append(slug)
+        cpu_pct_max = max(scenario_cpu_pct.values()) if scenario_cpu_pct else 0.0
+        entries.append((method, round(samples_sum, 2), round(cpu_pct_max, 2),
+                        appearing_in, scenario_cpu_pct))
+
+    # Rank by max cpu% descending; truncate to MULTI_MAX_ENTRIES.
+    entries.sort(key=lambda e: e[2], reverse=True)
+    if len(entries) > MULTI_MAX_ENTRIES:
+        log(f"  truncating from {len(entries)} to top-{MULTI_MAX_ENTRIES}")
+        entries = entries[:MULTI_MAX_ENTRIES]
+    return entries
+
+
 # ─── Benchmark mapping ────────────────────────────────────────────────────────
 
 
@@ -299,35 +418,107 @@ def find_bench_filter(method: str, benchmarks: dict[str, str]) -> str | None:
 # ─── Output ───────────────────────────────────────────────────────────────────
 
 
-def write_profile_json(ranked: list[tuple[str, int, float]],
-                       benchmarks: dict[str, str],
-                       source: str) -> None:
+def write_profile_json(
+    ranked: list[tuple],
+    benchmarks: dict[str, str],
+    source: object,
+    *,
+    multi: bool = False,
+    scenario_name: str | None = None,
+) -> None:
+    """Write profile.json from ranked entries.
+
+    `ranked` entries are either:
+      - (method, samples_ms, pct)              — single-scenario (--run / --trace)
+      - (method, samples_ms, pct_max,
+         scenarios_list, scenario_cpu_pct_dict) — multi-scenario (--run-multi)
+
+    Both shapes emit the same hot_paths schema (schema_version=1) so consumers
+    always see the same fields.  The new fields `scenarios`, `scenario_cpu_pct`,
+    `alloc_bytes`, and `alloc_pct_total` are present in every entry; zeros
+    and single-element lists for single-scenario mode (backward compat).
+    """
+    if multi:
+        notes = [
+            "Tier A profile: union of top-10 WPF methods per scenario from",
+            "{startup, take-open, playback}, deduped to ≤20 entries.",
+            "cpu_pct_total = max across scenarios; scenario_cpu_pct shows breakdown.",
+            "alloc_bytes / alloc_pct_total are zero placeholders — A6 wires real values.",
+            "AllocationTick noise floor ≈ 100 KB per stack path (CLR sampling interval).",
+            "Entries with bdn_filter:null have no covering microbenchmark.",
+        ]
+    else:
+        notes = [
+            "Tier A profile: top-K WPF methods by CPU sample-count from a",
+            f"single scenario ({scenario_name or 'spike-9'}) run. CPU only — allocation attribution Phase 2.",
+            "Entries with bdn_filter:null have no covering microbenchmark.",
+            "The orchestrator's benchmark-writer pass scaffolds new ones.",
+        ]
+
+    hot_paths = []
+    for entry in ranked:
+        if multi:
+            method, samples, pct_max, scenarios_list, scenario_cpu_pct = entry
+        else:
+            method, samples, pct = entry
+            pct_max = pct
+            scenarios_list = [scenario_name] if scenario_name else []
+            scenario_cpu_pct = {scenario_name: round(pct, 2)} if scenario_name else {}
+
+        bf = find_bench_filter(method, benchmarks)
+        hot_paths.append({
+            "method": method,
+            "samples": round(samples, 2),
+            "cpu_pct_total": round(pct_max, 2),
+            "bdn_filter": bf,
+            "needs_benchmark": bf is None,
+            "scenarios": scenarios_list,
+            "scenario_cpu_pct": scenario_cpu_pct,
+            "alloc_bytes": 0,
+            "alloc_pct_total": 0.0,
+        })
+
     PROFILE_JSON.write_text(json.dumps({
         "schema_version": 1,
         "phase": 1,
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "source": source,
-        "notes": [
-            "Tier A profile: top-K WPF methods by CPU sample-count from a",
-            "single spike-9 run. CPU only — allocation attribution Phase 2.",
-            "Entries with bdn_filter:null have no covering microbenchmark.",
-            "The orchestrator's benchmark-writer pass scaffolds new ones.",
-        ],
-        "hot_paths": [
-            {
-                "method": method,
-                "samples": round(samples, 2),
-                "cpu_pct_total": round(pct, 2),
-                "bdn_filter": find_bench_filter(method, benchmarks),
-                "needs_benchmark": find_bench_filter(method, benchmarks) is None,
-            }
-            for method, samples, pct in ranked
-        ],
+        "notes": notes,
+        "hot_paths": hot_paths,
     }, indent=2) + "\n", encoding="utf-8")
     log(f"wrote {PROFILE_JSON} ({len(ranked)} entries)")
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
+
+
+def _inject_synthetics(
+    ranked: list[tuple],
+    benchmarks: dict[str, str],
+    *,
+    multi: bool,
+) -> list[tuple]:
+    """Inject synthetic (benchmarked) entries for any bench not yet in ranked.
+
+    Synthetic entries have cpu_pct_total=0.0 and zeros for all numeric fields.
+    They are appended (not ranked) so inner Claude always has a testable entry.
+    The extra fields (scenarios, scenario_cpu_pct, alloc_*) are zero / empty
+    for synthetics regardless of mode.
+    """
+    covered_in_ranked = {
+        m for entry in ranked
+        for m in [entry[0]]
+        if find_bench_filter(m, benchmarks) is not None
+    }
+    for type_method in benchmarks:
+        if any(f".{type_method}(" in m for m in covered_in_ranked):
+            continue
+        synthetic = f"(benchmarked) {type_method}()"
+        if multi:
+            ranked.append((synthetic, 0.0, 0.0, [], {}))
+        else:
+            ranked.append((synthetic, 0.0, 0.0))
+    return ranked
 
 
 def main() -> int:
@@ -337,17 +528,66 @@ def main() -> int:
                    help="Run spike-9 first, then analyze its trace.")
     g.add_argument("--trace", type=Path,
                    help="Path to existing .nettrace; skip spike.")
+    g.add_argument("--run-multi", action="store_true",
+                   help="Run all 3 scenario scripts and aggregate results.")
     ap.add_argument("--top-k", type=int, default=DEFAULT_TOP_K,
-                    help=f"Number of hot paths to retain (default {DEFAULT_TOP_K})")
+                    help=f"Number of hot paths to retain per single-scenario run "
+                         f"(default {DEFAULT_TOP_K}; --run-multi uses {MULTI_PER_SCENARIO_K}/scenario)")
     args = ap.parse_args()
 
+    benchmarks = existing_benchmarks()
+    log(f"  existing benchmarks cover {len(benchmarks)} method(s): "
+        f"{list(benchmarks.values())[:5]}")
+
+    # ── --run-multi path ──────────────────────────────────────────────────────
+    if args.run_multi:
+        log("=== --run-multi: running all 3 scenario scripts ===")
+        scenario_traces: dict[str, Path] = {}
+        for slug, script in SCENARIO_SCRIPTS.items():
+            if not script.exists():
+                log(f"FATAL: scenario script not found: {script}")
+                return 1
+            log(f"--- scenario: {slug} ---")
+            trace = run_scenario(slug, script)
+            scenario_traces[slug] = trace
+
+        log("=== aggregating multi-scenario results ===")
+        ranked = aggregate_multi_scenario(scenario_traces)
+        ranked = _inject_synthetics(ranked, benchmarks, multi=True)
+        # Final cap: total entries (real + synthetic) must not exceed MULTI_MAX_ENTRIES.
+        # Synthetics are appended last, so they are trimmed first if necessary.
+        if len(ranked) > MULTI_MAX_ENTRIES:
+            log(f"  capping total (incl. synthetics) from {len(ranked)} to {MULTI_MAX_ENTRIES}")
+            ranked = ranked[:MULTI_MAX_ENTRIES]
+
+        source = [
+            {
+                "scenario": slug,
+                "trace": trace.name,
+                "size_mb": round(trace.stat().st_size / 1024 / 1024, 1),
+            }
+            for slug, trace in scenario_traces.items()
+        ]
+        write_profile_json(ranked, benchmarks, source=source, multi=True)
+
+        log("Top hot paths (multi-scenario):")
+        log(f"  {'samples_ms':>10s}  {'cpu%_max':>8s}  {'scenarios':<22s}  method")
+        for entry in ranked[:15]:
+            method, samples, pct_max, scenarios_list, _scpct = entry
+            log(f"  {samples:>10.1f}  {pct_max:>8.2f}  "
+                f"{','.join(scenarios_list):<22s}  {method}")
+        return 0
+
+    # ── --run / --trace path (single-scenario, backward compat) ──────────────
     if args.run:
         nettrace = run_spike()
+        scenario_name = "spike-9"
     else:
         nettrace = args.trace.resolve()
         if not nettrace.exists():
             log(f"FATAL: trace not found: {nettrace}")
             return 1
+        scenario_name = nettrace.stem
 
     speedscope = convert_to_speedscope(nettrace)
     counts, total = aggregate_speedscope(speedscope)
@@ -357,41 +597,28 @@ def main() -> int:
     wpf_total = sum(wpf_counts.values())
     log(f"  WPF time: {wpf_total:.1f}ms ({100*wpf_total/total:.1f}% of total)" if total else "  no time captured")
 
-    ranked = []
+    ranked_single = []
     for method, samples in wpf_counts.most_common(args.top_k):
         pct = 100 * samples / total if total > 0 else 0
-        ranked.append((method, samples, pct))
-
-    benchmarks = existing_benchmarks()
-    log(f"  existing benchmarks cover {len(benchmarks)} method(s): "
-        f"{list(benchmarks.values())[:5]}")
+        ranked_single.append((method, samples, pct))
 
     # Ensure any benchmarked Type.Method appears in the output even if it
     # wasn't a leaf in this trace — inner Claude needs at least one testable
     # entry to make progress, and the bench tells us this method matters
     # somewhere even if not in the play-take scenario.
-    covered_in_ranked = {
-        m for m, _, _ in ranked if find_bench_filter(m, benchmarks) is not None
-    }
-    for type_method in benchmarks:
-        if any(f".{type_method}(" in m for m in covered_in_ranked):
-            continue
-        # Synthesize a method label from the Type.Method key. cpu_pct_total
-        # left as 0.0 — bench is included for testability, not impact.
-        # Append `()` so find_bench_filter's `Type.Method(` substring match
-        # treats the synthetic entry as covered.
-        synthetic = f"(benchmarked) {type_method}()"
-        ranked.append((synthetic, 0.0, 0.0))
+    ranked_single = _inject_synthetics(ranked_single, benchmarks, multi=False)
 
     write_profile_json(
-        ranked, benchmarks,
+        ranked_single, benchmarks,
         source=f"profile.py from {nettrace.name} ({nettrace.stat().st_size//1024}KB)",
+        multi=False,
+        scenario_name=scenario_name,
     )
 
     # Print summary table
     log("Top hot paths:")
     log(f"  {'time_ms':>9s}  {'cpu%':>6s}  {'bench':>5s}  method")
-    for method, samples, pct in ranked[:15]:
+    for method, samples, pct in ranked_single[:15]:
         bench = "✓" if method in benchmarks else "—"
         log(f"  {samples:>9.1f}  {pct:>6.2f}  {bench:>5s}  {method}")
 
