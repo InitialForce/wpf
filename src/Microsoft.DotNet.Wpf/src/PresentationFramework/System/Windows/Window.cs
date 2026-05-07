@@ -5437,9 +5437,7 @@ namespace System.Windows
             try
             {
                 _visibilitySetInternally = true;
-                // Box via the VisibilityBoxes singleton cache so each Show/Hide does not
-                // allocate a fresh boxed enum for the SetValue object parameter.
-                SetValue(VisibilityProperty, VisibilityBoxes.Box(value));
+                SetValue(VisibilityProperty, value);
             }
             finally
             {
