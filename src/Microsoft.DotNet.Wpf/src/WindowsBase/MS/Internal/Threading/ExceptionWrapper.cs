@@ -17,6 +17,15 @@ namespace System.Windows.Threading
         // Helper for exception filtering:
         public object TryCatchWhen(object source, Delegate callback, object args, int numArgs, Delegate catchHandler)
         {
+            // Fast path: when neither Filter nor Catch is subscribed, the catch filter
+            // (FilterException) always returns false — the catch block is unreachable.
+            // Skip the try/catch construct entirely so the dispatcher hot loop avoids
+            // its setup cost on every callback.
+            if (Filter == null && Catch == null)
+            {
+                return InternalRealCall(callback, args, numArgs);
+            }
+
             object result = null;
 
             try
