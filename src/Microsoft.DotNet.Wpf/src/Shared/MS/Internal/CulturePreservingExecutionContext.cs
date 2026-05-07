@@ -2,24 +2,24 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 //
-// 
 //
-//  Description: Wrapper for System.Threading.ExecutionContext that allows 
+//
+//  Description: Wrapper for System.Threading.ExecutionContext that allows
 //               custom management of information relevant to a logical thread
 //               of execution.
 //
 //               Starting .NET 4.6, ExecutionContext tracks
-//               Thread.CurrentCulture and Thread.CurrentUICulture, 
-//               which would be restored to their respective previous values 
-//               after a call to ExecutionContext.Run. 
-//               This behavior is undesirable within the Dispatcher - various dispatcher 
-//               operations can run user code that can in turn set Thread.CurrentCulture or 
-//               Thread.CurrentUICulture, and we do not want those values to be overwritten 
-//               with their respective previous values. 
+//               Thread.CurrentCulture and Thread.CurrentUICulture,
+//               which would be restored to their respective previous values
+//               after a call to ExecutionContext.Run.
+//               This behavior is undesirable within the Dispatcher - various dispatcher
+//               operations can run user code that can in turn set Thread.CurrentCulture or
+//               Thread.CurrentUICulture, and we do not want those values to be overwritten
+//               with their respective previous values.
 //
-//               This wrapper forwards all calls to ExecutionContext, and manages the 
+//               This wrapper forwards all calls to ExecutionContext, and manages the
 //               values of Thread.CurrentCulture and Thread.CurrentUICulture carefully
-//               during Run and Dispose. 
+//               during Run and Dispose.
 
 
 using System.Globalization;
@@ -28,39 +28,39 @@ using System.Threading;
 namespace MS.Internal
 {
     /// <summary>
-    /// An encapsulation of ExecutionContext that preserves thread culture infos 
+    /// An encapsulation of ExecutionContext that preserves thread culture infos
     /// during DispatcherOperations
     /// </summary>
     /// <remarks>
     ///     On applications targeting 4.6 and later, the flow of execution durign a DispatcherOperation
     ///     would go like this:
-    /// 
+    ///
     ///         DispatcherOperation ctor
-    ///             EC.Capture                  // EC saves culture info $1 
-    ///        (other code runs)                // Modifies culture info to $2 
+    ///             EC.Capture                  // EC saves culture info $1
+    ///        (other code runs)                // Modifies culture info to $2
     ///         DispatcherOperation is scheduled
     ///             EC.Run(callback)            // callback will run under $1 (not $2)
     ///                 callback()              // callback modifies culture info to $3
-    ///             EC.Run terminates           // EC reverts culture info to $1 (we lose $3) 
-    /// 
+    ///             EC.Run terminates           // EC reverts culture info to $1 (we lose $3)
+    ///
     ///     With the use of CulturePreservingExecutionContext, the flow is modified as follows:
-    /// 
+    ///
     ///         DispatcherOperation ctor
     ///             CPEC.Capture                // EC saves culture info $1
     ///         (other code runs)               // Modifies culture info to $2
     ///         DispatcherOperation is scheduled
-    ///             CPEC.Run(callback)          // CPEC saves culture info $2 by 
-    ///                                         // calling CultureAndContextManager.Initialize
+    ///             CPEC.Run(callback)          // CPEC saves culture info $2 directly on
+    ///                                         // the CPEC instance (no extra allocation)
     ///                 Calls EC.Run(CallbackWrapper)
-    ///                     CallbackWrapper()   // EC will run this under $1 
+    ///                     CallbackWrapper()   // EC will run this under $1
     ///                         CallbackWrapper will restore culture info $2
     ///                         callback()      // callback is run under $2, it modifies culture info to $3
     ///                         CallbackWrapper saves $3 for later use
     ///                 EC.Run terminates       // EC reverts culture info to $1
     ///             CPEC.Run restores $3 which was saved by CallbackWrapper
-    ///         DispatcherOperation completes - current culture info is set to $3 
+    ///         DispatcherOperation completes - current culture info is set to $3
     ///
-    ///     This flow is similar to the default behavior on .NET 4.5.2 and earlier. 
+    ///     This flow is similar to the default behavior on .NET 4.5.2 and earlier.
     /// </remarks>
     internal class CulturePreservingExecutionContext: IDisposable
     {
@@ -70,21 +70,21 @@ namespace MS.Internal
         ///     Captures the execution context from the current thread.
         /// </summary>
         /// <returns>
-        ///     An <see cref="CulturePreservingExecutionContext"/> object representing 
+        ///     An <see cref="CulturePreservingExecutionContext"/> object representing
         ///     the <see cref="ExecutionContext"/> for the current thread.
         /// </returns>
         /// <remarks>
-        ///     If ExecutionContext.SuppressFlow had been previously called, 
-        ///     then this method would return null; 
+        ///     If ExecutionContext.SuppressFlow had been previously called,
+        ///     then this method would return null;
         /// </remarks>
         public static CulturePreservingExecutionContext Capture()
         {
             // ExecutionContext.SuppressFlow had been called - we expect
-            // ExecutionContext.Capture() to return null, so match that 
-            // behavior and return null. 
+            // ExecutionContext.Capture() to return null, so match that
+            // behavior and return null.
             if (ExecutionContext.IsFlowSuppressed())
             {
-                return null; 
+                return null;
             }
 
             var culturePreservingContext = new CulturePreservingExecutionContext();
@@ -95,51 +95,51 @@ namespace MS.Internal
             }
             else
             {
-                // If ExecutionContext.Capture() returns null for any other 
+                // If ExecutionContext.Capture() returns null for any other
                 // reason besides IsFlowSuppressed, then match that behavior
-                // and return null 
+                // and return null
                 culturePreservingContext.Dispose();
-                return null; 
+                return null;
             }
         }
 
         /// <summary>
-        /// Runs a method in a specified execution context on the current thread by 
+        /// Runs a method in a specified execution context on the current thread by
         /// delegating the call to <see cref="CallbackWrapper(object)"/>, which will save
-        /// relevant CultureInfo values before returning. 
+        /// relevant CultureInfo values before returning.
         /// </summary>
         /// <param name="executionContext">
-        ///     The <see cref="ExecutionContext"/> to set, represeted by 
+        ///     The <see cref="ExecutionContext"/> to set, represeted by
         ///     the <see cref="CulturePreservingExecutionContext"/> instance.
         /// </param>
         /// <param name="callback">
-        ///     A <see cref="ContextCallback"/> delegate that represents the 
+        ///     A <see cref="ContextCallback"/> delegate that represents the
         ///     method to be run in the provided execution context.
         /// </param>
         /// <param name="state">
         ///     The object to pass to the callback method.
         /// </param>
         /// <remarks>
-        /// BaseAppContextSwitches.DoNotUseCulturePreservingDispatcherOperations indicates whether 
-        /// CulturePreservingExecutionContext should do extra work to preserve culture infos, or not. 
-        /// 
+        /// BaseAppContextSwitches.DoNotUseCulturePreservingDispatcherOperations indicates whether
+        /// CulturePreservingExecutionContext should do extra work to preserve culture infos, or not.
+        ///
         /// Generally set to true when target framework version is less than or equals 4.5.2, and false
-        /// on 4.6 and above. 
-        /// 
-        /// On 4.5.2 and earlier frameworks, ExecutionContext does not include culture infos 
-        /// in its state, nor does it restore them after ExecutionContext.Run. Thus WPF 
-        /// does not have to do extra work to propagate culture infos modified within a 
+        /// on 4.6 and above.
+        ///
+        /// On 4.5.2 and earlier frameworks, ExecutionContext does not include culture infos
+        /// in its state, nor does it restore them after ExecutionContext.Run. Thus WPF
+        /// does not have to do extra work to propagate culture infos modified within a
         /// call to ExecutionContext.Run (typically, this happens within a DispatcherOperation). In this
-        /// case, we can simply defer all the work to ExecutionContext.Run directly. 
-        /// 
+        /// case, we can simply defer all the work to ExecutionContext.Run directly.
+        ///
         /// On 4.6 and above, the design is to do some extra work to preserve culture infos.
-        /// 
-        /// This switch can be overridden by the application by calling 
+        ///
+        /// This switch can be overridden by the application by calling
         /// AppContext.SetSwitch("Switch.MS.Internal.DoNotUseCulturePreservingDispatcherOperations", true|false)
         /// or by setting the switch in app.config in the runtime section like this:
-        /// <code 
+        /// <code
         ///   <runtime>
-        ///     <AppContextSwitchOverrides value="Switch.MS.Internal.DoNotUseCulturePreservingDispatcherOperations=true|false"/> 
+        ///     <AppContextSwitchOverrides value="Switch.MS.Internal.DoNotUseCulturePreservingDispatcherOperations=true|false"/>
         ///   </runtime>
         /// />
         /// </remarks>
@@ -156,25 +156,30 @@ namespace MS.Internal
                 return;
             }
 
-            // Save culture information - we will need this to 
-            // restore just before the callback is actually invoked from 
-            // CallbackWrapper.
-            executionContext._cultureAndContext = CultureAndContextManager.Initialize(callback, state);
+            // Save callback + state + culture info directly on the CPEC instance.
+            // CPEC is captured 1:1 with this Run (DispatcherOperation/Dispatcher.ShutdownImpl
+            // both do Capture-then-Run-once-then-Dispose), so reusing the instance fields
+            // avoids the per-Run allocation of an inner manager object.
+            executionContext._callback = callback;
+            executionContext._state = state;
+            executionContext.ReadCultureInfosFromCurrentThread();
 
             try
             {
                 ExecutionContext.Run(
                     executionContext._context,
                     CulturePreservingExecutionContext.CallbackWrapperDelegate,
-                    executionContext._cultureAndContext);
+                    executionContext);
             }
             finally
             {
-                // Restore culture information - it might have been 
+                // Restore culture information - it might have been
                 // modified during the callback execution.
-                executionContext._cultureAndContext.WriteCultureInfosToCurrentThread();
+                executionContext.WriteCultureInfosToCurrentThread();
+                executionContext._callback = null;
+                executionContext._state = null;
             }
-}
+        }
 
         #endregion
 
@@ -182,31 +187,43 @@ namespace MS.Internal
 
         /// <summary>
         ///     Executes the callback supplied to the <see cref="Run(CulturePreservingExecutionContext, ContextCallback, object)"/> method
-        ///     and saves <see cref="Thread.CurrentUICulture"/> and <see cref="Thread.CurrentCulture"/> values immediately 
+        ///     and saves <see cref="Thread.CurrentUICulture"/> and <see cref="Thread.CurrentCulture"/> values immediately
         ///     afterwards.
         /// </summary>
         /// <param name="obj">
-        ///     Contains a Tuple{ContextCallback, object} which represents the actual callback supplied by the caller of 
-        ///     <see cref="Run(CulturePreservingExecutionContext, ContextCallback, object)"/>, and the corresponding state 
-        ///     that is intended to be passed to the callback. 
+        ///     The <see cref="CulturePreservingExecutionContext"/> instance carrying the
+        ///     real callback, state, and saved culture info (passed as the state argument
+        ///     to <see cref="ExecutionContext.Run(ExecutionContext, ContextCallback, object)"/>).
         /// </param>
         private static void CallbackWrapper(object obj)
         {
-            var cultureAndContext = obj as CultureAndContextManager;
+            var executionContext = (CulturePreservingExecutionContext)obj;
 
-            ContextCallback callback = cultureAndContext.Callback;
-            object state = cultureAndContext.State;
+            ContextCallback callback = executionContext._callback;
+            object state = executionContext._state;
 
-            // Restore cultre information previously saved from the call site, 
-            // call into the callback, and recapture culture information which 
-            // might have been updated by the callback. 
-            // 
+            // Restore cultre information previously saved from the call site,
+            // call into the callback, and recapture culture information which
+            // might have been updated by the callback.
+            //
             // The callback is guaranteed to be non-null by Run, so an explicit
-            // check is not needed here. 
+            // check is not needed here.
 
-            cultureAndContext.WriteCultureInfosToCurrentThread();
+            executionContext.WriteCultureInfosToCurrentThread();
             callback.Invoke(state);
-            cultureAndContext.ReadCultureInfosFromCurrentThread();
+            executionContext.ReadCultureInfosFromCurrentThread();
+        }
+
+        private void ReadCultureInfosFromCurrentThread()
+        {
+            _culture = Thread.CurrentThread.CurrentCulture;
+            _uICulture = Thread.CurrentThread.CurrentUICulture;
+        }
+
+        private void WriteCultureInfosToCurrentThread()
+        {
+            Thread.CurrentThread.CurrentCulture = _culture;
+            Thread.CurrentThread.CurrentUICulture = _uICulture;
         }
 
         #endregion
@@ -258,71 +275,17 @@ namespace MS.Internal
         #region Private Fields
 
         private ExecutionContext _context;
-        private CultureAndContextManager _cultureAndContext;
+
+        // Per-Run state. Lifted from a former inner CultureAndContextManager class so that
+        // CPEC.Run does not allocate an extra wrapper object on every call. CPEC has 1:1
+        // lifecycle with each Run (capture-run-dispose), so storing here is safe.
+        private ContextCallback _callback;
+        private object _state;
+        private CultureInfo _culture;
+        private CultureInfo _uICulture;
 
         // static delegate to prevent repeated implicit allocations during Run
         private static ContextCallback CallbackWrapperDelegate;
-
-        #endregion
-
-        #region Private Types
-
-        /// <summary>
-        /// Encapsulates culture, callback and state information. 
-        /// Abstracts the work of capture culture information from
-        ///   the current thread, and restoring it back.
-        /// </summary>
-        private class CultureAndContextManager
-        {
-            #region Constructor 
-
-            private CultureAndContextManager(ContextCallback callback, object state)
-            {
-                Callback = callback;
-                State = state;
-                ReadCultureInfosFromCurrentThread();
-            }
-
-            #endregion
-
-            /// <summary>
-            /// Factory - Captures cuture information from current thread, and 
-            /// saves callback and state information for future use by the caller. 
-            /// </summary>
-            /// <param name="callback"></param>
-            /// <param name="state"></param>
-            /// <returns></returns>
-            public static CultureAndContextManager Initialize(ContextCallback callback, object state)
-            {
-                return new CultureAndContextManager(callback, state);
-            }
-
-
-            public void ReadCultureInfosFromCurrentThread()
-            {
-                _culture = Thread.CurrentThread.CurrentCulture;
-                _uICulture = Thread.CurrentThread.CurrentUICulture;
-            }
-
-            public void WriteCultureInfosToCurrentThread()
-            {
-                Thread.CurrentThread.CurrentCulture = _culture;
-                Thread.CurrentThread.CurrentUICulture = _uICulture;
-            }
-
-            public ContextCallback Callback
-            {
-                get; private set;
-            }
-
-            public object State
-            {
-                get; private set;
-            }
-
-            private CultureInfo _culture;
-            private CultureInfo _uICulture;
-        }
 
         #endregion
     }
