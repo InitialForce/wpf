@@ -592,21 +592,36 @@ namespace MS.Internal.Markup
                 case 'v': case 'V':
                     EnsureFigure();
 
-                    do
+                    // cmd is loop-invariant inside the do/while, but the JIT
+                    // does not reliably unswitch a 6-way switch out of the
+                    // loop. Split the L/l "full point" hot path (dominant in
+                    // path corpora) into its own switch-free loop; leave the
+                    // h/H/v/V variants in a smaller switch.
+                    if (cmd == 'L' || cmd == 'l')
                     {
-                        switch (cmd)
+                        do
                         {
-                        case 'l': _lastPoint    = ReadPoint(cmd, ! AllowComma); break;
-                        case 'L': _lastPoint    = ReadPoint(cmd, ! AllowComma); break;
-                        case 'h': _lastPoint.X += ReadNumber(! AllowComma); break;
-                        case 'H': _lastPoint.X  = ReadNumber(! AllowComma); break; 
-                        case 'v': _lastPoint.Y += ReadNumber(! AllowComma); break;
-                        case 'V': _lastPoint.Y  = ReadNumber(! AllowComma); break;
+                            _lastPoint = ReadPoint(cmd, ! AllowComma);
+                            context.LineTo(_lastPoint, IsStroked, ! IsSmoothJoin);
                         }
-
-                        context.LineTo(_lastPoint, IsStroked, ! IsSmoothJoin); 
+                        while (IsNumber(AllowComma));
                     }
-                    while (IsNumber(AllowComma));
+                    else
+                    {
+                        do
+                        {
+                            switch (cmd)
+                            {
+                            case 'h': _lastPoint.X += ReadNumber(! AllowComma); break;
+                            case 'H': _lastPoint.X  = ReadNumber(! AllowComma); break;
+                            case 'v': _lastPoint.Y += ReadNumber(! AllowComma); break;
+                            case 'V': _lastPoint.Y  = ReadNumber(! AllowComma); break;
+                            }
+
+                            context.LineTo(_lastPoint, IsStroked, ! IsSmoothJoin);
+                        }
+                        while (IsNumber(AllowComma));
+                    }
 
                     last_cmd = 'L';
                     break;
