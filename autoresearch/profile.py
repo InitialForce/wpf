@@ -61,9 +61,15 @@ MULTI_PER_SCENARIO_K = 10
 # Maximum total entries in the unified profile.json.
 MULTI_MAX_ENTRIES = 20
 
+ALLOC_PARSER_EXE = (
+    WPF_REPO / "tools" / "alloc-parser" / "bin" / "Release"
+    / "net10.0-windows" / "win-x64" / "publish" / "AllocParser.exe"
+)
+
 SPIKE_TIMEOUT_S = int(os.environ.get("WPF_AR_PROFILE_SPIKE_TIMEOUT", "300"))
 SCENARIO_TIMEOUT_S = int(os.environ.get("WPF_AR_SCENARIO_TIMEOUT", "600"))
 CONVERT_TIMEOUT_S = 120
+ALLOC_TIMEOUT_S = 180
 
 # Methods we consider "hot path" candidates for optimization. Anything else
 # (BCL, 3rd party, BDN harness internals) is filtered out.
@@ -188,6 +194,68 @@ def run_scenario(slug: str, script_path: Path) -> Path:
     return candidates[0]
 
 
+# ─── AllocParser integration ──────────────────────────────────────────────────
+
+
+def build_alloc_parser_cmd(nettrace: Path, output_json: Path) -> list[str]:
+    """Return argv for invoking AllocParser.exe via cmd.exe /c."""
+    return [
+        "cmd.exe", "/c",
+        to_winpath(ALLOC_PARSER_EXE),
+        to_winpath(nettrace),
+        "--output", to_winpath(output_json),
+    ]
+
+
+def aggregate_alloc(alloc_json: Path) -> Counter:
+    """Read AllocParser JSON output; return Counter[frame_name → alloc_bytes].
+
+    Returns an empty Counter if the file is missing, empty, or unparseable
+    (graceful degradation — alloc columns remain zero rather than crashing).
+    The JSON schema is: [{"frame": "...", "alloc_bytes": N}, ...]
+    """
+    if not alloc_json.exists():
+        return Counter()
+    try:
+        raw = alloc_json.read_text(encoding="utf-8").strip()
+        if not raw:
+            return Counter()
+        entries = json.loads(raw)
+        return Counter({e["frame"]: e["alloc_bytes"] for e in entries if "frame" in e and "alloc_bytes" in e})
+    except Exception as exc:  # noqa: BLE001
+        log(f"  WARNING: could not parse alloc JSON ({alloc_json}): {exc}")
+        return Counter()
+
+
+def run_alloc_parser(nettrace: Path, slug: str) -> Counter:
+    """Run AllocParser.exe on *nettrace*; return alloc counter.
+
+    If the binary is absent, logs a warning and returns an empty Counter.
+    If the binary is present but fails, logs the error and returns empty Counter.
+    """
+    if not ALLOC_PARSER_EXE.exists():
+        log(f"  WARNING: AllocParser binary absent ({ALLOC_PARSER_EXE}); alloc columns will be 0")
+        return Counter()
+
+    alloc_json = nettrace.with_suffix(".alloc.json")
+    # Cache: skip if JSON is newer than nettrace.
+    if alloc_json.exists() and alloc_json.stat().st_mtime > nettrace.stat().st_mtime:
+        log(f"  alloc cached: {alloc_json.name}")
+        return aggregate_alloc(alloc_json)
+
+    log(f"  running AllocParser on {nettrace.name} …")
+    rc, output = cmd(
+        build_alloc_parser_cmd(nettrace, alloc_json),
+        timeout=ALLOC_TIMEOUT_S,
+    )
+    if rc != 0:
+        log(f"  WARNING: AllocParser failed (rc={rc}); alloc columns will be 0\n{output[:400]}")
+        return Counter()
+
+    log(f"  {output.strip().splitlines()[-1] if output.strip() else 'AllocParser ok'}")
+    return aggregate_alloc(alloc_json)
+
+
 # ─── Speedscope conversion + aggregation ──────────────────────────────────────
 
 
@@ -291,22 +359,29 @@ def aggregate_speedscope(speedscope_path: Path) -> tuple[Counter, float]:
 
 def aggregate_multi_scenario(
     scenario_traces: dict[str, Path],
-) -> list[tuple[str, float, float, list[str], dict[str, float]]]:
+) -> tuple[list[tuple[str, float, float, list[str], dict[str, float]]], Counter]:
     """Union-of-top-K aggregation across multiple scenario traces.
 
     For each scenario:
       1. Convert to speedscope + aggregate → (counter, total_ms).
       2. Filter to WPF methods.
       3. Take top MULTI_PER_SCENARIO_K methods.
+      4. Run AllocParser on the same .nettrace → alloc counter.
     Build the union set (dedup by exact method string), then for every
     surviving method record per-scenario inclusive ms and pct.
     Rank by max(cpu_pct_total across scenarios), truncate to MULTI_MAX_ENTRIES.
 
-    Returns a list of tuples:
-      (method, samples_sum_ms, cpu_pct_max, scenarios_list, scenario_cpu_pct_dict)
+    Returns (entries, total_alloc) where:
+      entries — list of (method, samples_sum_ms, cpu_pct_max, scenarios_list,
+                          scenario_cpu_pct_dict)
+      total_alloc — Counter[frame_name → alloc_bytes] summed across all scenarios
     """
     # Per-scenario data: {scenario → (wpf_counter, total_ms)}
     per_scenario: dict[str, tuple[Counter, float]] = {}
+    # Alloc counters per scenario; summed below into total_alloc.
+    total_alloc: Counter = Counter()
+    _warned_alloc_absent = False
+
     for slug, nettrace in scenario_traces.items():
         log(f"  aggregating scenario '{slug}' …")
         speedscope = convert_to_speedscope(nettrace)
@@ -316,6 +391,14 @@ def aggregate_multi_scenario(
         )
         per_scenario[slug] = (wpf_counts, total_ms)
         log(f"    {slug}: total={total_ms:.0f}ms WPF_frames={len(wpf_counts)}")
+
+        # AllocParser: run once per scenario, accumulate into total_alloc.
+        alloc = run_alloc_parser(nettrace, slug)
+        if not alloc and not _warned_alloc_absent:
+            _warned_alloc_absent = True  # warning already emitted by run_alloc_parser
+        total_alloc += alloc
+        log(f"    {slug}: alloc frames={len(alloc)} "
+            f"total_alloc_bytes={sum(alloc.values()):,}")
 
     # Build the union of top-K per scenario.
     union_methods: set[str] = set()
@@ -350,7 +433,7 @@ def aggregate_multi_scenario(
     if len(entries) > MULTI_MAX_ENTRIES:
         log(f"  truncating from {len(entries)} to top-{MULTI_MAX_ENTRIES}")
         entries = entries[:MULTI_MAX_ENTRIES]
-    return entries
+    return entries, total_alloc
 
 
 # ─── Benchmark mapping ────────────────────────────────────────────────────────
@@ -425,6 +508,7 @@ def write_profile_json(
     *,
     multi: bool = False,
     scenario_name: str | None = None,
+    alloc_counter: Counter | None = None,
 ) -> None:
     """Write profile.json from ranked entries.
 
@@ -435,22 +519,33 @@ def write_profile_json(
 
     Both shapes emit the same hot_paths schema (schema_version=1) so consumers
     always see the same fields.  The new fields `scenarios`, `scenario_cpu_pct`,
-    `alloc_bytes`, and `alloc_pct_total` are present in every entry; zeros
-    and single-element lists for single-scenario mode (backward compat).
+    `alloc_bytes`, and `alloc_pct_total` are populated from `alloc_counter` when
+    provided; zero for missing frames or when the AllocParser binary is absent.
     """
+    resolved_alloc: Counter = alloc_counter if alloc_counter is not None else Counter()
+    # AllocParser emits frames without a "Module!" prefix (e.g. "System.Windows.Foo.Bar()"),
+    # but speedscope CPU entries have the form "Module!System.Windows.Foo.Bar()".
+    # Build a secondary lookup keyed on the post-"!" portion so we can match both forms.
+    _alloc_no_module: dict[str, int] = {}
+    for frame, ab in resolved_alloc.items():
+        key = frame.split("!", 1)[1] if "!" in frame else frame
+        _alloc_no_module[key] = _alloc_no_module.get(key, 0) + ab
+    total_alloc_bytes = sum(resolved_alloc.values())
+
     if multi:
         notes = [
             "Tier A profile: union of top-10 WPF methods per scenario from",
             "{startup, take-open, playback}, deduped to ≤20 entries.",
             "cpu_pct_total = max across scenarios; scenario_cpu_pct shows breakdown.",
-            "alloc_bytes / alloc_pct_total are zero placeholders — A6 wires real values.",
+            "alloc_bytes uses AllocationTick events (sampled ~100 KB; absent frames may be undersampled).",
             "AllocationTick noise floor ≈ 100 KB per stack path (CLR sampling interval).",
             "Entries with bdn_filter:null have no covering microbenchmark.",
         ]
     else:
         notes = [
             "Tier A profile: top-K WPF methods by CPU sample-count from a",
-            f"single scenario ({scenario_name or 'spike-9'}) run. CPU only — allocation attribution Phase 2.",
+            f"single scenario ({scenario_name or 'spike-9'}) run.",
+            "alloc_bytes uses AllocationTick events (sampled ~100 KB; absent frames may be undersampled).",
             "Entries with bdn_filter:null have no covering microbenchmark.",
             "The orchestrator's benchmark-writer pass scaffolds new ones.",
         ]
@@ -465,6 +560,11 @@ def write_profile_json(
             scenarios_list = [scenario_name] if scenario_name else []
             scenario_cpu_pct = {scenario_name: round(pct, 2)} if scenario_name else {}
 
+        # Match alloc by bare name (strip "Module!" prefix if present).
+        method_bare = method.split("!", 1)[1] if "!" in method else method
+        ab = resolved_alloc.get(method, 0) or _alloc_no_module.get(method_bare, 0)
+        apct = 100.0 * ab / total_alloc_bytes if total_alloc_bytes > 0 else 0.0
+
         bf = find_bench_filter(method, benchmarks)
         hot_paths.append({
             "method": method,
@@ -474,8 +574,8 @@ def write_profile_json(
             "needs_benchmark": bf is None,
             "scenarios": scenarios_list,
             "scenario_cpu_pct": scenario_cpu_pct,
-            "alloc_bytes": 0,
-            "alloc_pct_total": 0.0,
+            "alloc_bytes": ab,
+            "alloc_pct_total": round(apct, 4),
         })
 
     PROFILE_JSON.write_text(json.dumps({
@@ -552,7 +652,7 @@ def main() -> int:
             scenario_traces[slug] = trace
 
         log("=== aggregating multi-scenario results ===")
-        ranked = aggregate_multi_scenario(scenario_traces)
+        ranked, total_alloc = aggregate_multi_scenario(scenario_traces)
         ranked = _inject_synthetics(ranked, benchmarks, multi=True)
         # Final cap: total entries (real + synthetic) must not exceed MULTI_MAX_ENTRIES.
         # Synthetics are appended last, so they are trimmed first if necessary.
@@ -568,14 +668,35 @@ def main() -> int:
             }
             for slug, trace in scenario_traces.items()
         ]
-        write_profile_json(ranked, benchmarks, source=source, multi=True)
+        write_profile_json(
+            ranked, benchmarks, source=source,
+            multi=True, alloc_counter=total_alloc,
+        )
 
         log("Top hot paths (multi-scenario):")
-        log(f"  {'samples_ms':>10s}  {'cpu%_max':>8s}  {'scenarios':<22s}  method")
+        log(f"  {'samples_ms':>10s}  {'cpu%_max':>8s}  {'alloc%':>7s}  {'scenarios':<22s}  method")
         for entry in ranked[:15]:
             method, samples, pct_max, scenarios_list, _scpct = entry
-            log(f"  {samples:>10.1f}  {pct_max:>8.2f}  "
+            # Retrieve alloc_pct_total from the written JSON for display consistency.
+            total_alloc_bytes = sum(total_alloc.values())
+            method_bare = method.split("!", 1)[1] if "!" in method else method
+            ab = total_alloc.get(method, 0) or total_alloc.get(method_bare, 0)
+            apct = 100.0 * ab / total_alloc_bytes if total_alloc_bytes > 0 else 0.0
+            log(f"  {samples:>10.1f}  {pct_max:>8.2f}  {apct:>6.2f}%  "
                 f"{','.join(scenarios_list):<22s}  {method}")
+
+        # Alloc top-5 summary.
+        total_alloc_bytes = sum(total_alloc.values())
+        if total_alloc_bytes > 0:
+            from_profile = json.loads(PROFILE_JSON.read_text(encoding="utf-8"))
+            hp = from_profile["hot_paths"]
+            top_alloc = sorted(hp, key=lambda x: -x["alloc_pct_total"])[:5]
+            log("Top 5 by alloc_pct_total:")
+            log(f"  {'alloc%':>7s}  {'alloc_bytes':>12s}  method")
+            for e in top_alloc:
+                log(f"  {e['alloc_pct_total']:>6.2f}%  {e['alloc_bytes']:>12,}  {e['method'][:80]}")
+        else:
+            log("  alloc data unavailable (AllocParser absent or no WPF AllocationTick events)")
         return 0
 
     # ── --run / --trace path (single-scenario, backward compat) ──────────────
@@ -597,6 +718,10 @@ def main() -> int:
     wpf_total = sum(wpf_counts.values())
     log(f"  WPF time: {wpf_total:.1f}ms ({100*wpf_total/total:.1f}% of total)" if total else "  no time captured")
 
+    # AllocParser: run on the same nettrace if binary is available.
+    single_alloc = run_alloc_parser(nettrace, scenario_name)
+    log(f"  alloc frames={len(single_alloc)} total_alloc_bytes={sum(single_alloc.values()):,}")
+
     ranked_single = []
     for method, samples in wpf_counts.most_common(args.top_k):
         pct = 100 * samples / total if total > 0 else 0
@@ -613,14 +738,19 @@ def main() -> int:
         source=f"profile.py from {nettrace.name} ({nettrace.stat().st_size//1024}KB)",
         multi=False,
         scenario_name=scenario_name,
+        alloc_counter=single_alloc,
     )
 
     # Print summary table
     log("Top hot paths:")
-    log(f"  {'time_ms':>9s}  {'cpu%':>6s}  {'bench':>5s}  method")
+    log(f"  {'time_ms':>9s}  {'cpu%':>6s}  {'alloc%':>7s}  {'bench':>5s}  method")
+    total_alloc_bytes_single = sum(single_alloc.values())
     for method, samples, pct in ranked_single[:15]:
         bench = "✓" if method in benchmarks else "—"
-        log(f"  {samples:>9.1f}  {pct:>6.2f}  {bench:>5s}  {method}")
+        method_bare = method.split("!", 1)[1] if "!" in method else method
+        ab = single_alloc.get(method, 0) or single_alloc.get(method_bare, 0)
+        apct = 100.0 * ab / total_alloc_bytes_single if total_alloc_bytes_single > 0 else 0.0
+        log(f"  {samples:>9.1f}  {pct:>6.2f}  {apct:>6.2f}%  {bench:>5s}  {method}")
 
     return 0
 
