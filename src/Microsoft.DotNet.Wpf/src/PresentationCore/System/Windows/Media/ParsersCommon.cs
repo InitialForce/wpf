@@ -354,48 +354,8 @@ namespace MS.Internal.Markup
             if (!IsNumber(allowComma))
             {
                 ThrowBadToken();
-            }
-
-            // Fast path: unsigned <=9 digit integer with no period/exponent
-            // suffix. SVG path corpora are dominated by small unsigned integer
-            // coordinates; this avoids SkipDigits + simple-int re-walk +
-            // period/exp probe + Infinity/NaN probe + sign tracking and writes
-            // _curIndex exactly once. _token holds _pathString[_curIndex] (set
-            // by the IsNumber call above), so no string indexer load yet.
-            char firstCh = _token;
-            if ((uint)(firstCh - '0') <= 9u)
-            {
-                string s = _pathString;
-                int len = _pathLength;
-                int idx = _curIndex + 1;
-                int value = firstCh - '0';
-                int cap = _curIndex + 9; // 9-digit cap keeps value in int range
-                int max = len < cap ? len : cap;
-
-                while (idx < max)
-                {
-                    uint d = (uint)(s[idx] - '0');
-                    if (d > 9u) break;
-                    value = value * 10 + (int)d;
-                    idx++;
-                }
-
-                // If we exited via the cap and the next char is still a digit,
-                // the number has 10+ digits and must take the slow (double.Parse)
-                // path. Otherwise we have a complete unsigned integer.
-                if (!(idx == cap && idx < len && (uint)(s[idx] - '0') <= 9u))
-                {
-                    if (idx >= len ||
-                        (s[idx] != '.' && s[idx] != 'E' && s[idx] != 'e'))
-                    {
-                        _curIndex = idx;
-                        return value;
-                    }
-                }
-                // Period/exponent follows or 10+ digits: fall through to slow
-                // path. _curIndex is unchanged so the slow path re-scans.
-            }
-
+            }                
+            
             bool simple = true;
             int start = _curIndex;
 
