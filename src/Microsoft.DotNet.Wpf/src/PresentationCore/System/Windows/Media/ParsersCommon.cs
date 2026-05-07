@@ -397,19 +397,29 @@ namespace MS.Internal.Markup
             {
                 SkipDigits(! AllowSign);
 
+                // Hoist fields to locals across the period + exponent peeks so
+                // both checks read s/end/i once after SkipDigits writeback,
+                // instead of re-loading _pathString/_pathLength on each
+                // More()+indexer pair (corpus is pure integers, both branches
+                // are usually not taken).
+                string s = _pathString;
+                int end = _pathLength;
+                int i = _curIndex;
+
                 // Optional period, followed by more digits
-                if (More() && (_pathString[_curIndex] == '.'))
+                if (i < end && s[i] == '.')
                 {
                     simple = false;
-                    _curIndex ++;
+                    _curIndex = i + 1;
                     SkipDigits(! AllowSign);
+                    i = _curIndex;
                 }
 
                 // Exponent
-                if (More() && ((_pathString[_curIndex] == 'E') || (_pathString[_curIndex] == 'e')))
+                if (i < end && (s[i] == 'E' || s[i] == 'e'))
                 {
                     simple = false;
-                    _curIndex ++;
+                    _curIndex = i + 1;
                     SkipDigits(AllowSign);
                 }
             }
