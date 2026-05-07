@@ -154,7 +154,10 @@
             "take-open",
             "playback"
           ],
-          "status": "pending"
+          "status": "skipped",
+          "skip_reason": "proxy-only: covered by WindowShowHideProxy (WindowLifecycleBenchmark)",
+          "bench_class": "WindowLifecycleBenchmark",
+          "proxy_method": "WindowShowHideProxy"
         },
         {
           "method": "PresentationFramework!System.Windows.Application.Run(class System.Windows.Window)",
@@ -165,7 +168,10 @@
             "take-open",
             "playback"
           ],
-          "status": "pending"
+          "status": "skipped",
+          "skip_reason": "proxy-only: covered by WindowShowHideProxy (WindowLifecycleBenchmark)",
+          "bench_class": "WindowLifecycleBenchmark",
+          "proxy_method": "WindowShowHideProxy"
         },
         {
           "method": "PresentationFramework!System.Windows.Application.RunInternal(class System.Windows.Window)",
@@ -176,7 +182,10 @@
             "take-open",
             "playback"
           ],
-          "status": "pending"
+          "status": "skipped",
+          "skip_reason": "proxy-only: covered by WindowShowHideProxy (WindowLifecycleBenchmark)",
+          "bench_class": "WindowLifecycleBenchmark",
+          "proxy_method": "WindowShowHideProxy"
         },
         {
           "method": "PresentationFramework!System.Windows.Application.Run()",
@@ -187,7 +196,10 @@
             "take-open",
             "playback"
           ],
-          "status": "pending"
+          "status": "skipped",
+          "skip_reason": "proxy-only: covered by WindowShowHideProxy (WindowLifecycleBenchmark)",
+          "bench_class": "WindowLifecycleBenchmark",
+          "proxy_method": "WindowShowHideProxy"
         },
         {
           "method": "PresentationFramework!System.Windows.Window.ShowDialog()",
@@ -198,7 +210,12 @@
             "take-open",
             "playback"
           ],
-          "status": "pending"
+          "status": "skipped",
+          "skip_reason": "cv=16.1% (>10%): EnumThreadWindows + EnableWindow thread-window walk + PushModal() nested Dispatcher frame; bimodal across runs",
+          "bench_class": "WindowLifecycleBenchmark",
+          "bench_method": "WindowShowDialog",
+          "verdict": "failed",
+          "cv_pct": 16.1
         }
       ]
     },

@@ -1,0 +1,85 @@
+{
+  "cluster": "window-app",
+  "ran_at": "2026-05-07T18:39:21Z",
+  "bdn_version": "0.14.0",
+  "runtime": ".NET 10.0.7 (10.0.726.21808), X64 RyuJIT AVX2",
+  "machine": "AMD Ryzen 9 5950X, Windows 11 (10.0.26200.8246)",
+  "toolchain": "InProcessEmitToolchain",
+  "note": "InProcess toolchain required: WPF Application + Window creation needs COM STA initialization. BDN default out-of-process toolchain spawns a new MTA process which fails PresentationSource type initialization. Benchmark runs on a dedicated STA thread (WpfStaHost static singleton). All WPF work dispatched via Dispatcher.Invoke from BDN measurement thread. Batch design: WindowShowHideProxy posts 50 Show/Hide pairs per Dispatcher.Invoke call (4 BDN ops per measurement = 200 Show/Hide pairs per iteration). CPU pinned to core 0.",
+  "benchmarks": [
+    {
+      "class": "WindowLifecycleBenchmark",
+      "filter": "*WindowLifecycle*",
+      "batch_size": 50,
+      "methods": [
+        {
+          "name": "WindowShowHideProxy",
+          "profile_entries": [
+            "Application.RunDispatcher(object) (cpu_pct=2.20%, proxy-only)",
+            "Application.Run(Window) (cpu_pct=2.19%, proxy-only)",
+            "Application.RunInternal(Window) (cpu_pct=2.19%, proxy-only)",
+            "Application.Run() (cpu_pct=2.18%, proxy-only)"
+          ],
+          "mean_batch_ns": 1063066502,
+          "mean_per_op_ns": 5315332,
+          "alloc_b_per_op": 300552,
+          "cv_pct": 2.85,
+          "verdict": "pass",
+          "note": "cv=2.85% — 50 Window.Show+Hide pairs per Dispatcher.Invoke call; warm HWND path (HWND pre-created in GlobalSetup). Per Show/Hide = ~5.3ms including Win32 WM_SHOWWINDOW + WM_ACTIVATE + WM_PAINT round-trip. All four Application.Run* entries proxy-only (100% of their CPU cost inherited from Dispatcher.PushFrameImpl); Show->Hide is the closest runnable warm-steady-state surface."
+        },
+        {
+          "name": "WindowShowDialog",
+          "profile_entry": "Window.ShowDialog() (cpu_pct=2.09%, high-cv)",
+          "mean_batch_ns": 100766012,
+          "mean_per_op_ns": 100766012,
+          "alloc_b_per_op": 35632,
+          "cv_pct": 16.1,
+          "verdict": "failed",
+          "note": "cv=16.1% — consistently > 10% across two run sets (first: 9.6%, second: 16.1%). Root cause: EnumThreadWindows + EnableThreadWindows(false/true) over all thread windows + ComponentDispatcher.PushModal() nested frame adds scheduling jitter. Single-frame modal pump (pre-enqueued BeginInvoke close at Send priority) does not eliminate bimodal variance from Win32 EnableWindow(HWND[]) walk. Added to bench-skipped.tsv. Fix: isolate ShowDialog in its own process with no other windows (no thread-window list to walk); or split EnumThreadWindows cost via perf test harness."
+        },
+        {
+          "name": "NegativeControlDispatcherInvoke",
+          "profile_entry": "negative-control: Dispatcher.Invoke no-op (cross-thread baseline)",
+          "mean_batch_ns": 125797,
+          "mean_per_op_ns": 125797,
+          "alloc_b_per_op": 1080,
+          "cv_pct": 1.67,
+          "verdict": "pass",
+          "note": "cv=1.67% — pure Dispatcher.Invoke cross-thread round-trip with empty body. Establishes lower bound: the ~126us difference between this and WindowShowHideProxy (~5.3ms/op) represents Win32 ShowWindow + WM_ACTIVATE + WM_PAINT overhead (~5.2ms per Show/Hide pair). Note: UpdateLayout rejected as negative control due to bimodal behavior (clean-layout no-op vs first-dirty path); Dispatcher.Invoke no-op is a stable, non-degenerate baseline."
+        }
+      ]
+    }
+  ],
+  "skipped_entries": [
+    {
+      "method": "Application.RunDispatcher(object)",
+      "reason": "proxy-only: body is `_ownDispatcherStarted = true; Dispatcher.Run()` — 100% of CPU cost inherited from Dispatcher.PushFrameImpl (covered by dispatcher cluster). Covered by WindowShowHideProxy as warm-host proxy.",
+      "bench_class": "WindowLifecycleBenchmark",
+      "proxy_method": "WindowShowHideProxy"
+    },
+    {
+      "method": "Application.Run(Window)",
+      "reason": "proxy-only: one-liner delegating to RunInternal → RunDispatcher → Dispatcher.Run(). Blocks until Application.Shutdown(). Covered by WindowShowHideProxy as warm-host proxy.",
+      "bench_class": "WindowLifecycleBenchmark",
+      "proxy_method": "WindowShowHideProxy"
+    },
+    {
+      "method": "Application.RunInternal(Window)",
+      "reason": "proxy-only: internal method; validates args + calls EnsureHwndSource() (startup-once) + RunDispatcher(). Covered by WindowShowHideProxy as warm-host proxy.",
+      "bench_class": "WindowLifecycleBenchmark",
+      "proxy_method": "WindowShowHideProxy"
+    },
+    {
+      "method": "Application.Run()",
+      "reason": "proxy-only: emits ETW event + delegates to Run(Window). Covered by WindowShowHideProxy as warm-host proxy.",
+      "bench_class": "WindowLifecycleBenchmark",
+      "proxy_method": "WindowShowHideProxy"
+    },
+    {
+      "method": "Window.ShowDialog()",
+      "reason": "cv=16.1% (>10%): EnumThreadWindows + EnableWindow(HWND[]) walk over all thread windows + ComponentDispatcher.PushModal() nested Dispatcher frame push adds non-deterministic scheduling jitter. Bimodal across runs. Added to bench-skipped.tsv.",
+      "bench_class": "WindowLifecycleBenchmark",
+      "bench_method": "WindowShowDialog"
+    }
+  ]
+}

@@ -7,3 +7,8 @@ DispatcherOperation+DispatcherOperationEvent.WaitOne()	needs-pump: private neste
 DispatcherOperation.Wait(TimeSpan)	needs-pump: deduplicated with DispatcherOperation.Wait(); same cross-thread wait path	2026-05-07	never (Option C)
 Dispatcher.ProcessQueue()	needs-pump: private + IsInputPending() requires real HWND Win32 message queue	2026-05-07	never (Option C)
 Dispatcher.PushFrameImpl(DispatcherFrame)	skipped: method IS the Win32 GetMessage/DispatchMessage loop; no meaningful proxy	2026-05-07	never (skipped)
+Application.RunDispatcher(object)	proxy-only: covered by WindowShowHideProxy; body is _ownDispatcherStarted=true; Dispatcher.Run() — 100% CPU inherited from PushFrameImpl	2026-05-07	never (proxy)
+Application.Run(Window)	proxy-only: covered by WindowShowHideProxy; delegates to RunInternal→RunDispatcher→Dispatcher.Run(); blocks until Shutdown()	2026-05-07	never (proxy)
+Application.RunInternal(Window)	proxy-only: covered by WindowShowHideProxy; internal; calls EnsureHwndSource() (startup-once) + RunDispatcher(); blocks until Shutdown()	2026-05-07	never (proxy)
+Application.Run()	proxy-only: covered by WindowShowHideProxy; emits ETW event + delegates to Run(Window)	2026-05-07	never (proxy)
+Window.ShowDialog()	cv=16.1% (>10%): EnumThreadWindows + EnableWindow walk over all thread windows + ComponentDispatcher.PushModal() nested frame adds non-deterministic scheduling jitter; bimodal across runs	2026-05-07	isolate in dedicated process with no other thread windows
