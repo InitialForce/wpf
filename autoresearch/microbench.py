@@ -10,7 +10,7 @@ Per autoresearch iteration:
   6. Apply decision rule:
      - non-overlapping confidence intervals → significant
      - direction = sign(candidate.mean − baseline.mean)
-     - absolute floors guard against trivial wins (alloc < 64 B/op,
+     - absolute floors guard against trivial wins (alloc < 16 B/op,
        time < 5 ns/op)
      - KEEP requires SIGNIFICANT win on alloc OR time, AND
        no SIGNIFICANT regression on the other axis
@@ -70,10 +70,14 @@ BENCH_TIMEOUT_S = int(os.environ.get("WPF_AR_BENCH_TIMEOUT", "300"))
 HALT_FILE = ROOT / "HALT"
 HALT_UNCLEAR_THRESHOLD = int(os.environ.get("WPF_AR_HALT_UNCLEAR_THRESHOLD", "10"))
 
-# Absolute floors to avoid trivial wins. Alloc: 64 bytes/op = 1 reference + 1
-# header. Time: 5 ns/op ≈ 16 cycles on a 3.4 GHz CPU. Below these, even a
-# statistically significant change isn't worth keeping.
-MIN_ALLOC_BYTES_PER_OP = float(os.environ.get("WPF_AR_MIN_ALLOC_BYTES", "64"))
+# Absolute floors to avoid trivial wins. Alloc: 16 bytes/op ≈ 2 pointer-sized
+# fields per iteration — small enough that a wrapper-kill (CCM=48B, boxed
+# enum=24B, SyncCtx=32B) registers as a real win. BDN reports
+# BytesAllocatedPerOperation deterministically (CV ≈ 0 in steady state), so an
+# aggressive floor here is safe — it's the only signal that survives the time
+# axis's ~1-3 ns/op noise on STA-batch benchmarks. Time: 5 ns/op ≈ 16 cycles on
+# a 3.4 GHz CPU.
+MIN_ALLOC_BYTES_PER_OP = float(os.environ.get("WPF_AR_MIN_ALLOC_BYTES", "16"))
 MIN_TIME_NS_PER_OP = float(os.environ.get("WPF_AR_MIN_TIME_NS", "5"))
 
 # Inner-loop commits may ONLY touch product code under these prefixes (relative

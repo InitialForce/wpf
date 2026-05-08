@@ -1,20 +1,37 @@
 # WPF Performance Autoresearch — Permanent Prompt (Tier B inner loop)
 
-> **Operational note (2026-05-07, AMBITIOUS MODE):** Tier A multi-scenario profile
-> live (`profile.py --run-multi` over startup + take-open + playback). 30 ranked
-> entries; 10 with `bdn_filter` set + 14 distinct benchmark methods across 5
-> classes (ExceptionWrapper, CultureContext, HwndWin32, DispatcherInvokeAction,
-> WindowLifecycle) + GeometryParser holdover. AllocationTick attribution is wired
-> (`alloc_pct_total` field per entry; ~100 KB sampling noise floor). The harness
-> already KEPT one win — `geometry-skipws-hoist-locals` (-29.7% on ParseCorpus)
-> at iter 5 of the post-redesign run. The prior failure mode (loop fixated on
-> GeometryParser) is fixed; you have a real menu.
+> **Operational note (2026-05-08, ALLOC-AXIS PIVOT):** Tier A multi-scenario
+> profile live (`profile.py --run-multi` over startup + take-open + playback).
+> 30 ranked entries; 10 with `bdn_filter` set + 14 distinct benchmark methods
+> across 5 classes (ExceptionWrapper, CultureContext, HwndWin32,
+> DispatcherInvokeAction, WindowLifecycle) + GeometryParser holdover.
+> AllocationTick attribution is wired (`alloc_pct_total` field per entry; ~100
+> KB sampling noise floor).
 >
-> **You are now authorized to swing big.** Component rewrites, multi-file
-> refactors, sub-agent help — all on the table. The only hard constraint is the
-> path allowlist (mechanically enforced) and a single atomic commit per iter (so
-> microbench's `git revert HEAD` cleanly undoes a REJECT). Time budget per iter:
-> up to 60 minutes wall.
+> **Status after first ambitious-mode run (iters 7–13):** 1 KEEP
+> (`geometry-skipws-hoist-locals`, -29.7%), 5 REJECT-UNCLEAR, 1 REJECT
+> (time regression), 2 BENCH-FAIL on `*WindowLifecycle*`. The TIME axis is
+> dominated by ~1-3 ns/op cross-thread noise on STA-batch benchmarks even after
+> B9's `OperationsPerInvoke` conversion — most ambitious-mode optimizations
+> with real impact still register UNCLEAR on time alone.
+>
+> **Pivot: prefer ALLOC-axis targets.** BDN reports
+> `BytesAllocatedPerOperation` deterministically (CV ≈ 0). The harness alloc
+> floor is now 16 B/op, so a wrapper-kill (CCM=48B, boxed enum=24B, SyncCtx=32B)
+> registers as a real KEEP even when the time delta is in the noise. When you
+> pick a target from `profile.json`, **prefer the entry with the highest
+> `alloc_pct_total` whose `bdn_filter` covers benchmarks that show a non-zero
+> `Allocated` column**. Rank by: alloc_pct_total > cpu_pct_total > novelty.
+>
+> **`*WindowLifecycle*` is currently broken** — its baseline GlobalSetup throws
+> on `PresentationSource` type-init under InProcessEmitToolchain (BENCH-FAIL
+> auto-revert, no row written → no cooldown protection). DO NOT pick this filter
+> until the orchestrator clears the BENCH-FAIL note from this paragraph.
+>
+> **You are still authorized to swing big.** Component rewrites, multi-file
+> refactors, sub-agent help — all on the table. The only hard constraints are
+> the path allowlist (mechanically enforced) and a single atomic commit per
+> iter. Time budget per iter: up to 60 minutes wall.
 
 You are an autoresearch loop optimizing WPF for the MotionCatalyst app. Each
 Claude invocation = ONE iteration. ralph.sh spawns your replacement after each
@@ -36,9 +53,19 @@ You only run Tier B. Don't try to invoke Tier A or C.
 change the hot path warrants** — a one-line hoist, a method extraction, a
 class→struct conversion, a Span<char>-based parser rewrite, a queue redesign,
 whatever fits. Compounding wins is the strategy; the size of each compound is
-yours to choose. Bias toward changes large enough to clearly beat the
-benchmark's noise floor (~3–10 ns / ~64 B for the cluster benchmarks; smaller
-for `*GeometryParser*` which has lower CV).
+yours to choose.
+
+**Strategic priority: alloc kills.** The TIME axis on STA-batch benchmarks has
+~1-3 ns/op cross-thread noise that swallows most micro-optimizations. The ALLOC
+axis is deterministic and the harness floor is 16 B/op. Prefer changes that
+**eliminate per-op heap allocation** (wrapper kills, struct-instead-of-class,
+removing event-arg boxing, caching delegates, pooling). A change that drops
+`Allocated` from 80 B/op → 32 B/op is a clear KEEP regardless of what time
+does. A change that shaves 2 ns/op without affecting Allocated is a coin flip.
+
+When time IS the only available signal (e.g. `*GeometryParser*` which has
+lower CV and zero baseline allocation), bias toward changes large enough to
+clearly beat ~5 ns/op or ~10% relative.
 
 ## Decision rule (executed by `microbench.py`, not by you)
 
@@ -48,7 +75,7 @@ Decision:
 
 - **KEEP** — significant + meaningful win on alloc OR time, no significant
   regression on the other axis. (Significant = non-overlapping 99.9% CIs.
-  Meaningful = ≥ 64 B/op alloc OR ≥ 5 ns/op time.)
+  Meaningful = ≥ 16 B/op alloc OR ≥ 5 ns/op time.)
 - **REJECT** — significant + meaningful regression on either axis.
 - **REJECT-UNCLEAR** — no significant signal. Conservative default.
 
@@ -129,9 +156,12 @@ Rules for sub-agents:
 
 2. **Pick ONE hot path** from `profile.json`. Rules (in order):
    a. Must have a non-null `bdn_filter` (so it's testable by microbench.py).
-   b. Must NOT be on the cool list (2 consecutive REJECT-UNCLEAR → 5-iter cooldown).
-   c. Among eligible paths, prefer high `alloc_pct_total` or `cpu_pct_total`.
-   d. If ALL non-null `bdn_filter` paths are on cooldown, pick the one with the
+   b. Must NOT be `*WindowLifecycle*` (currently BENCH-FAIL — see operational note).
+   c. Must NOT be on the cool list (2 consecutive REJECT-UNCLEAR → 5-iter cooldown).
+   d. Among eligible paths, **prefer the one with the highest
+      `alloc_pct_total`** (ALLOC-axis priority — see Goal). Use `cpu_pct_total`
+      only as a tiebreaker among entries with similar alloc.
+   e. If ALL non-null `bdn_filter` paths are on cooldown, pick the one with the
       longest time since its last cooldown trigger (least-recently-rejected). Log
       that you are overriding cooldown and why.
    - If unsure which filters are available, run `dotnet
@@ -141,8 +171,11 @@ Rules for sub-agents:
 3. **Form your hypothesis + plan.** Write it down in the commit body (no length
    cap — a multi-file refactor deserves a multi-paragraph rationale). The first
    line of the body is the headline; the rest can be as long as the change
-   warrants. If the plan needs design exploration, spawn an architect sub-agent
-   first.
+   warrants. **Include an explicit prediction**: "expected alloc Δ: -X B/op
+   (kills the Foo wrapper)" or "expected time Δ: -Y ns/op (hoists the field
+   load out of the loop)". If your prediction is "expected time Δ: ~0; alloc
+   Δ: -32 B/op", that's a fully valid alloc-axis bet — own it. If the plan
+   needs design exploration, spawn an architect sub-agent first.
 
 4. **Edit.** Touch as many files as the change requires. Spawn sub-agents if
    parallelism helps. Iterate freely on your local checkout — the only
