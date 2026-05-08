@@ -31,4 +31,38 @@
     <PackageReference Include="BenchmarkDotNet.Diagnostics.Windows" Version="0.14.*" />
   </ItemGroup>
 
+  <!--
+    Override the runtime-pack WPF assemblies with the locally-built copies
+    from the autoresearch fork. UseWPF=true above adds a FrameworkReference to
+    Microsoft.WindowsDesktop.App which, by itself, would resolve every WPF
+    assembly from the .NET runtime pack at compile + publish time. BDN's
+    CsProjCoreToolchain regenerates an inner .csproj per benchmark and
+    rebuilds it through a ProjectReference back to this csproj — the inner
+    build then re-resolves WindowsBase / System.Xaml / PresentationCore from
+    the runtime pack, silently bypassing any DLL swap microbench.py performs
+    in the publish dir. We close that gap by binding these three assemblies
+    to explicit HintPath references, with Private=true so the inner build
+    copies the locally-built copy to its own output dir.
+
+    PresentationFramework is intentionally not overridden — its build cycle
+    isn't bypassable with SkipDirectWriteForwarderProjectRef alone, so it
+    stays on the runtime pack until that's solved (the only PF-resident
+    filter, *WindowLifecycle*, is skip-listed in autoresearch/program.md
+    until then).
+  -->
+  <ItemGroup>
+    <Reference Include="WindowsBase">
+      <HintPath>$(MSBuildThisFileDirectory)..\artifacts\bin\WindowsBase\x64\Release\net10.0\WindowsBase.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="System.Xaml">
+      <HintPath>$(MSBuildThisFileDirectory)..\artifacts\bin\System.Xaml\x64\Release\net10.0\System.Xaml.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="PresentationCore">
+      <HintPath>$(MSBuildThisFileDirectory)..\artifacts\bin\PresentationCore\x64\Release\net10.0\PresentationCore.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
 </Project>
