@@ -330,34 +330,6 @@ namespace MS.Internal.Markup
 
             _curIndex = i;
         }
-
-        // Like SkipDigits(signAllowed:false), but also accumulates the parsed digits
-        // into an int value. Used by ReadNumber's simple-integer fast path so the
-        // digits are walked exactly once instead of twice (SkipDigits + the post-hoc
-        // integer-folding loop). Overflow is benign — the simple-integer return path
-        // is gated on (_curIndex <= start + 8), bounding the accumulation to <=8
-        // decimal digits which always fits in int (max 99,999,999).
-        private void SkipAndAccumulateDigits(out int value)
-        {
-            string s = _pathString;
-            int end = _pathLength;
-            int i = _curIndex;
-            int v = 0;
-
-            while (i < end)
-            {
-                uint d = (uint)(s[i] - '0');
-                if (d > 9u)
-                {
-                    break;
-                }
-                v = v * 10 + (int)d;
-                i++;
-            }
-
-            _curIndex = i;
-            value = v;
-        }
         
 //       
 //         /// <summary>
@@ -393,8 +365,8 @@ namespace MS.Internal.Markup
             if (!IsNumber(allowComma))
             {
                 ThrowBadToken();
-            }
-
+            }                
+            
             bool simple = true;
             int start = _curIndex;
 
@@ -407,14 +379,8 @@ namespace MS.Internal.Markup
             // IsNumber already loaded _pathString[_curIndex] into _token and proved we're in
             // bounds, so reuse it instead of re-doing More() + two string indexer fetches.
             char first = _token;
-            int simpleSign = 1;
-            int simpleValue = 0;
             if (first == '-' || first == '+')
             {
-                if (first == '-')
-                {
-                    simpleSign = -1;
-                }
                 _curIndex ++;
             }
 
@@ -440,12 +406,7 @@ namespace MS.Internal.Markup
             }
             else
             {
-                // Walk the integer digits exactly once, accumulating the value
-                // into simpleValue. The simple-integer fast path below uses the
-                // precomputed value instead of re-walking the same span — saves
-                // one string-indexer pass per number on the corpus's
-                // digit-only path (the dominant case for SVG path numbers).
-                SkipAndAccumulateDigits(out simpleValue);
+                SkipDigits(! AllowSign);
 
                 // Optional period, followed by more digits
                 if (More() && (_pathString[_curIndex] == '.'))
@@ -466,11 +427,32 @@ namespace MS.Internal.Markup
 
             if (simple && (_curIndex <= (start + 8))) // 32-bit integer
             {
-                // Sign was captured into simpleSign at the top of the method;
-                // simpleValue was accumulated by SkipAndAccumulateDigits. The
-                // (_curIndex <= start + 8) guard above bounds simpleValue to
-                // <=8 decimal digits which always fits in int.
-                return simpleValue * simpleSign;
+                // Hoist _pathString to a local so the JIT proves the ref is
+                // stable across the loop and folds away per-iteration field
+                // loads + null-checks on the string indexer.
+                string s = _pathString;
+                int end = _curIndex;
+                int sign = 1;
+
+                if (s[start] == '+')
+                {
+                    start ++;
+                }
+                else if (s[start] == '-')
+                {
+                    start ++;
+                    sign = -1;
+                }
+
+                int value = 0;
+
+                while (start < end)
+                {
+                    value = value * 10 + (s[start] - '0');
+                    start ++;
+                }
+
+                return value * sign;
             }
             else
             {
