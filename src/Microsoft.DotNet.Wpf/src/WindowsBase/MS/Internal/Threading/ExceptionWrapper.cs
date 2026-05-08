@@ -21,7 +21,26 @@ namespace System.Windows.Threading
 
             try
             {
-                result = InternalRealCall(callback, args, numArgs);
+                // Hand-inlined hot paths cover the dominant dispatcher workload:
+                //   numArgs==0 + Action            (Dispatcher.Invoke(Action) / BeginInvoke(Action))
+                //   numArgs==1 + DispatcherOperationCallback (legacy callback signature)
+                // Folding them into TryCatchWhen's try block eliminates the
+                // InternalRealCall call frame and the numArgs/numArgsEx decode
+                // prelude on every dispatch. Cold cases (ShutdownCallback,
+                // SendOrPostCallback, arbitrary delegate, numArgs==-1 params-array
+                // unwrap) fall through to InternalRealCall, whose body is unchanged.
+                if (numArgs == 0 && callback is Action action)
+                {
+                    action();
+                }
+                else if (numArgs == 1 && callback is DispatcherOperationCallback dispatcherOperationCallback)
+                {
+                    result = dispatcherOperationCallback(args);
+                }
+                else
+                {
+                    result = InternalRealCall(callback, args, numArgs);
+                }
             }
             catch (Exception e) when (FilterException(source, e))
             {
