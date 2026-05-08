@@ -300,18 +300,14 @@ namespace MS.Internal
 
             public void ReadCultureInfosFromCurrentThread()
             {
-                // CultureInfo.CurrentCulture is the same TLS slot Thread.CurrentThread.CurrentCulture
-                // forwards to, but skips the Thread.CurrentThread instance lookup. CallbackWrapper +
-                // Run.finally invoke this pair 4x per CPEC.Run, so cutting one TLS indirection per
-                // access compounds.
-                _culture = CultureInfo.CurrentCulture;
-                _uICulture = CultureInfo.CurrentUICulture;
+                _culture = Thread.CurrentThread.CurrentCulture;
+                _uICulture = Thread.CurrentThread.CurrentUICulture;
             }
 
             public void WriteCultureInfosToCurrentThread()
             {
-                CultureInfo.CurrentCulture = _culture;
-                CultureInfo.CurrentUICulture = _uICulture;
+                Thread.CurrentThread.CurrentCulture = _culture;
+                Thread.CurrentThread.CurrentUICulture = _uICulture;
             }
 
             public ContextCallback Callback
