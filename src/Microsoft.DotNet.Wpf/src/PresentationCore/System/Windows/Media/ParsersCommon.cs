@@ -8,7 +8,6 @@
 
 using System;
 using System.IO;
-using System.Runtime.CompilerServices;
 
 #if PRESENTATION_CORE
 
@@ -196,43 +195,13 @@ namespace MS.Internal.Markup
             throw new System.FormatException(SR.Format(SR.Parser_UnexpectedToken, _pathString, _curIndex - 1));
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private bool More()
         {
             return _curIndex < _pathLength;
         }
-
-        // Skip white space, one comma if allowed.
-        //
-        // Inlinable fast path: when the current char is already a non-whitespace
-        // ordinary char (digit, letter, sign, dot — all > ' ' and != ','), no
-        // skipping is needed and we return false immediately. This case fires on
-        // every back-to-back IsNumber/SkipWhiteSpace call inside the parser's
-        // do-while coordinate loops where the position is already past whitespace
-        // from the prior iteration's loop-condition `IsNumber(AllowComma)` check.
-        // The slow path runs whenever an actual whitespace/comma char is at the
-        // current position (the genuine "between tokens" case).
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        
+        // Skip white space, one comma if allowed
         private bool SkipWhiteSpace(bool allowComma)
-        {
-            int i = _curIndex;
-            if ((uint)i < (uint)_pathLength)
-            {
-                char ch = _pathString[i];
-                // ch > ' ' weeds out all SVG whitespace (' ', '\t', '\n', '\r')
-                // plus any other low controls; ch != ',' weeds out the only other
-                // case the slow path treats specially. The full IsWhiteSpace check
-                // is left to the slow path for the rare high-codepoint whitespace
-                // (U+00A0 etc.) — same correctness as before via fall-through.
-                if (ch > ' ' && ch != ',')
-                {
-                    return false;
-                }
-            }
-            return SkipWhiteSpaceSlow(allowComma);
-        }
-
-        private bool SkipWhiteSpaceSlow(bool allowComma)
         {
             // Hoist fields to locals so the JIT proves they don't change across
             // the loop and folds away per-iteration field loads + null-checks on
@@ -307,7 +276,6 @@ namespace MS.Internal.Markup
             }
         }
         
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private bool IsNumber(bool allowComma)
         {
             bool commaMet = SkipWhiteSpace(allowComma);
