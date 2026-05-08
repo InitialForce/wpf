@@ -70,21 +70,21 @@ namespace MS.Internal
         ///     Captures the execution context from the current thread.
         /// </summary>
         /// <returns>
-        ///     An <see cref="CulturePreservingExecutionContext"/> object representing 
+        ///     An <see cref="CulturePreservingExecutionContext"/> object representing
         ///     the <see cref="ExecutionContext"/> for the current thread.
         /// </returns>
         /// <remarks>
-        ///     If ExecutionContext.SuppressFlow had been previously called, 
-        ///     then this method would return null; 
+        ///     If ExecutionContext.SuppressFlow had been previously called,
+        ///     then this method would return null;
         /// </remarks>
         public static CulturePreservingExecutionContext Capture()
         {
             // ExecutionContext.SuppressFlow had been called - we expect
-            // ExecutionContext.Capture() to return null, so match that 
-            // behavior and return null. 
+            // ExecutionContext.Capture() to return null, so match that
+            // behavior and return null.
             if (ExecutionContext.IsFlowSuppressed())
             {
-                return null; 
+                return null;
             }
 
             var culturePreservingContext = new CulturePreservingExecutionContext();
@@ -95,11 +95,11 @@ namespace MS.Internal
             }
             else
             {
-                // If ExecutionContext.Capture() returns null for any other 
+                // If ExecutionContext.Capture() returns null for any other
                 // reason besides IsFlowSuppressed, then match that behavior
-                // and return null 
+                // and return null
                 culturePreservingContext.Dispose();
-                return null; 
+                return null;
             }
         }
 
@@ -156,23 +156,31 @@ namespace MS.Internal
                 return;
             }
 
-            // Save culture information - we will need this to 
-            // restore just before the callback is actually invoked from 
-            // CallbackWrapper.
-            executionContext._cultureAndContext = CultureAndContextManager.Initialize(callback, state);
+            // Stash callback + state on the CPEC instance and snapshot the current
+            // thread's culture infos. The CPEC itself is then passed as the state to
+            // ExecutionContext.Run, eliminating the per-Run CultureAndContextManager
+            // wrapper allocation that this code previously paid on every dispatcher
+            // culture-preserving callback (~48 B/op on x64).
+            executionContext._userCallback = callback;
+            executionContext._userState = state;
+            executionContext.ReadCultureInfosFromCurrentThread();
 
             try
             {
                 ExecutionContext.Run(
                     executionContext._context,
                     CulturePreservingExecutionContext.CallbackWrapperDelegate,
-                    executionContext._cultureAndContext);
+                    executionContext);
             }
             finally
             {
-                // Restore culture information - it might have been 
+                // Restore culture information - it might have been
                 // modified during the callback execution.
-                executionContext._cultureAndContext.WriteCultureInfosToCurrentThread();
+                executionContext.WriteCultureInfosToCurrentThread();
+                // Clear callback/state references so they don't keep the closure roots
+                // alive past the Run call (matches the GC liveness of the discarded wrapper).
+                executionContext._userCallback = null;
+                executionContext._userState = null;
             }
 }
 
@@ -192,21 +200,38 @@ namespace MS.Internal
         /// </param>
         private static void CallbackWrapper(object obj)
         {
-            var cultureAndContext = obj as CultureAndContextManager;
+            var cpec = (CulturePreservingExecutionContext)obj;
 
-            ContextCallback callback = cultureAndContext.Callback;
-            object state = cultureAndContext.State;
+            ContextCallback callback = cpec._userCallback;
+            object state = cpec._userState;
 
-            // Restore cultre information previously saved from the call site, 
-            // call into the callback, and recapture culture information which 
-            // might have been updated by the callback. 
-            // 
+            // Restore culture information previously saved from the call site,
+            // call into the callback, and recapture culture information which
+            // might have been updated by the callback.
+            //
             // The callback is guaranteed to be non-null by Run, so an explicit
-            // check is not needed here. 
+            // check is not needed here.
 
-            cultureAndContext.WriteCultureInfosToCurrentThread();
+            cpec.WriteCultureInfosToCurrentThread();
             callback.Invoke(state);
-            cultureAndContext.ReadCultureInfosFromCurrentThread();
+            cpec.ReadCultureInfosFromCurrentThread();
+        }
+
+        private void ReadCultureInfosFromCurrentThread()
+        {
+            // Cache Thread.CurrentThread once - the JIT cannot CSE it across
+            // the two property reads because CurrentCulture/CurrentUICulture
+            // are virtual setters that may have side effects.
+            var t = Thread.CurrentThread;
+            _culture = t.CurrentCulture;
+            _uICulture = t.CurrentUICulture;
+        }
+
+        private void WriteCultureInfosToCurrentThread()
+        {
+            var t = Thread.CurrentThread;
+            t.CurrentCulture = _culture;
+            t.CurrentUICulture = _uICulture;
         }
 
         #endregion
@@ -258,71 +283,19 @@ namespace MS.Internal
         #region Private Fields
 
         private ExecutionContext _context;
-        private CultureAndContextManager _cultureAndContext;
+
+        // Inlined from the former private CultureAndContextManager wrapper. Holding
+        // these directly on the CPEC instance saves the per-Run wrapper allocation
+        // (the wrapper's only purpose was to ferry state through ExecutionContext.Run's
+        // `object state` parameter, but CPEC is itself already in scope at Run entry
+        // and lives at least as long as the EC.Run call).
+        private ContextCallback _userCallback;
+        private object _userState;
+        private CultureInfo _culture;
+        private CultureInfo _uICulture;
 
         // static delegate to prevent repeated implicit allocations during Run
         private static ContextCallback CallbackWrapperDelegate;
-
-        #endregion
-
-        #region Private Types
-
-        /// <summary>
-        /// Encapsulates culture, callback and state information. 
-        /// Abstracts the work of capture culture information from
-        ///   the current thread, and restoring it back.
-        /// </summary>
-        private class CultureAndContextManager
-        {
-            #region Constructor 
-
-            private CultureAndContextManager(ContextCallback callback, object state)
-            {
-                Callback = callback;
-                State = state;
-                ReadCultureInfosFromCurrentThread();
-            }
-
-            #endregion
-
-            /// <summary>
-            /// Factory - Captures cuture information from current thread, and 
-            /// saves callback and state information for future use by the caller. 
-            /// </summary>
-            /// <param name="callback"></param>
-            /// <param name="state"></param>
-            /// <returns></returns>
-            public static CultureAndContextManager Initialize(ContextCallback callback, object state)
-            {
-                return new CultureAndContextManager(callback, state);
-            }
-
-
-            public void ReadCultureInfosFromCurrentThread()
-            {
-                _culture = Thread.CurrentThread.CurrentCulture;
-                _uICulture = Thread.CurrentThread.CurrentUICulture;
-            }
-
-            public void WriteCultureInfosToCurrentThread()
-            {
-                Thread.CurrentThread.CurrentCulture = _culture;
-                Thread.CurrentThread.CurrentUICulture = _uICulture;
-            }
-
-            public ContextCallback Callback
-            {
-                get; private set;
-            }
-
-            public object State
-            {
-                get; private set;
-            }
-
-            private CultureInfo _culture;
-            private CultureInfo _uICulture;
-        }
 
         #endregion
     }
