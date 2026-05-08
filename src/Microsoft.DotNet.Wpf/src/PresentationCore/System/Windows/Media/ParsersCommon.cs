@@ -78,9 +78,27 @@ namespace MS.Internal.Markup
             StreamGeometry geometry = new StreamGeometry();
             StreamGeometryContext context = geometry.Open(); 
 
-            ParseStringToStreamGeometryContext( context, pathString, formatProvider , ref fillRule ) ; 
+            ParseStringToStreamGeometryContext( context, pathString, formatProvider , ref fillRule ) ;
 
-            geometry.FillRule = fillRule ;                                          
+            // Only invoke the FillRule DP setter when the parser actually changed
+            // fillRule away from the default. FillRuleProperty is registered with
+            // FillRule.EvenOdd as its default value (Generated/StreamGeometry.cs),
+            // so a fresh StreamGeometry already reads back EvenOdd from the
+            // property store with no entry allocated. The unconditional setter
+            // routes through DependencyObject.SetValueInternal which boxes via
+            // FillRuleBoxes (cached, free), allocates / mutates an
+            // EffectiveValueEntry to record the explicit set, runs the
+            // ValidateValueCallback (IsFillRuleValid) and dispatches the
+            // FillRulePropertyChanged callback. ParseStringToStreamGeometryContext
+            // only assigns fillRule = Nonzero when the path starts with "F1"; for
+            // every M-/m-prefixed path (the GeometryParser microbench corpus and
+            // the overwhelming majority of real-world XAML path strings) the
+            // setter is a pure no-op semantically, so skipping it kills the
+            // per-Parse property-store work + EffectiveValueEntry alloc.
+            if (fillRule != FillRule.EvenOdd)
+            {
+                geometry.FillRule = fillRule ;
+            }
             geometry.Freeze();
 
             return geometry;
