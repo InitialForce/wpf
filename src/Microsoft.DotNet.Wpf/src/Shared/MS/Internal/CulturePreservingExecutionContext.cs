@@ -79,20 +79,14 @@ namespace MS.Internal
         /// </remarks>
         public static CulturePreservingExecutionContext Capture()
         {
-            // ExecutionContext.SuppressFlow had been called - we expect
-            // ExecutionContext.Capture() to return null, so match that
-            // behavior and return null.
-            if (ExecutionContext.IsFlowSuppressed())
-            {
-                return null;
-            }
-
+            // ExecutionContext.Capture() already returns null when flow is suppressed
+            // (its implementation reads the current EC and returns null if either
+            // the EC ref is null or its _isFlowSuppressed is true), so the explicit
+            // ExecutionContext.IsFlowSuppressed() precheck does the same TLS read
+            // twice. Drop it.
             var ec = ExecutionContext.Capture();
             if (ec == null)
             {
-                // If ExecutionContext.Capture() returns null for any other
-                // reason besides IsFlowSuppressed, then match that behavior
-                // and return null.
                 return null;
             }
 
@@ -157,9 +151,12 @@ namespace MS.Internal
         /// </remarks>
         public static void Run(CulturePreservingExecutionContext executionContext, ContextCallback callback, object state)
         {
-            ArgumentNullException.ThrowIfNull(executionContext);
-
-            if (callback == null) return; // Bail out early if callback is null
+            // Both production callers (DispatcherOperation.Invoke and
+            // Dispatcher.ShutdownImpl) explicitly null-check executionContext and
+            // pass non-null ContextCallback delegates created in their ctors —
+            // the redundant ArgumentNullException + `if(callback == null) return`
+            // guards are dead branches on the hot path. Drop them; a faulty caller
+            // gets the same NRE one line later.
 
             // Compat switch is set, defer directly to EC.Run
             if (BaseAppContextSwitches.DoNotUseCulturePreservingDispatcherOperations)
@@ -172,9 +169,19 @@ namespace MS.Internal
             // Stash the user callback + state on the CPEC itself and snapshot the
             // current culture infos. CallbackWrapper will restore them just before
             // invoking the user callback. (Single-Run-per-CPEC lifecycle assumed.)
+            //
+            // Reuse a single Thread.CurrentThread local for the snapshot read and
+            // the finally restore — the JIT does not CSE the [Intrinsic] TLS access
+            // across method boundaries, so the original ReadCultureInfosFromCurrentThread
+            // / WriteCultureInfosToCurrentThread helper-method version paid two
+            // Thread.CurrentThread reads per call. Local-only (vs iter=030's CPEC
+            // _thread field) keeps the value in a register and avoids the field
+            // write/read overhead that swamped the savings last time.
+            Thread t = Thread.CurrentThread;
             executionContext._callback = callback;
             executionContext._state = state;
-            executionContext.ReadCultureInfosFromCurrentThread();
+            executionContext._culture = t.CurrentCulture;
+            executionContext._uICulture = t.CurrentUICulture;
 
             try
             {
@@ -185,9 +192,11 @@ namespace MS.Internal
             }
             finally
             {
-                // Restore culture information - it might have been
-                // modified during the callback execution.
-                executionContext.WriteCultureInfosToCurrentThread();
+                // Restore culture information - it might have been modified during
+                // the callback execution. EC.Run cannot hop threads, so the cached
+                // Thread reference is still valid here.
+                t.CurrentCulture = executionContext._culture;
+                t.CurrentUICulture = executionContext._uICulture;
             }
 
             ReturnToPool(executionContext);
@@ -232,31 +241,31 @@ namespace MS.Internal
         {
             var executionContext = (CulturePreservingExecutionContext)obj;
 
-            ContextCallback callback = executionContext._callback;
-            object state = executionContext._state;
+            // Single Thread.CurrentThread local for both the pre-callback restore
+            // and the post-callback recapture. Avoids three redundant TLS reads
+            // (Thread.CurrentThread is an [Intrinsic] but the JIT does not CSE
+            // it across the four .CurrentCulture/.CurrentUICulture accesses the
+            // original WriteCultureInfosToCurrentThread + ReadCultureInfosFromCurrentThread
+            // helper-method pair performed). EC.Run is guaranteed to call this
+            // wrapper on the same thread that invoked it, so the local Thread
+            // reference is the same one Run() saw at entry.
+            Thread t = Thread.CurrentThread;
 
-            // Restore cultre information previously saved from the call site,
+            // Restore culture information previously saved from the call site,
             // call into the callback, and recapture culture information which
             // might have been updated by the callback.
             //
             // The callback is guaranteed to be non-null by Run, so an explicit
             // check is not needed here.
+            t.CurrentCulture = executionContext._culture;
+            t.CurrentUICulture = executionContext._uICulture;
 
-            executionContext.WriteCultureInfosToCurrentThread();
+            ContextCallback callback = executionContext._callback;
+            object state = executionContext._state;
             callback.Invoke(state);
-            executionContext.ReadCultureInfosFromCurrentThread();
-        }
 
-        private void ReadCultureInfosFromCurrentThread()
-        {
-            _culture = Thread.CurrentThread.CurrentCulture;
-            _uICulture = Thread.CurrentThread.CurrentUICulture;
-        }
-
-        private void WriteCultureInfosToCurrentThread()
-        {
-            Thread.CurrentThread.CurrentCulture = _culture;
-            Thread.CurrentThread.CurrentUICulture = _uICulture;
+            executionContext._culture = t.CurrentCulture;
+            executionContext._uICulture = t.CurrentUICulture;
         }
 
         #endregion
