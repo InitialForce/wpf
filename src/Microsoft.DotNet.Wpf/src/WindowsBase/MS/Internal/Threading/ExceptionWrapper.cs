@@ -1,6 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.Runtime.CompilerServices;
 using System.Threading;
 
 namespace System.Windows.Threading
@@ -34,7 +35,42 @@ namespace System.Windows.Threading
             return result;
         }
 
+        // Hot-path entry point. The two checks below cover the dominant dispatcher
+        // workloads: numArgs==0 + Action (the Dispatcher.Invoke(Action) /
+        // BeginInvoke(Action) flows) and numArgs==1 + DispatcherOperationCallback
+        // (the legacy Invoke(DispatcherOperationCallback, object) / BeginInvoke
+        // flows). Everything else — Dispatcher.ShutdownCallback, SendOrPostCallback,
+        // arbitrary delegates, and the numArgs==-1 params-array unwrap path — falls
+        // into InternalRealCallSlow, which is kept out-of-line so the hot path's
+        // emitted machine code stays tight and inlines cleanly into TryCatchWhen.
+        // AggressiveInlining is required because the method is moderate-sized when
+        // the slow body is included; with it extracted, the hot body is small enough
+        // that inlining into TryCatchWhen lets the JIT fold checks across the
+        // try/catch frame and avoid a second method-call frame on every dispatch.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private object InternalRealCall(Delegate callback, object args, int numArgs)
+        {
+            // Fast path: numArgs == 0 with an Action callback (dispatcher's most
+            // frequent workload). Direct invoke skips the args/numArgs decode
+            // cascade and the InternalRealCallSlow method call.
+            if (numArgs == 0 && callback is Action action)
+            {
+                action();
+                return null;
+            }
+
+            // Fast path: numArgs == 1 with a DispatcherOperationCallback (second
+            // most frequent — legacy DispatcherOperationCallback signature).
+            if (numArgs == 1 && callback is DispatcherOperationCallback dispatcherOperationCallback)
+            {
+                return dispatcherOperationCallback(args);
+            }
+
+            return InternalRealCallSlow(callback, args, numArgs);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static object InternalRealCallSlow(Delegate callback, object args, int numArgs)
         {
             object result = null;
 
@@ -66,6 +102,7 @@ namespace System.Windows.Threading
             {
                 if (callback is Action action)
                 {
+                    // Reachable when numArgs==-1 unwraps to a 0-arg call.
                     action();
                 }
                 else
@@ -85,6 +122,7 @@ namespace System.Windows.Threading
             {
                 if (callback is DispatcherOperationCallback dispatcherOperationCallback)
                 {
+                    // Reachable when numArgs==-1 unwraps to a 1-arg call.
                     result = dispatcherOperationCallback(singleArg);
                 }
                 else
