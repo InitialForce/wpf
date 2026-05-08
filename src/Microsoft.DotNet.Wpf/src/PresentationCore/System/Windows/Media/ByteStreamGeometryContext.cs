@@ -23,6 +23,34 @@ namespace System.Windows.Media
         /// </summary>
         internal ByteStreamGeometryContext()
         {
+            InitializePathGeometryHeader();
+        }
+
+        /// <summary>
+        /// Reset all per-parse state and re-write the initial MIL_PATHGEOMETRY header
+        /// so this instance can be reused after a prior Dispose. Used by the
+        /// [ThreadStatic] pool in StreamGeometryCallbackContext to skip the per-Open
+        /// heap allocation that would otherwise fire on every Geometry.Parse call.
+        /// </summary>
+        protected void ResetForReuse()
+        {
+            _disposed = false;
+            _currChunkOffset = 0;
+            _chunkList = default;
+            _currOffset = 0;
+            _currentPathGeometryData = default;
+            _currentPathFigureData = default;
+            _currentPathFigureDataOffset = -1;
+            _currentPolySegmentData = default;
+            _currentPolySegmentDataOffset = -1;
+            _lastSegmentSize = 0;
+            _lastFigureSize = 0;
+
+            InitializePathGeometryHeader();
+        }
+
+        private void InitializePathGeometryHeader()
+        {
             // For now, we just write this into the stream.  We'll update its fields as we go.
             MIL_PATHGEOMETRY tempPath = new MIL_PATHGEOMETRY();
 
@@ -34,6 +62,18 @@ namespace System.Windows.Media
                 // All other fields are intentionally left as 0;
                 _currentPathGeometryData.Size = (uint)sizeof(MIL_PATHGEOMETRY);
             }
+        }
+
+        /// <summary>
+        /// Drop the chunkList reference held by this context. Called from
+        /// StreamGeometryCallbackContext.DisposeCore right before returning the
+        /// instance to the [ThreadStatic] pool — at that point _chunkList[0]
+        /// is the FINAL byte[] now owned by the StreamGeometry, and we don't
+        /// want the pooled context to hold an extra reference to it.
+        /// </summary>
+        protected void DetachChunkListForPool()
+        {
+            _chunkList = default;
         }
 
         #endregion Constructors
