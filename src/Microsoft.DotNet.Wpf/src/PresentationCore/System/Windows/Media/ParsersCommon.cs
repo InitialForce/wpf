@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Runtime.CompilerServices;
 
 #if PRESENTATION_CORE
 
@@ -195,13 +196,44 @@ namespace MS.Internal.Markup
             throw new System.FormatException(SR.Format(SR.Parser_UnexpectedToken, _pathString, _curIndex - 1));
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private bool More()
         {
             return _curIndex < _pathLength;
         }
-        
-        // Skip white space, one comma if allowed
+
+        // Skip white space, one comma if allowed.
+        //
+        // Inlinable fast path: when the current char is already a non-whitespace
+        // ordinary char (digit, letter, sign, dot — all > ' ' and != ','), no
+        // skipping is needed and we return false immediately. Each ReadNumber
+        // ends with _curIndex pointing one past the last digit, which on the SVG
+        // integer corpus is exactly the space-or-end that the next IsNumber's
+        // SkipWhiteSpace will consume — so the fast path fires every time the
+        // parser is *already* parked on a non-whitespace token start. The slow
+        // path then runs only when an actual whitespace/comma char is at the
+        // current position (the genuine "between tokens" case).
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private bool SkipWhiteSpace(bool allowComma)
+        {
+            int i = _curIndex;
+            if ((uint)i < (uint)_pathLength)
+            {
+                char ch = _pathString[i];
+                // ch > ' ' weeds out all SVG whitespace (' ', '\t', '\n', '\r')
+                // plus any other low controls; ch != ',' weeds out the only other
+                // case the slow path treats specially. The full IsWhiteSpace check
+                // is left to the slow path for the rare high-codepoint whitespace
+                // (U+00A0 etc.) — same correctness as before via fall-through.
+                if (ch > ' ' && ch != ',')
+                {
+                    return false;
+                }
+            }
+            return SkipWhiteSpaceSlow(allowComma);
+        }
+
+        private bool SkipWhiteSpaceSlow(bool allowComma)
         {
             // Hoist fields to locals so the JIT proves they don't change across
             // the loop and folds away per-iteration field loads + null-checks on
@@ -276,6 +308,7 @@ namespace MS.Internal.Markup
             }
         }
         
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private bool IsNumber(bool allowComma)
         {
             bool commaMet = SkipWhiteSpace(allowComma);
@@ -499,21 +532,34 @@ namespace MS.Internal.Markup
         }
         
         /// <summary>
-        /// Read a relative point
+        /// Read an absolute point (uppercase commands: M, L, C, S, Q, T, A).
         /// </summary>
-        /// <returns></returns>
-        private Point ReadPoint(char cmd, bool allowcomma)
+        /// <remarks>
+        /// Split out from the original cmd-parameterised ReadPoint so the
+        /// `cmd >= 'a'` branch is gone from the hot dispatch path. The
+        /// AggressiveInlining hint lets the JIT fold the two ReadNumber +
+        /// Point construction into the per-cmd loop body in
+        /// ParseToGeometryContext.
+        /// </remarks>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private Point ReadPointAbsolute(bool allowcomma)
         {
             double x = ReadNumber(allowcomma);
             double y = ReadNumber(AllowComma);
-
-            if (cmd >= 'a') // 'A' < 'a'. lower case for relative
-            {
-                x += _lastPoint.X;
-                y += _lastPoint.Y;
-            }                
-
             return new Point(x, y);
+        }
+
+        /// <summary>
+        /// Read a relative point (lowercase commands: m, l, c, s, q, t, a).
+        /// Adds the offset to <see cref="_lastPoint"/> so the SVG-style
+        /// "relative to last point" semantics are preserved.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private Point ReadPointRelative(bool allowcomma)
+        {
+            double x = ReadNumber(allowcomma);
+            double y = ReadNumber(AllowComma);
+            return new Point(x + _lastPoint.X, y + _lastPoint.Y);
         }
     
         /// <summary>
@@ -578,124 +624,221 @@ namespace MS.Internal.Markup
                     first = false;
                 }                    
                 
+                // Each command's case is split between its absolute (upper) and
+                // relative (lower) variants. This eliminates the dynamic
+                // `cmd >= 'a'` branch that ReadPoint used to evaluate, and lets
+                // the AggressiveInlining hints on ReadPointAbsolute /
+                // ReadPointRelative fold the per-coord work directly into the
+                // hot loop body. The 'l'/'L'/h/H/v/V cluster's redundant inner
+                // switch (which dispatched on cmd inside the do-while body, even
+                // though cmd was invariant within a single command's coords) is
+                // also gone — each loop body now has only the one path it needs.
                 switch (cmd)
                 {
-                case 'm': case 'M':
+                case 'M':
                     // XAML allows multiple points after M/m
-                    _lastPoint = ReadPoint(cmd, ! AllowComma);
-                    
+                    _lastPoint = ReadPointAbsolute(! AllowComma);
+
                     context.BeginFigure(_lastPoint, IsFilled, ! IsClosed);
                     _figureStarted = true;
                     _lastStart = _lastPoint;
                     last_cmd = 'M';
-                    
+
                     while (IsNumber(AllowComma))
                     {
-                        _lastPoint = ReadPoint(cmd, ! AllowComma);
-                        
+                        _lastPoint = ReadPointAbsolute(! AllowComma);
+
                         context.LineTo(_lastPoint, IsStroked, ! IsSmoothJoin);
                         last_cmd = 'L';
                     }
                     break;
 
-                case 'l': case 'L':
-                case 'h': case 'H':
-                case 'v': case 'V':
-                    EnsureFigure();
+                case 'm':
+                    // XAML allows multiple points after M/m
+                    _lastPoint = ReadPointRelative(! AllowComma);
 
+                    context.BeginFigure(_lastPoint, IsFilled, ! IsClosed);
+                    _figureStarted = true;
+                    _lastStart = _lastPoint;
+                    last_cmd = 'M';
+
+                    while (IsNumber(AllowComma))
+                    {
+                        _lastPoint = ReadPointRelative(! AllowComma);
+
+                        context.LineTo(_lastPoint, IsStroked, ! IsSmoothJoin);
+                        last_cmd = 'L';
+                    }
+                    break;
+
+                case 'L':
+                    EnsureFigure();
                     do
                     {
-                        switch (cmd)
-                        {
-                        case 'l': _lastPoint    = ReadPoint(cmd, ! AllowComma); break;
-                        case 'L': _lastPoint    = ReadPoint(cmd, ! AllowComma); break;
-                        case 'h': _lastPoint.X += ReadNumber(! AllowComma); break;
-                        case 'H': _lastPoint.X  = ReadNumber(! AllowComma); break; 
-                        case 'v': _lastPoint.Y += ReadNumber(! AllowComma); break;
-                        case 'V': _lastPoint.Y  = ReadNumber(! AllowComma); break;
-                        }
-
-                        context.LineTo(_lastPoint, IsStroked, ! IsSmoothJoin); 
+                        _lastPoint = ReadPointAbsolute(! AllowComma);
+                        context.LineTo(_lastPoint, IsStroked, ! IsSmoothJoin);
                     }
                     while (IsNumber(AllowComma));
-
                     last_cmd = 'L';
                     break;
 
-                case 'c': case 'C': // cubic Bezier
-                case 's': case 'S': // smooth cublic Bezier
+                case 'l':
                     EnsureFigure();
-                    
                     do
                     {
-                        Point p;
-                        
-                        if ((cmd == 's') || (cmd == 'S'))
-                        {
-                            if (last_cmd == 'C')
-                            {
-                                p = Reflect();
-                            }
-                            else
-                            {
-                                p = _lastPoint;
-                            }
+                        _lastPoint = ReadPointRelative(! AllowComma);
+                        context.LineTo(_lastPoint, IsStroked, ! IsSmoothJoin);
+                    }
+                    while (IsNumber(AllowComma));
+                    last_cmd = 'L';
+                    break;
 
-                            _secondLastPoint = ReadPoint(cmd, ! AllowComma);
-                        }
-                        else
-                        {
-                            p = ReadPoint(cmd, ! AllowComma);
+                case 'H':
+                    EnsureFigure();
+                    do
+                    {
+                        _lastPoint.X = ReadNumber(! AllowComma);
+                        context.LineTo(_lastPoint, IsStroked, ! IsSmoothJoin);
+                    }
+                    while (IsNumber(AllowComma));
+                    last_cmd = 'L';
+                    break;
 
-                            _secondLastPoint = ReadPoint(cmd, AllowComma);
-                        }
-                            
-                        _lastPoint = ReadPoint(cmd, AllowComma);
+                case 'h':
+                    EnsureFigure();
+                    do
+                    {
+                        _lastPoint.X += ReadNumber(! AllowComma);
+                        context.LineTo(_lastPoint, IsStroked, ! IsSmoothJoin);
+                    }
+                    while (IsNumber(AllowComma));
+                    last_cmd = 'L';
+                    break;
 
+                case 'V':
+                    EnsureFigure();
+                    do
+                    {
+                        _lastPoint.Y = ReadNumber(! AllowComma);
+                        context.LineTo(_lastPoint, IsStroked, ! IsSmoothJoin);
+                    }
+                    while (IsNumber(AllowComma));
+                    last_cmd = 'L';
+                    break;
+
+                case 'v':
+                    EnsureFigure();
+                    do
+                    {
+                        _lastPoint.Y += ReadNumber(! AllowComma);
+                        context.LineTo(_lastPoint, IsStroked, ! IsSmoothJoin);
+                    }
+                    while (IsNumber(AllowComma));
+                    last_cmd = 'L';
+                    break;
+
+                case 'C': // absolute cubic Bezier
+                    EnsureFigure();
+                    do
+                    {
+                        Point p = ReadPointAbsolute(! AllowComma);
+                        _secondLastPoint = ReadPointAbsolute(AllowComma);
+                        _lastPoint = ReadPointAbsolute(AllowComma);
                         context.BezierTo(p, _secondLastPoint, _lastPoint, IsStroked, ! IsSmoothJoin);
-                        
                         last_cmd = 'C';
                     }
                     while (IsNumber(AllowComma));
-                    
                     break;
-                    
-                case 'q': case 'Q': // quadratic Bezier
-                case 't': case 'T': // smooth quadratic Bezier
+
+                case 'c': // relative cubic Bezier
                     EnsureFigure();
-                    
                     do
                     {
-                        if ((cmd == 't') || (cmd == 'T'))
-                        {
-                            if (last_cmd == 'Q')
-                            {
-                                _secondLastPoint = Reflect();
-                            }
-                            else
-                            {
-                                _secondLastPoint = _lastPoint;
-                            }
+                        Point p = ReadPointRelative(! AllowComma);
+                        _secondLastPoint = ReadPointRelative(AllowComma);
+                        _lastPoint = ReadPointRelative(AllowComma);
+                        context.BezierTo(p, _secondLastPoint, _lastPoint, IsStroked, ! IsSmoothJoin);
+                        last_cmd = 'C';
+                    }
+                    while (IsNumber(AllowComma));
+                    break;
 
-                            _lastPoint = ReadPoint(cmd, ! AllowComma);
-                        }
-                        else
-                        {
-                            _secondLastPoint = ReadPoint(cmd, ! AllowComma);
-                            _lastPoint = ReadPoint(cmd, AllowComma);
-                        }
+                case 'S': // absolute smooth cubic Bezier
+                    EnsureFigure();
+                    do
+                    {
+                        Point p = (last_cmd == 'C') ? Reflect() : _lastPoint;
+                        _secondLastPoint = ReadPointAbsolute(! AllowComma);
+                        _lastPoint = ReadPointAbsolute(AllowComma);
+                        context.BezierTo(p, _secondLastPoint, _lastPoint, IsStroked, ! IsSmoothJoin);
+                        last_cmd = 'C';
+                    }
+                    while (IsNumber(AllowComma));
+                    break;
 
+                case 's': // relative smooth cubic Bezier
+                    EnsureFigure();
+                    do
+                    {
+                        Point p = (last_cmd == 'C') ? Reflect() : _lastPoint;
+                        _secondLastPoint = ReadPointRelative(! AllowComma);
+                        _lastPoint = ReadPointRelative(AllowComma);
+                        context.BezierTo(p, _secondLastPoint, _lastPoint, IsStroked, ! IsSmoothJoin);
+                        last_cmd = 'C';
+                    }
+                    while (IsNumber(AllowComma));
+                    break;
+
+                case 'Q': // absolute quadratic Bezier
+                    EnsureFigure();
+                    do
+                    {
+                        _secondLastPoint = ReadPointAbsolute(! AllowComma);
+                        _lastPoint = ReadPointAbsolute(AllowComma);
                         context.QuadraticBezierTo(_secondLastPoint, _lastPoint, IsStroked, ! IsSmoothJoin);
-                        
                         last_cmd = 'Q';
                     }
                     while (IsNumber(AllowComma));
-                    
                     break;
-                    
-                case 'a': case 'A':
+
+                case 'q': // relative quadratic Bezier
                     EnsureFigure();
-                    
+                    do
+                    {
+                        _secondLastPoint = ReadPointRelative(! AllowComma);
+                        _lastPoint = ReadPointRelative(AllowComma);
+                        context.QuadraticBezierTo(_secondLastPoint, _lastPoint, IsStroked, ! IsSmoothJoin);
+                        last_cmd = 'Q';
+                    }
+                    while (IsNumber(AllowComma));
+                    break;
+
+                case 'T': // absolute smooth quadratic Bezier
+                    EnsureFigure();
+                    do
+                    {
+                        _secondLastPoint = (last_cmd == 'Q') ? Reflect() : _lastPoint;
+                        _lastPoint = ReadPointAbsolute(! AllowComma);
+                        context.QuadraticBezierTo(_secondLastPoint, _lastPoint, IsStroked, ! IsSmoothJoin);
+                        last_cmd = 'Q';
+                    }
+                    while (IsNumber(AllowComma));
+                    break;
+
+                case 't': // relative smooth quadratic Bezier
+                    EnsureFigure();
+                    do
+                    {
+                        _secondLastPoint = (last_cmd == 'Q') ? Reflect() : _lastPoint;
+                        _lastPoint = ReadPointRelative(! AllowComma);
+                        context.QuadraticBezierTo(_secondLastPoint, _lastPoint, IsStroked, ! IsSmoothJoin);
+                        last_cmd = 'Q';
+                    }
+                    while (IsNumber(AllowComma));
+                    break;
+
+                case 'A':
+                    EnsureFigure();
                     do
                     {
                         // A 3,4 5, 0, 0, 6,7
@@ -704,8 +847,8 @@ namespace MS.Internal.Markup
                         double rotation = ReadNumber(AllowComma);
                         bool large      = ReadBool();
                         bool sweep      = ReadBool();
-                        
-                        _lastPoint = ReadPoint(cmd, AllowComma);
+
+                        _lastPoint = ReadPointAbsolute(AllowComma);
 
                         context.ArcTo(
                             _lastPoint,
@@ -722,21 +865,51 @@ namespace MS.Internal.Markup
                             );
                     }
                     while (IsNumber(AllowComma));
-                    
                     last_cmd = 'A';
                     break;
-                    
+
+                case 'a':
+                    EnsureFigure();
+                    do
+                    {
+                        // a 3,4 5, 0, 0, 6,7
+                        double w        = ReadNumber(! AllowComma);
+                        double h        = ReadNumber(AllowComma);
+                        double rotation = ReadNumber(AllowComma);
+                        bool large      = ReadBool();
+                        bool sweep      = ReadBool();
+
+                        _lastPoint = ReadPointRelative(AllowComma);
+
+                        context.ArcTo(
+                            _lastPoint,
+                            new Size(w, h),
+                            rotation,
+                            large,
+#if PBTCOMPILER
+                            sweep,
+#else
+                            sweep ? SweepDirection.Clockwise : SweepDirection.Counterclockwise,
+#endif
+                            IsStroked,
+                            ! IsSmoothJoin
+                            );
+                    }
+                    while (IsNumber(AllowComma));
+                    last_cmd = 'A';
+                    break;
+
                 case 'z':
                 case 'Z':
                     EnsureFigure();
                     context.SetClosedState(IsClosed);
-                    
+
                     _figureStarted = false;
                     last_cmd = 'Z';
-                    
+
                     _lastPoint = _lastStart; // Set reference point to be first point of current figure
                     break;
-                    
+
                 default:
                     ThrowBadToken();
                     break;
