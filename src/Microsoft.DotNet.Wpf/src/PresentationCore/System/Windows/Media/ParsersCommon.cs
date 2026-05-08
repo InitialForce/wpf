@@ -365,73 +365,85 @@ namespace MS.Internal.Markup
             if (!IsNumber(allowComma))
             {
                 ThrowBadToken();
-            }                
-            
-            bool simple = true;
-            int start = _curIndex;
+            }
 
-            //
-            // Allow for a sign
-            //
-            // There are numbers that cannot be preceded with a sign, for instance, -NaN, but it's
-            // fine to ignore that at this point, since the CLR parser will catch this later.
-            //
-            // IsNumber already loaded _pathString[_curIndex] into _token and proved we're in
-            // bounds, so reuse it instead of re-doing More() + two string indexer fetches.
+            // Hoist _pathString/_pathLength/_curIndex to locals for the whole
+            // method and inline the three SkipDigits call sites so the JIT
+            // collapses repeated field loads, redundant string null-checks,
+            // and the call/return + field-write/reload around SkipDigits.
+            // _curIndex is written back exactly once before the manual-int
+            // parse path. Same pattern already applied to SkipWhiteSpace and
+            // the manual-int-parse loop below.
+            string s = _pathString;
+            int end = _pathLength;
+            int i = _curIndex;
+            int start = i;
+
+            bool simple = true;
+
+            // IsNumber already loaded _pathString[_curIndex] into _token and
+            // proved we're in bounds, so reuse it instead of re-fetching.
             char first = _token;
             if (first == '-' || first == '+')
             {
-                _curIndex ++;
+                i++;
             }
 
             // Check for Infinity (or -Infinity).
-            if (More() && (_pathString[_curIndex] == 'I'))
+            if (i < end && s[i] == 'I')
             {
-                //
-                // Don't bother reading the characters, as the CLR parser will
-                // do this for us later.
-                //
-                _curIndex = Math.Min(_curIndex+8, _pathLength); // "Infinity" has 8 characters
+                // Don't bother reading the characters; CLR parser handles it.
+                i = Math.Min(i + 8, end); // "Infinity" has 8 characters
                 simple = false;
             }
             // Check for NaN
-            else if (More() && (_pathString[_curIndex] == 'N'))
+            else if (i < end && s[i] == 'N')
             {
-                //
-                // Don't bother reading the characters, as the CLR parser will
-                // do this for us later.
-                //
-                _curIndex = Math.Min(_curIndex+3, _pathLength); // "NaN" has 3 characters
+                i = Math.Min(i + 3, end); // "NaN" has 3 characters
                 simple = false;
             }
             else
             {
-                SkipDigits(! AllowSign);
+                // Inlined SkipDigits(!AllowSign): mantissa digits.
+                // Single subtract+unsigned-compare matches IsNumber's digit test.
+                while (i < end && (uint)(s[i] - '0') <= 9u)
+                {
+                    i++;
+                }
 
                 // Optional period, followed by more digits
-                if (More() && (_pathString[_curIndex] == '.'))
+                if (i < end && s[i] == '.')
                 {
                     simple = false;
-                    _curIndex ++;
-                    SkipDigits(! AllowSign);
+                    i++;
+                    // Inlined SkipDigits(!AllowSign): fractional digits.
+                    while (i < end && (uint)(s[i] - '0') <= 9u)
+                    {
+                        i++;
+                    }
                 }
 
                 // Exponent
-                if (More() && ((_pathString[_curIndex] == 'E') || (_pathString[_curIndex] == 'e')))
+                if (i < end && (s[i] == 'E' || s[i] == 'e'))
                 {
                     simple = false;
-                    _curIndex ++;
-                    SkipDigits(AllowSign);
+                    i++;
+                    // Inlined SkipDigits(AllowSign): exponent digits with optional sign.
+                    if (i < end && (s[i] == '-' || s[i] == '+'))
+                    {
+                        i++;
+                    }
+                    while (i < end && (uint)(s[i] - '0') <= 9u)
+                    {
+                        i++;
+                    }
                 }
             }
 
-            if (simple && (_curIndex <= (start + 8))) // 32-bit integer
+            _curIndex = i;
+
+            if (simple && (i <= (start + 8))) // 32-bit integer
             {
-                // Hoist _pathString to a local so the JIT proves the ref is
-                // stable across the loop and folds away per-iteration field
-                // loads + null-checks on the string indexer.
-                string s = _pathString;
-                int end = _curIndex;
                 int sign = 1;
 
                 if (s[start] == '+')
@@ -446,7 +458,7 @@ namespace MS.Internal.Markup
 
                 int value = 0;
 
-                while (start < end)
+                while (start < i)
                 {
                     value = value * 10 + (s[start] - '0');
                     start ++;
@@ -459,14 +471,14 @@ namespace MS.Internal.Markup
                 try
                 {
 #if NET
-                    return double.Parse(_pathString.AsSpan(start, _curIndex - start), provider: _formatProvider);
+                    return double.Parse(s.AsSpan(start, i - start), provider: _formatProvider);
 #else
-                    return double.Parse(_pathString.Substring(start, _curIndex - start), provider: _formatProvider);
+                    return double.Parse(s.Substring(start, i - start), provider: _formatProvider);
 #endif
                 }
                 catch (FormatException except)
                 {
-                    throw new System.FormatException(SR.Format(SR.Parser_UnexpectedToken, _pathString, start), except);
+                    throw new System.FormatException(SR.Format(SR.Parser_UnexpectedToken, s, start), except);
                 }
             }
         }
