@@ -3264,15 +3264,6 @@ namespace System.Windows
             }
             set
             {
-                // Short-circuit no-op assignments so SafeStyleSetter's
-                // `_Style = _Style | WS_VISIBLE` after ShowWindow (which already toggled
-                // WS_VISIBLE in the hwnd) and the Hide path's `_Style = _Style` do NOT
-                // dirty the manager and force Flush to issue 2x SetWindowLong +
-                // SetWindowPos(SWP_FRAMECHANGED|SWP_DRAWFRAME) for a bit-identical state.
-                if (_styleDoNotUse == value)
-                {
-                    return;
-                }
                 _styleDoNotUse = value;
                 Manager.Dirty = true;
             }
@@ -3297,10 +3288,6 @@ namespace System.Windows
                 }
             set
             {
-                if (_styleExDoNotUse == value)
-                {
-                    return;
-                }
                 _styleExDoNotUse = value;
                 Manager.Dirty = true;
             }
@@ -7310,11 +7297,6 @@ namespace System.Windows
         private int                 _styleDoNotUse;
         private int                 _styleExDoNotUse;
         private HwndStyleManager    _manager;
-        // Cached HwndStyleManager instance reused across StartManaging/Dispose pairs;
-        // _manager is the "currently active" pointer (nulled in Dispose so Manager-null
-        // checks still work outside a manager scope), _managerCache is the persistent
-        // backing instance.
-        private HwndStyleManager    _managerCache;
 
         // reference to Resize Grip control; this is used to find out whether
         // the mouse of over the resizegrip control
@@ -7680,18 +7662,7 @@ namespace System.Windows
             {
                 if (w.Manager == null)
                 {
-                    // Reuse the cached manager when available; the cached instance
-                    // outlives a single StartManaging/Dispose pair specifically so the
-                    // dominant Show/Hide path through SafeStyleSetter doesn't pay a
-                    // per-call HwndStyleManager allocation.
-                    HwndStyleManager mgr = w._managerCache;
-                    if (mgr == null)
-                    {
-                        mgr = new HwndStyleManager(w);
-                        w._managerCache = mgr;
-                    }
-                    mgr.InitForUse(Style, StyleEx);
-                    return mgr;
+                    return new HwndStyleManager(w, Style, StyleEx);
                 }
                 else
                 {
@@ -7700,27 +7671,20 @@ namespace System.Windows
                 }
             }
 
-            private HwndStyleManager(Window w)
+            private HwndStyleManager(Window w, int Style, int StyleEx  )
             {
                 _window = w;
-            }
-
-            private void InitForUse(int Style, int StyleEx)
-            {
                 _window.Manager = this;
 
-                if (!_window.IsSourceWindowNull)
+                if (!w.IsSourceWindowNull)
                 {
                     _window._Style    =  Style;
                     _window._StyleEx  = StyleEx;
+
+                    // Dirty ==> _style and hwnd are out of sync. Since we just got
+                    // the style from hwnd, it obviously is not Dirty.
+                    Dirty = false;
                 }
-
-                // Dirty ==> _style and hwnd are out of sync. Since we just got
-                // the style from hwnd (or there's no hwnd to be out of sync with),
-                // it isn't Dirty. Reset unconditionally so a reused instance never
-                // carries over a stale Dirty bit from a no-hwnd previous use.
-                Dirty = false;
-
                 _refCount = 1;
             }
 
