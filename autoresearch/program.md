@@ -10,10 +10,19 @@
 >
 > **Status after first ambitious-mode run (iters 7–13):** 1 KEEP
 > (`geometry-skipws-hoist-locals`, -29.7%), 5 REJECT-UNCLEAR, 1 REJECT
-> (time regression), 2 BENCH-FAIL on `*WindowLifecycle*`. The TIME axis is
-> dominated by ~1-3 ns/op cross-thread noise on STA-batch benchmarks even after
-> B9's `OperationsPerInvoke` conversion — most ambitious-mode optimizations
-> with real impact still register UNCLEAR on time alone.
+> (time regression), 2 BENCH-FAIL on `*WindowLifecycle*`. Root cause for the
+> UNCLEAR cluster identified iter 13: **microbench was only swapping
+> PresentationCore.dll** in the publish dir; WindowsBase / System.Xaml /
+> PresentationFramework stayed as the system runtime pack version, so all
+> edits in `WindowsBase/`, `System.Xaml/`, or `Shared/` (compiled into
+> WindowsBase) measured against unmodified product code. Fixed: stage + swap
+> all three locally-buildable WPF assemblies.
+>
+> **The TIME axis is still noisy** (~1-3 ns/op on STA-batch benchmarks even
+> after B9's OperationsPerInvoke conversion), but most prior REJECT-UNCLEARs
+> were the harness gap masquerading as noise. With all 3 DLLs swapping, alloc
+> deltas now register correctly for `*CultureContext*`, `*ExceptionWrapper*`,
+> `*DispatcherInvokeAction*`, `*HwndWin32*` — go.
 >
 > **Pivot: prefer ALLOC-axis targets.** BDN reports
 > `BytesAllocatedPerOperation` deterministically (CV ≈ 0). The harness alloc

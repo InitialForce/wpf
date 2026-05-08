@@ -47,8 +47,35 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent.resolve()
 WPF_REPO = Path("/c/work/wpf-perf")
-PC_BUILD_OUT = WPF_REPO / "artifacts" / "bin" / "PresentationCore" / "x64" / "Release" / "net10.0"
-BUILD_PC_SCRIPT = WPF_REPO / "build-pc-perf.ps1"
+BUILD_SCRIPT = WPF_REPO / "build-pc-perf.ps1"
+
+# WPF product assemblies whose source is editable per the path allowlist AND
+# which we can build locally. Each entry's locally-built copy is staged and
+# swapped into microbench's publish dir for both the baseline and candidate BDN
+# runs — without that, edits in WindowsBase / System.Xaml silently no-op
+# because BDN keeps loading the system runtime pack version. Building
+# PresentationCore.csproj transitively rebuilds WindowsBase + System.Xaml via
+# project refs, so a single build script call produces all three DLLs.
+#
+# PresentationFramework is INTENTIONALLY OMITTED. Its DirectWriteForwarder
+# project ref isn't bypassed by `SkipDirectWriteForwarderProjectRef=true`
+# alone, so the local build fails on the missing $(VCTargetsPath) C++ import.
+# Until that's solved, *WindowLifecycle* (the only PF-resident filter on the
+# current menu) is skip-listed in program.md, which keeps the gap unobservable.
+ASSEMBLIES: list[dict] = [
+    {
+        "name": "PresentationCore",
+        "build_dir": WPF_REPO / "artifacts" / "bin" / "PresentationCore" / "x64" / "Release" / "net10.0",
+    },
+    {
+        "name": "WindowsBase",
+        "build_dir": WPF_REPO / "artifacts" / "bin" / "WindowsBase" / "x64" / "Release" / "net10.0",
+    },
+    {
+        "name": "System.Xaml",
+        "build_dir": WPF_REPO / "artifacts" / "bin" / "System.Xaml" / "x64" / "Release" / "net10.0",
+    },
+]
 
 MICROBENCH_PROJ = WPF_REPO / "microbench"
 MICROBENCH_PUBLISH = MICROBENCH_PROJ / "bin" / "Release" / "net10.0-windows" / "win-x64" / "publish"
@@ -151,41 +178,61 @@ def check_path_allowlist(sha: str) -> tuple[bool, list[str]]:
     return len(violations) == 0, violations
 
 
-def build_pc_release() -> bool:
-    """Build PresentationCore (Release, x64) into PC_BUILD_OUT. Returns True on success."""
-    log(f"  building PresentationCore (Release, x64) at {git_sha()[:8]} …")
-    if PC_BUILD_OUT.exists():
-        for f in PC_BUILD_OUT.iterdir():
-            if f.is_file():
-                try:
-                    f.unlink()
-                except Exception:
-                    pass
+def build_assemblies() -> bool:
+    """Build all four WPF product assemblies (Release, x64) via build-pc-perf.ps1.
+
+    Returns True iff every ASSEMBLIES entry's <Name>.dll exists at its build_dir
+    after the build. We delete the per-assembly DLLs first so a stale copy from
+    a prior side can't masquerade as a successful new build.
+    """
+    log(f"  building {len(ASSEMBLIES)} WPF assemblies (Release, x64) at {git_sha()[:8]} …")
+    for asm in ASSEMBLIES:
+        dll = asm["build_dir"] / f"{asm['name']}.dll"
+        if dll.exists():
+            try:
+                dll.unlink()
+            except Exception:
+                pass
     rc, out = cmd(
         ["cmd.exe", "/c", "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-         "-File", to_winpath(BUILD_PC_SCRIPT)],
+         "-File", to_winpath(BUILD_SCRIPT)],
         cwd=WPF_REPO, timeout=BUILD_TIMEOUT_S,
     )
     if rc != 0:
         log(f"  build failed (rc={rc}); tail:")
-        for line in out.splitlines()[-15:]:
+        for line in out.splitlines()[-20:]:
             log(f"    {line}")
         return False
-    if not (PC_BUILD_OUT / "PresentationCore.dll").exists():
-        log(f"  build succeeded but PresentationCore.dll missing at {PC_BUILD_OUT}")
+    missing: list[str] = []
+    for asm in ASSEMBLIES:
+        dll = asm["build_dir"] / f"{asm['name']}.dll"
+        if not dll.exists():
+            missing.append(f"{asm['name']} → {dll}")
+    if missing:
+        log("  build succeeded but some DLLs are missing:")
+        for m in missing:
+            log(f"    {m}")
         return False
     return True
 
 
-def stage_pc_dll(side: str) -> Path | None:
-    """Copy the just-built PresentationCore.dll into a side-specific staging path."""
-    src = PC_BUILD_OUT / "PresentationCore.dll"
-    if not src.exists():
-        return None
+def stage_assemblies(side: str) -> dict[str, Path] | None:
+    """Copy each just-built <Name>.dll into a side-specific staging path.
+
+    Returns a dict {name: staged_path} on success, or None if any expected DLL
+    is missing.
+    """
     STAGING.mkdir(exist_ok=True, parents=True)
-    dst = STAGING / f"PresentationCore.{side}.dll"
-    shutil.copy2(src, dst)
-    return dst
+    staged: dict[str, Path] = {}
+    for asm in ASSEMBLIES:
+        src = asm["build_dir"] / f"{asm['name']}.dll"
+        if not src.exists():
+            log(f"  cannot stage {asm['name']}.{side}: source missing at {src}")
+            return None
+        dst = STAGING / f"{asm['name']}.{side}.dll"
+        shutil.copy2(src, dst)
+        staged[asm["name"]] = dst
+    return staged
 
 
 def publish_microbench() -> bool:
@@ -204,12 +251,21 @@ def publish_microbench() -> bool:
     return MICROBENCH_EXE.exists()
 
 
-def swap_pc_into_publish(staged_dll: Path) -> bool:
-    target = MICROBENCH_PUBLISH / "PresentationCore.dll"
-    if not target.exists():
-        log(f"  target {target} missing — publish did not produce expected layout")
-        return False
-    shutil.copy2(staged_dll, target)
+def swap_assemblies_into_publish(staged: dict[str, Path]) -> bool:
+    """Overwrite each <Name>.dll in MICROBENCH_PUBLISH with the staged copy.
+
+    Every assembly in `staged` must have a matching target in the publish dir
+    (i.e. the publish step must have produced a copy of every WPF assembly we
+    want to differential-test). A missing target is fatal — silently skipping
+    would leave the system runtime pack version in place and re-create the
+    very harness gap this function exists to close.
+    """
+    for name, src in staged.items():
+        target = MICROBENCH_PUBLISH / f"{name}.dll"
+        if not target.exists():
+            log(f"  target {target} missing — publish did not produce expected layout")
+            return False
+        shutil.copy2(src, target)
     return True
 
 
@@ -513,29 +569,29 @@ def main() -> int:
     STAGING.mkdir(exist_ok=True, parents=True)
 
     # ── Build both sides ────────────────────────────────────────────────────
-    log("Phase 1: build baseline PresentationCore.dll")
+    log(f"Phase 1: build baseline assemblies ({', '.join(a['name'] for a in ASSEMBLIES)})")
     rc, _ = git("checkout", "--quiet", base_sha)
     if rc != 0:
         log("FATAL: could not checkout HEAD~1")
         return 3
     try:
-        if not build_pc_release():
+        if not build_assemblies():
             log("FATAL: baseline build failed")
             return 3
-        baseline_dll = stage_pc_dll("baseline")
-        if baseline_dll is None:
+        baseline_staged = stage_assemblies("baseline")
+        if baseline_staged is None:
             return 3
 
-        log("Phase 2: build candidate PresentationCore.dll")
+        log("Phase 2: build candidate assemblies")
         rc, _ = git("checkout", "--quiet", head_sha)
         if rc != 0:
             log("FATAL: could not return to HEAD")
             return 3
-        if not build_pc_release():
+        if not build_assemblies():
             log("FATAL: candidate build failed")
             return 3
-        candidate_dll = stage_pc_dll("candidate")
-        if candidate_dll is None:
+        candidate_staged = stage_assemblies("candidate")
+        if candidate_staged is None:
             return 3
     finally:
         # Always return to HEAD even on failure
@@ -549,7 +605,7 @@ def main() -> int:
 
     # ── Run both sides ──────────────────────────────────────────────────────
     log("Phase 4: run baseline BDN")
-    if not swap_pc_into_publish(baseline_dll):
+    if not swap_assemblies_into_publish(baseline_staged):
         return 4
     clear_bdn_artifacts()
     rc, out = run_bdn(args.filter)
@@ -567,7 +623,7 @@ def main() -> int:
     log(f"  baseline: {len(baseline_results)} benchmark(s) captured → {baseline_snapshot.name}")
 
     log("Phase 5: run candidate BDN")
-    if not swap_pc_into_publish(candidate_dll):
+    if not swap_assemblies_into_publish(candidate_staged):
         return 4
     clear_bdn_artifacts()
     rc, out = run_bdn(args.filter)
