@@ -580,21 +580,23 @@ namespace System.Windows.Threading
 
                 try
                 {
+                    // priority is statically Send inside this guard. Use the per-Dispatcher cached
+                    // SyncCtx + cached compat bools (captured at ctor time) to skip the per-call
+                    // BaseCompatibilityPreferences Get*() calls AND the per-call
+                    // DispatcherSynchronizationContext allocation under the .NET Core defaults.
+                    // Same alloc-kill as LegacyInvokeImpl (iter=026 KEEP).
                     DispatcherSynchronizationContext newSynchronizationContext;
-                    if(BaseCompatibilityPreferences.GetReuseDispatcherSynchronizationContextInstance())
+                    if(_reuseDispatcherSyncCtxInstance)
                     {
                         newSynchronizationContext = _defaultDispatcherSynchronizationContext;
                     }
+                    else if(_flowDispatcherSyncCtxPriority)
+                    {
+                        newSynchronizationContext = _sendDispatcherSynchronizationContext;
+                    }
                     else
                     {
-                        if(BaseCompatibilityPreferences.GetFlowDispatcherSynchronizationContextPriority())
-                        {
-                            newSynchronizationContext = new DispatcherSynchronizationContext(this, priority);
-                        }
-                        else
-                        {
-                            newSynchronizationContext = new DispatcherSynchronizationContext(this, DispatcherPriority.Normal);
-                        }
+                        newSynchronizationContext = new DispatcherSynchronizationContext(this, DispatcherPriority.Normal);
                     }
                     SynchronizationContext.SetSynchronizationContext(newSynchronizationContext);
 
@@ -722,21 +724,23 @@ namespace System.Windows.Threading
 
                 try
                 {
+                    // priority is statically Send inside this guard. Use the per-Dispatcher cached
+                    // SyncCtx + cached compat bools (captured at ctor time) to skip the per-call
+                    // BaseCompatibilityPreferences Get*() calls AND the per-call
+                    // DispatcherSynchronizationContext allocation under the .NET Core defaults.
+                    // Same alloc-kill as LegacyInvokeImpl (iter=026 KEEP).
                     DispatcherSynchronizationContext newSynchronizationContext;
-                    if(BaseCompatibilityPreferences.GetReuseDispatcherSynchronizationContextInstance())
+                    if(_reuseDispatcherSyncCtxInstance)
                     {
                         newSynchronizationContext = _defaultDispatcherSynchronizationContext;
                     }
+                    else if(_flowDispatcherSyncCtxPriority)
+                    {
+                        newSynchronizationContext = _sendDispatcherSynchronizationContext;
+                    }
                     else
                     {
-                        if(BaseCompatibilityPreferences.GetFlowDispatcherSynchronizationContextPriority())
-                        {
-                            newSynchronizationContext = new DispatcherSynchronizationContext(this, priority);
-                        }
-                        else
-                        {
-                            newSynchronizationContext = new DispatcherSynchronizationContext(this, DispatcherPriority.Normal);
-                        }
+                        newSynchronizationContext = new DispatcherSynchronizationContext(this, DispatcherPriority.Normal);
                     }
                     SynchronizationContext.SetSynchronizationContext(newSynchronizationContext);
 
