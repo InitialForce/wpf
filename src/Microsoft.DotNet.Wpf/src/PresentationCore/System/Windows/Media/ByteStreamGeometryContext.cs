@@ -482,14 +482,7 @@ namespace System.Windows.Media
             if (_chunkList.Count > 1 ||
                 _chunkList[0].Length != _currOffset)
             {
-                // Skip zero-init: the buffer is fully overwritten by ReadData
-                // (copies exactly _currOffset bytes from _chunkList[*]) immediately
-                // below before any consumer can observe its contents. CloseCore
-                // hands this array off to StreamGeometry._data which only ever
-                // reads bytes [0.._currOffset) via the MIL_PATHGEOMETRY.Size
-                // header anchored at offset 0, and the array length itself
-                // equals _currOffset so there are no trailing bytes to leak.
-                byte[] buffer = GC.AllocateUninitializedArray<byte>(_currOffset);
+                byte [] buffer = new byte[_currOffset];
 
                 unsafe
                 {
