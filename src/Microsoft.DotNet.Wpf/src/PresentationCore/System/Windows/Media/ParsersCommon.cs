@@ -243,6 +243,13 @@ namespace MS.Internal.Markup
                     if (((ch >' ') && (ch <= 'z')) || ! Char.IsWhiteSpace(ch))
                     {
                         _curIndex = i;
+                        // Stash the non-WS char into _token so callers
+                        // (ReadToken, IsNumber, ReadBool) can skip a redundant
+                        // _pathString[_curIndex] reload + bounds-check after
+                        // SkipWhiteSpace returns. _token retains its prior value
+                        // when SkipWhiteSpace exits at end-of-string (default
+                        // case did not fire); callers must check More() first.
+                        _token = ch;
                         return commaMet;
                     }
                     break;
@@ -263,11 +270,12 @@ namespace MS.Internal.Markup
         {
             SkipWhiteSpace(!AllowComma);
 
-            // Check for end of string
+            // Check for end of string. SkipWhiteSpace already stashed the
+            // first non-WS char into _token when it returned via the default
+            // branch; just advance _curIndex to consume it.
             if (More())
             {
-                _token = _pathString[_curIndex ++];
-
+                _curIndex ++;
                 return true;
             }
             else
@@ -275,15 +283,17 @@ namespace MS.Internal.Markup
                 return false;
             }
         }
-        
+
         private bool IsNumber(bool allowComma)
         {
             bool commaMet = SkipWhiteSpace(allowComma);
 
             if (More())
             {
-                char t = _pathString[_curIndex];
-                _token = t;
+                // _token was set by SkipWhiteSpace's default-branch exit when
+                // it stopped on a non-WS char; reuse it instead of doing a
+                // second _pathString[_curIndex] indexer-read with bounds-check.
+                char t = _token;
 
                 // Path data is digit-dominated; check the digit range first
                 // via single subtract+unsigned-compare so the hot path takes
@@ -481,7 +491,9 @@ namespace MS.Internal.Markup
 
             if (More())
             {
-                _token = _pathString[_curIndex ++];
+                // _token already holds the non-WS char that SkipWhiteSpace
+                // stopped on; advance past it without reloading.
+                _curIndex ++;
 
                 if (_token == '0')
                 {
@@ -494,7 +506,7 @@ namespace MS.Internal.Markup
             }
 
             ThrowBadToken();
-            
+
             return false;
         }
         
