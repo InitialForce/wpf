@@ -370,56 +370,58 @@ namespace MS.Internal.Markup
             bool simple = true;
             int start = _curIndex;
 
-            // IsNumber already loaded _pathString[_curIndex] into _token and proved we're
-            // in bounds, so reuse _token to drive the dispatch on the first character of
-            // the magnitude. This eliminates the two unconditional More()+string-indexer
-            // pairs (one for the 'I' check, one for the 'N' check) on the unsigned-digit
-            // path that dominates SVG path data.
+            //
+            // Allow for a sign
+            //
+            // There are numbers that cannot be preceded with a sign, for instance, -NaN, but it's
+            // fine to ignore that at this point, since the CLR parser will catch this later.
+            //
+            // IsNumber already loaded _pathString[_curIndex] into _token and proved we're in
+            // bounds, so reuse it instead of re-doing More() + two string indexer fetches.
             char first = _token;
             if (first == '-' || first == '+')
             {
-                // Signed: advance past sign and re-load `first` from the new position so
-                // the I / N / digit dispatch below sees the magnitude's first char.
-                _curIndex++;
-                first = More() ? _pathString[_curIndex] : '\0';
+                _curIndex ++;
             }
 
-            if (first == 'I')
+            // Check for Infinity (or -Infinity).
+            if (More() && (_pathString[_curIndex] == 'I'))
             {
-                // "Infinity" (CLR parser handles the rest of the literal later).
-                _curIndex = Math.Min(_curIndex + 8, _pathLength);
+                //
+                // Don't bother reading the characters, as the CLR parser will
+                // do this for us later.
+                //
+                _curIndex = Math.Min(_curIndex+8, _pathLength); // "Infinity" has 8 characters
                 simple = false;
             }
-            else if (first == 'N')
+            // Check for NaN
+            else if (More() && (_pathString[_curIndex] == 'N'))
             {
-                // "NaN" (CLR parser handles the rest of the literal later).
-                _curIndex = Math.Min(_curIndex + 3, _pathLength);
+                //
+                // Don't bother reading the characters, as the CLR parser will
+                // do this for us later.
+                //
+                _curIndex = Math.Min(_curIndex+3, _pathLength); // "NaN" has 3 characters
                 simple = false;
             }
             else
             {
                 SkipDigits(! AllowSign);
 
-                // Optional period (followed by more digits) and optional exponent.
-                // Combine the period and exponent peeks into a single string-indexer
-                // load when the period is absent — this is the common path for
-                // SVG integer coordinates.
-                if (More())
+                // Optional period, followed by more digits
+                if (More() && (_pathString[_curIndex] == '.'))
                 {
-                    char tail = _pathString[_curIndex];
-                    if (tail == '.')
-                    {
-                        simple = false;
-                        _curIndex++;
-                        SkipDigits(! AllowSign);
-                        tail = More() ? _pathString[_curIndex] : '\0';
-                    }
-                    if (tail == 'E' || tail == 'e')
-                    {
-                        simple = false;
-                        _curIndex++;
-                        SkipDigits(AllowSign);
-                    }
+                    simple = false;
+                    _curIndex ++;
+                    SkipDigits(! AllowSign);
+                }
+
+                // Exponent
+                if (More() && ((_pathString[_curIndex] == 'E') || (_pathString[_curIndex] == 'e')))
+                {
+                    simple = false;
+                    _curIndex ++;
+                    SkipDigits(AllowSign);
                 }
             }
 
@@ -432,17 +434,13 @@ namespace MS.Internal.Markup
                 int end = _curIndex;
                 int sign = 1;
 
-                // _token still holds the very first char of the number as IsNumber
-                // loaded it. Use it for the sign branch instead of re-reading
-                // s[start] (one fewer string indexer access per integer).
-                char tok = _token;
-                if (tok == '+')
+                if (s[start] == '+')
                 {
-                    start++;
+                    start ++;
                 }
-                else if (tok == '-')
+                else if (s[start] == '-')
                 {
-                    start++;
+                    start ++;
                     sign = -1;
                 }
 
