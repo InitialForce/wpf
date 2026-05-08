@@ -205,16 +205,10 @@ namespace MS.Internal.Markup
         {
             // Hoist fields to locals so the JIT proves they don't change across
             // the loop and folds away per-iteration field loads + null-checks on
-            // the string indexer. _curIndex is only written back at exit.
-            //
-            // Use s.Length (not _pathLength) for the loop bound so the JIT
-            // recognizes the canonical `i < arr.Length ⟹ arr[i] safe` range
-            // pattern and elides the bounds check on s[i] inside the loop.
-            // The invariant _pathLength == _pathString.Length is established
-            // in ParseToGeometryContext and never violated; both fields are
-            // written exactly once per parse.
+            // the string indexer. _curIndex is only written back at exit. Same
+            // pattern already applied to SkipDigits.
             string s = _pathString;
-            int end = s.Length;
+            int end = _pathLength;
             int i = _curIndex;
 
             bool commaMet = false;
@@ -319,13 +313,8 @@ namespace MS.Internal.Markup
             // Hoist fields to locals so the JIT proves they don't change across
             // the loop and folds away per-iteration field loads + null-checks
             // on the string indexer. _curIndex is only written back at the end.
-            //
-            // Use s.Length (not _pathLength) for the loop bound so the JIT
-            // recognizes the canonical `i < arr.Length ⟹ arr[i] safe` range
-            // pattern and elides bounds checks on s[i] in the digit-scan loop.
-            // _pathLength == _pathString.Length invariant holds throughout parse.
             string s = _pathString;
-            int end = s.Length;
+            int end = _pathLength;
             int i = _curIndex;
 
             // Allow for a sign
