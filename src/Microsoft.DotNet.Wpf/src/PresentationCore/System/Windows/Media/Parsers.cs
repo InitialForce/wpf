@@ -304,15 +304,8 @@ namespace MS.Internal
         {
             PathStreamGeometryContext context = new PathStreamGeometryContext();
 
-            AbbreviatedGeometryParser parser = AbbreviatedGeometryParser.Acquire();
-            try
-            {
-                parser.ParseToGeometryContext(context, pathString, startIndex: 0);
-            }
-            finally
-            {
-                parser.ReleaseToPool();
-            }
+            AbbreviatedGeometryParser parser = new AbbreviatedGeometryParser();
+            parser.ParseToGeometryContext(context, pathString, startIndex: 0);
 
             PathGeometry pathGeometry = context.GetPathGeometry();
 
