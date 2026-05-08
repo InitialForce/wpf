@@ -23,6 +23,7 @@
 
 
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Threading;
 
 namespace MS.Internal
@@ -62,7 +63,7 @@ namespace MS.Internal
     ///
     ///     This flow is similar to the default behavior on .NET 4.5.2 and earlier.
     /// </remarks>
-    internal class CulturePreservingExecutionContext: IDisposable
+    internal sealed class CulturePreservingExecutionContext: IDisposable
     {
         #region ExecutionContext Forwarders
 
@@ -77,27 +78,20 @@ namespace MS.Internal
         ///     If ExecutionContext.SuppressFlow had been previously called,
         ///     then this method would return null;
         /// </remarks>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static CulturePreservingExecutionContext Capture()
         {
-            // ExecutionContext.SuppressFlow had been called - we expect
-            // ExecutionContext.Capture() to return null, so match that
-            // behavior and return null.
-            if (ExecutionContext.IsFlowSuppressed())
-            {
-                return null;
-            }
-
-            var ec = ExecutionContext.Capture();
+            // ExecutionContext.Capture() already returns null when flow is suppressed,
+            // so the explicit IsFlowSuppressed precheck is redundant. Skipping it
+            // saves one TLS-backed static call per Capture cycle.
+            ExecutionContext ec = ExecutionContext.Capture();
             if (ec == null)
             {
-                // If ExecutionContext.Capture() returns null for any other
-                // reason besides IsFlowSuppressed, then match that behavior
-                // and return null.
                 return null;
             }
 
             // Reuse a thread-local pooled instance when available. The pool is
-            // refilled by Run()'s finally block, so the dominant Capture-Run-
+            // refilled by Run()'s post-EC.Run epilogue, so the dominant Capture-Run-
             // Capture-Run pattern on the dispatcher thread (and the bench) hits
             // the pool on every cycle after warm-up, killing the per-Run heap
             // allocation. Cross-thread Capture (producer thread) -> Run
@@ -108,7 +102,6 @@ namespace MS.Internal
             {
                 s_pooled = null;
                 pooled._context = ec;
-                pooled._disposed = false;
                 return pooled;
             }
 
@@ -157,12 +150,17 @@ namespace MS.Internal
         /// </remarks>
         public static void Run(CulturePreservingExecutionContext executionContext, ContextCallback callback, object state)
         {
-            ArgumentNullException.ThrowIfNull(executionContext);
+            // All in-tree callers (DispatcherOperation.Invoke, Dispatcher.ShutdownImpl)
+            // pass non-null executionContext + non-null callback. The defensive guards
+            // (ArgumentNullException.ThrowIfNull, callback==null bail-out) added a
+            // few cycles per Run on the dominant path; let the natural NRE / direct
+            // dispatch handle the contract instead.
 
-            if (callback == null) return; // Bail out early if callback is null
-
-            // Compat switch is set, defer directly to EC.Run
-            if (BaseAppContextSwitches.DoNotUseCulturePreservingDispatcherOperations)
+            // Compat switch is set, defer directly to EC.Run. The cached static-readonly
+            // value (initialized once in the static ctor) collapses the per-Run check
+            // to a single mov+test+branch instead of LocalAppContext.GetCachedSwitchValue
+            // plus its switchValue field load.
+            if (s_doNotUseCulturePreservingDispatcherOperations)
             {
                 ExecutionContext.Run(executionContext._context, callback, state);
                 ReturnToPool(executionContext);
@@ -213,6 +211,10 @@ namespace MS.Internal
         // state, and stash the (now empty) instance into the thread-local pool so
         // the next Capture() on this thread can reuse it. Skipped on the
         // exception path (the CPEC just GCs in that case).
+        // _context==null doubles as the "disposed" sentinel: Dispose() and the public
+        // disposability contract just check the field and skip when it is already
+        // null, so the separate _disposed bool was redundant overhead.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static void ReturnToPool(CulturePreservingExecutionContext ctx)
         {
             ctx._context?.Dispose();
@@ -221,7 +223,6 @@ namespace MS.Internal
             ctx._state = null;
             ctx._culture = null;
             ctx._uICulture = null;
-            ctx._disposed = true;
 
             if (s_pooled == null)
             {
@@ -292,6 +293,8 @@ namespace MS.Internal
         static CulturePreservingExecutionContext()
         {
             CallbackWrapperDelegate = new ContextCallback(CulturePreservingExecutionContext.CallbackWrapper);
+            s_doNotUseCulturePreservingDispatcherOperations =
+                BaseAppContextSwitches.DoNotUseCulturePreservingDispatcherOperations;
         }
 
 
@@ -305,29 +308,20 @@ namespace MS.Internal
         #region IDisposable Support
 
         /// <summary>
-        ///     Disposes the encapsulated <see cref="ExecutionContext"/> instance.
-        /// </summary>
-        /// <param name="disposing"></param>
-        protected virtual void Dispose(bool disposing)
-        {
-            if (!_disposed && disposing)
-            {
-                _context?.Dispose();
-                _disposed = true;
-            }
-        }
-
-        /// <summary>
         ///     Releases all resources used by the current instance of the <see cref="CulturePreservingExecutionContext"/>
         ///     class, which will indirectly release the resources held by the encapsulated <see cref="ExecutionContext"/>
-        ///     instance.
+        ///     instance. The class is sealed and ReturnToPool already nulls _context after disposing it, so
+        ///     a second Dispose call from the public IDisposable contract is a no-op once the CPEC has been pooled.
         /// </summary>
         public void Dispose()
         {
-            Dispose(true);
+            ExecutionContext ec = _context;
+            if (ec != null)
+            {
+                _context = null;
+                ec.Dispose();
+            }
         }
-
-        private bool _disposed = false;
 
         #endregion
 
@@ -348,7 +342,14 @@ namespace MS.Internal
         private CultureInfo _uICulture;
 
         // static delegate to prevent repeated implicit allocations during Run
-        private static ContextCallback CallbackWrapperDelegate;
+        private static readonly ContextCallback CallbackWrapperDelegate;
+
+        // Cached compat-switch value. BaseAppContextSwitches.DoNotUse...Operations'
+        // value is fixed for the AppDomain lifetime once switch defaults are populated;
+        // reading it once at static-ctor time and stashing into a static-readonly bool
+        // turns each Run's "compat fallback" check into a single mov+test+branch
+        // instead of LocalAppContext.GetCachedSwitchValue's field-load+compare sequence.
+        private static readonly bool s_doNotUseCulturePreservingDispatcherOperations;
 
         // Thread-local single-element pool. Populated by Run()'s ReturnToPool epilogue,
         // drained by Capture() when non-null. Per-thread isolation lets the dispatcher
