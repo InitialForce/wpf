@@ -174,7 +174,11 @@ namespace MS.Internal
             // invoking the user callback. (Single-Run-per-CPEC lifecycle assumed.)
             executionContext._callback = callback;
             executionContext._state = state;
-            executionContext.ReadCultureInfosFromCurrentThread();
+            Thread thread = Thread.CurrentThread;
+            CultureInfo capturedCulture = thread.CurrentCulture;
+            CultureInfo capturedUICulture = thread.CurrentUICulture;
+            executionContext._culture = capturedCulture;
+            executionContext._uICulture = capturedUICulture;
 
             try
             {
@@ -185,9 +189,21 @@ namespace MS.Internal
             }
             finally
             {
-                // Restore culture information - it might have been
-                // modified during the callback execution.
-                executionContext.WriteCultureInfosToCurrentThread();
+                // Restore culture information that may have been modified during the
+                // callback. Skip the property setter when the thread is already at
+                // the target culture: CultureInfo.CurrentCulture's setter ultimately
+                // writes through AsyncLocal<CultureInfo>, which walks the
+                // ExecutionContext's async-local chain even when the value is
+                // unchanged. The dominant Capture-then-Run-on-same-thread case (and
+                // every callback that does not touch culture, which is essentially
+                // all of them) leaves _culture/_uICulture identical to thread state,
+                // so the ref-equals check converts the writes into no-ops.
+                CultureInfo finalCulture = executionContext._culture;
+                CultureInfo finalUICulture = executionContext._uICulture;
+                if (!ReferenceEquals(thread.CurrentCulture, finalCulture))
+                    thread.CurrentCulture = finalCulture;
+                if (!ReferenceEquals(thread.CurrentUICulture, finalUICulture))
+                    thread.CurrentUICulture = finalUICulture;
             }
 
             ReturnToPool(executionContext);
@@ -235,28 +251,38 @@ namespace MS.Internal
             ContextCallback callback = executionContext._callback;
             object state = executionContext._state;
 
-            // Restore cultre information previously saved from the call site,
-            // call into the callback, and recapture culture information which
-            // might have been updated by the callback.
+            // Restore culture information previously saved from the call site,
+            // invoke the callback, then recapture culture information which the
+            // callback might have updated.
+            //
+            // Both the pre-callback restore and the post-callback recapture skip
+            // their work when the value is already at the target. The setter
+            // ultimately routes through AsyncLocal<CultureInfo>.set Value (modulo
+            // the thread-static fast path) which walks the EC's async-local chain
+            // even when the new value matches the current one — measurable cost
+            // every Run cycle. The post-callback field writes are similarly skipped
+            // when the callback did not touch culture (the dominant case), so the
+            // recapture collapses to two property reads + two ref-equals.
             //
             // The callback is guaranteed to be non-null by Run, so an explicit
             // check is not needed here.
 
-            executionContext.WriteCultureInfosToCurrentThread();
+            Thread thread = Thread.CurrentThread;
+            CultureInfo savedCulture = executionContext._culture;
+            CultureInfo savedUICulture = executionContext._uICulture;
+            if (!ReferenceEquals(thread.CurrentCulture, savedCulture))
+                thread.CurrentCulture = savedCulture;
+            if (!ReferenceEquals(thread.CurrentUICulture, savedUICulture))
+                thread.CurrentUICulture = savedUICulture;
+
             callback.Invoke(state);
-            executionContext.ReadCultureInfosFromCurrentThread();
-        }
 
-        private void ReadCultureInfosFromCurrentThread()
-        {
-            _culture = Thread.CurrentThread.CurrentCulture;
-            _uICulture = Thread.CurrentThread.CurrentUICulture;
-        }
-
-        private void WriteCultureInfosToCurrentThread()
-        {
-            Thread.CurrentThread.CurrentCulture = _culture;
-            Thread.CurrentThread.CurrentUICulture = _uICulture;
+            CultureInfo postCulture = thread.CurrentCulture;
+            CultureInfo postUICulture = thread.CurrentUICulture;
+            if (!ReferenceEquals(postCulture, savedCulture))
+                executionContext._culture = postCulture;
+            if (!ReferenceEquals(postUICulture, savedUICulture))
+                executionContext._uICulture = postUICulture;
         }
 
         #endregion
