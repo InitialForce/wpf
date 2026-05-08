@@ -36,7 +36,15 @@ namespace System.Windows.Media
         {
             _disposed = false;
             _currChunkOffset = 0;
-            _chunkList = default;
+            // Clear() drops the byte[] reference but keeps the underlying
+            // SingleItemList<byte[]> store alive across the [ThreadStatic]
+            // pool cycle. The first AppendData below then re-uses that
+            // pre-existing store instead of allocating a fresh one in
+            // FrugalStructList.Add's `_listStore = new SingleItemList<T>()`
+            // null-store branch. (DetachChunkListForPool also calls Clear
+            // before pooling, so the typical post-Dispose state already has
+            // a cleared SingleItemList; the call here is defensive.)
+            _chunkList.Clear();
             _currOffset = 0;
             _currentPathGeometryData = default;
             _currentPathFigureData = default;
@@ -65,15 +73,30 @@ namespace System.Windows.Media
         }
 
         /// <summary>
-        /// Drop the chunkList reference held by this context. Called from
-        /// StreamGeometryCallbackContext.DisposeCore right before returning the
-        /// instance to the [ThreadStatic] pool — at that point _chunkList[0]
-        /// is the FINAL byte[] now owned by the StreamGeometry, and we don't
-        /// want the pooled context to hold an extra reference to it.
+        /// Drop the byte[] reference held by this context's chunk list.
+        /// Called from StreamGeometryCallbackContext.DisposeCore right before
+        /// returning the instance to the [ThreadStatic] pool — at that point
+        /// _chunkList[0] is the FINAL byte[] now owned by the StreamGeometry,
+        /// and we don't want the pooled context to hold an extra reference
+        /// to it (which would pin every parsed geometry alive until the next
+        /// Acquire on this thread).
+        ///
+        /// We Clear() rather than reset _chunkList to default so the
+        /// underlying SingleItemList&lt;byte[]&gt; store survives the pool
+        /// cycle: FrugalStructList.Clear sets _loneEntry=null and _count=0
+        /// without dropping _listStore, so the next ResetForReuse +
+        /// AppendData reuses the same SingleItemList rather than going
+        /// through FrugalStructList.Add's `_listStore = new SingleItemList&lt;T&gt;()`
+        /// null-store branch. On the GeometryParser microbench, this saves
+        /// one ~32 B SingleItemList&lt;byte[]&gt; allocation per Geometry.Parse
+        /// call (the common single-chunk path). The rare multi-chunk parse
+        /// goes through ShrinkToFit's `_chunkList = new FrugalStructList&lt;byte[]&gt;()`
+        /// reset branch, which still allocates a fresh SingleItemList; the
+        /// next single-chunk parse then re-uses THAT store.
         /// </summary>
         protected void DetachChunkListForPool()
         {
-            _chunkList = default;
+            _chunkList.Clear();
         }
 
         #endregion Constructors
