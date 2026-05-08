@@ -295,15 +295,27 @@ namespace MS.Win32
             {
                 // Pass this message to our delegate function.  Do this under
                 // the exception filter/handlers of the dispatcher for this thread.
-                Dispatcher dispatcher = Dispatcher.FromThread(Thread.CurrentThread);
+                // The HWND owner thread (which runs SubclassWndProc) and its Dispatcher
+                // are stable for the lifetime of the subclass, so cache the lookup to
+                // skip the global lock + WeakReference scan inside Dispatcher.FromThread
+                // on every Win32 message dispatch.
+                Dispatcher dispatcher = _cachedDispatcher;
+                if (dispatcher == null)
+                {
+                    dispatcher = Dispatcher.FromThread(Thread.CurrentThread);
+                    if (dispatcher != null)
+                        _cachedDispatcher = dispatcher;
+                }
                 if(dispatcher != null && !dispatcher.HasShutdownFinished)
                 {
                     if (_dispatcherOperationCallback == null)
                         _dispatcherOperationCallback = new DispatcherOperationCallback(this.DispatcherCallbackOperation);
 
-                    // _paramDispatcherCallbackOperation is a thread static member which should be reused to avoid
-                    // creating a new data structure every time we call DispatcherCallbackOperation
-                    // Cache the param locally in case of reentrance and set _paramDispatcherCallbackOperation to null so reentrancy calls will create a new param
+                    // _paramDispatcherCallbackOperation lives on the instance (HwndSubclass is
+                    // single-thread-affine via the HWND owner thread, so a per-instance field is
+                    // safe and avoids the per-call [ThreadStatic] TLS reads/writes).
+                    // Cache the param locally in case of reentrance and set the field to null so
+                    // reentrancy calls will allocate a fresh param.
                     if (_paramDispatcherCallbackOperation == null)
                         _paramDispatcherCallbackOperation = new DispatcherOperationCallbackParameter();
 
@@ -354,12 +366,13 @@ namespace MS.Win32
             return retval;
         }
 
-        // Perf bug: 1963989
-        // _paramDispatcherCallbackOperation is a thread static member which should be reused to avoid
-        // creating a new data structure every time we DispatcherCallbackOperation is called
-        // It also contains the return results (handled and retValue) from DispatcherCallbackOperation call
-        [ThreadStatic]
-        private static DispatcherOperationCallbackParameter _paramDispatcherCallbackOperation;
+        // Perf bug: 1963989 — original design used [ThreadStatic] to avoid allocating a fresh
+        // DispatcherOperationCallbackParameter on every DispatcherCallbackOperation call.
+        // Promoted to a per-instance field: HwndSubclass is single-thread-affine to its HWND
+        // owner thread, so an instance field gives the same one-allocation-per-lifetime behavior
+        // without paying TLS access cost on every Win32 message dispatch. Carries the call's
+        // return results (handled / retVal) from DispatcherCallbackOperation.
+        private DispatcherOperationCallbackParameter _paramDispatcherCallbackOperation;
 
         // This class is used as a parameter and return result for DispatcherCallbackOperation call
         private class DispatcherOperationCallbackParameter
@@ -370,6 +383,11 @@ namespace MS.Win32
         }
 
         private DispatcherOperationCallback _dispatcherOperationCallback = null;
+
+        // Cached Dispatcher for the HWND owner thread, populated lazily on the first
+        // SubclassWndProc dispatch that finds a Dispatcher. Once attached, the HWND's
+        // owner thread is stable so this never needs to be re-resolved.
+        private Dispatcher _cachedDispatcher;
 
         internal IntPtr CriticalAttach( IntPtr hwnd )
         {
