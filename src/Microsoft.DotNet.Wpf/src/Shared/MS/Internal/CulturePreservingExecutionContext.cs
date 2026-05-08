@@ -169,12 +169,23 @@ namespace MS.Internal
                 return;
             }
 
+            // Cache Thread.CurrentThread once and stash on the CPEC: this Run cycle
+            // accesses Thread.CurrentCulture/CurrentUICulture four times across
+            // Run + CallbackWrapper, and the JIT cannot CSE the Thread.CurrentThread
+            // intrinsic across method boundaries. Stashing on the CPEC lets
+            // CallbackWrapper pick up the same Thread reference without re-querying
+            // TLS. EC.Run guarantees no thread hop, so the cached reference stays
+            // valid through the finally block.
+            Thread thread = Thread.CurrentThread;
+            executionContext._thread = thread;
+
             // Stash the user callback + state on the CPEC itself and snapshot the
             // current culture infos. CallbackWrapper will restore them just before
             // invoking the user callback. (Single-Run-per-CPEC lifecycle assumed.)
             executionContext._callback = callback;
             executionContext._state = state;
-            executionContext.ReadCultureInfosFromCurrentThread();
+            executionContext._culture = thread.CurrentCulture;
+            executionContext._uICulture = thread.CurrentUICulture;
 
             try
             {
@@ -186,8 +197,10 @@ namespace MS.Internal
             finally
             {
                 // Restore culture information - it might have been
-                // modified during the callback execution.
-                executionContext.WriteCultureInfosToCurrentThread();
+                // modified during the callback execution. Reuse the cached
+                // Thread reference (EC.Run cannot hop threads).
+                thread.CurrentCulture = executionContext._culture;
+                thread.CurrentUICulture = executionContext._uICulture;
             }
 
             ReturnToPool(executionContext);
@@ -232,31 +245,28 @@ namespace MS.Internal
         {
             var executionContext = (CulturePreservingExecutionContext)obj;
 
-            ContextCallback callback = executionContext._callback;
-            object state = executionContext._state;
+            // Pick up the Thread reference cached by Run() so we don't re-fetch TLS.
+            // EC.Run guarantees the callback runs on the calling thread, so this is
+            // the same Thread instance that Run() saw.
+            Thread thread = executionContext._thread;
 
-            // Restore cultre information previously saved from the call site,
+            // Restore culture information previously saved from the call site,
             // call into the callback, and recapture culture information which
             // might have been updated by the callback.
             //
             // The callback is guaranteed to be non-null by Run, so an explicit
             // check is not needed here.
 
-            executionContext.WriteCultureInfosToCurrentThread();
+            thread.CurrentCulture = executionContext._culture;
+            thread.CurrentUICulture = executionContext._uICulture;
+
+            ContextCallback callback = executionContext._callback;
+            object state = executionContext._state;
+
             callback.Invoke(state);
-            executionContext.ReadCultureInfosFromCurrentThread();
-        }
 
-        private void ReadCultureInfosFromCurrentThread()
-        {
-            _culture = Thread.CurrentThread.CurrentCulture;
-            _uICulture = Thread.CurrentThread.CurrentUICulture;
-        }
-
-        private void WriteCultureInfosToCurrentThread()
-        {
-            Thread.CurrentThread.CurrentCulture = _culture;
-            Thread.CurrentThread.CurrentUICulture = _uICulture;
+            executionContext._culture = thread.CurrentCulture;
+            executionContext._uICulture = thread.CurrentUICulture;
         }
 
         #endregion
@@ -320,6 +330,14 @@ namespace MS.Internal
         // ExecutionContext.Run's own restore.
         private CultureInfo _culture;
         private CultureInfo _uICulture;
+
+        // Cached Thread.CurrentThread reference, set by Run() and consumed by
+        // CallbackWrapper + Run's finally. Avoids three additional Thread.CurrentThread
+        // intrinsic accesses per Run cycle (the JIT does not CSE TLS lookups across
+        // method boundaries). Reset is unnecessary across pool reuse: the [ThreadStatic]
+        // pool guarantees the same thread reuses the CPEC, so a stale-but-correct
+        // reference is harmless.
+        private Thread _thread;
 
         // static delegate to prevent repeated implicit allocations during Run
         private static ContextCallback CallbackWrapperDelegate;
