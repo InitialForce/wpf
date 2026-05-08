@@ -449,10 +449,22 @@ namespace MS.Internal.Markup
             if (!IsNumber(allowComma))
             {
                 ThrowBadToken();
-            }                
-            
+            }
+
             bool simple = true;
             int start = _curIndex;
+
+            // Hoist _pathString and _pathLength to locals once at entry so the
+            // JIT proves they don't change across SkipDigits/More() calls and
+            // folds away per-check field-loads + the string-indexer null-check
+            // on the digit-only hot path. SkipDigits only writes _curIndex
+            // (not _pathString or _pathLength), so caching across the calls
+            // here is safe. _curIndex is mutable across SkipDigits, so we
+            // re-read it into idx between sections; mutations write back to
+            // the field directly so subsequent helpers (and SkipDigits) see
+            // the current cursor.
+            string s = _pathString;
+            int end = _pathLength;
 
             //
             // Allow for a sign
@@ -468,24 +480,26 @@ namespace MS.Internal.Markup
                 _curIndex ++;
             }
 
+            int idx = _curIndex;
+
             // Check for Infinity (or -Infinity).
-            if (More() && (_pathString[_curIndex] == 'I'))
+            if (idx < end && s[idx] == 'I')
             {
                 //
                 // Don't bother reading the characters, as the CLR parser will
                 // do this for us later.
                 //
-                _curIndex = Math.Min(_curIndex+8, _pathLength); // "Infinity" has 8 characters
+                _curIndex = Math.Min(idx + 8, end); // "Infinity" has 8 characters
                 simple = false;
             }
             // Check for NaN
-            else if (More() && (_pathString[_curIndex] == 'N'))
+            else if (idx < end && s[idx] == 'N')
             {
                 //
                 // Don't bother reading the characters, as the CLR parser will
                 // do this for us later.
                 //
-                _curIndex = Math.Min(_curIndex+3, _pathLength); // "NaN" has 3 characters
+                _curIndex = Math.Min(idx + 3, end); // "NaN" has 3 characters
                 simple = false;
             }
             else
@@ -493,29 +507,31 @@ namespace MS.Internal.Markup
                 SkipDigits(! AllowSign);
 
                 // Optional period, followed by more digits
-                if (More() && (_pathString[_curIndex] == '.'))
+                idx = _curIndex;
+                if (idx < end && s[idx] == '.')
                 {
                     simple = false;
-                    _curIndex ++;
+                    _curIndex = idx + 1;
                     SkipDigits(! AllowSign);
+                    idx = _curIndex;
                 }
 
                 // Exponent
-                if (More() && ((_pathString[_curIndex] == 'E') || (_pathString[_curIndex] == 'e')))
+                if (idx < end)
                 {
-                    simple = false;
-                    _curIndex ++;
-                    SkipDigits(AllowSign);
+                    char ch = s[idx];
+                    if (ch == 'E' || ch == 'e')
+                    {
+                        simple = false;
+                        _curIndex = idx + 1;
+                        SkipDigits(AllowSign);
+                    }
                 }
             }
 
             if (simple && (_curIndex <= (start + 8))) // 32-bit integer
             {
-                // Hoist _pathString to a local so the JIT proves the ref is
-                // stable across the loop and folds away per-iteration field
-                // loads + null-checks on the string indexer.
-                string s = _pathString;
-                int end = _curIndex;
+                int endi = _curIndex;
                 int sign = 1;
 
                 if (s[start] == '+')
@@ -530,7 +546,7 @@ namespace MS.Internal.Markup
 
                 int value = 0;
 
-                while (start < end)
+                while (start < endi)
                 {
                     value = value * 10 + (s[start] - '0');
                     start ++;
@@ -543,14 +559,14 @@ namespace MS.Internal.Markup
                 try
                 {
 #if NET
-                    return double.Parse(_pathString.AsSpan(start, _curIndex - start), provider: _formatProvider);
+                    return double.Parse(s.AsSpan(start, _curIndex - start), provider: _formatProvider);
 #else
-                    return double.Parse(_pathString.Substring(start, _curIndex - start), provider: _formatProvider);
+                    return double.Parse(s.Substring(start, _curIndex - start), provider: _formatProvider);
 #endif
                 }
                 catch (FormatException except)
                 {
-                    throw new System.FormatException(SR.Format(SR.Parser_UnexpectedToken, _pathString, start), except);
+                    throw new System.FormatException(SR.Format(SR.Parser_UnexpectedToken, s, start), except);
                 }
             }
         }
