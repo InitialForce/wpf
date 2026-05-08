@@ -87,20 +87,32 @@ namespace MS.Internal
                 return null;
             }
 
-            var culturePreservingContext = new CulturePreservingExecutionContext();
-
-            if (culturePreservingContext._context != null)
-            {
-                return culturePreservingContext;
-            }
-            else
+            var ec = ExecutionContext.Capture();
+            if (ec == null)
             {
                 // If ExecutionContext.Capture() returns null for any other
                 // reason besides IsFlowSuppressed, then match that behavior
-                // and return null
-                culturePreservingContext.Dispose();
+                // and return null.
                 return null;
             }
+
+            // Reuse a thread-local pooled instance when available. The pool is
+            // refilled by Run()'s finally block, so the dominant Capture-Run-
+            // Capture-Run pattern on the dispatcher thread (and the bench) hits
+            // the pool on every cycle after warm-up, killing the per-Run heap
+            // allocation. Cross-thread Capture (producer thread) -> Run
+            // (dispatcher thread) misses the pool harmlessly because the
+            // pool is [ThreadStatic].
+            var pooled = s_pooled;
+            if (pooled != null)
+            {
+                s_pooled = null;
+                pooled._context = ec;
+                pooled._disposed = false;
+                return pooled;
+            }
+
+            return new CulturePreservingExecutionContext(ec);
         }
 
         /// <summary>
@@ -153,6 +165,7 @@ namespace MS.Internal
             if (BaseAppContextSwitches.DoNotUseCulturePreservingDispatcherOperations)
             {
                 ExecutionContext.Run(executionContext._context, callback, state);
+                ReturnToPool(executionContext);
                 return;
             }
 
@@ -176,7 +189,29 @@ namespace MS.Internal
                 // modified during the callback execution.
                 executionContext.WriteCultureInfosToCurrentThread();
             }
+
+            ReturnToPool(executionContext);
 }
+
+        // Single-Run-per-CPEC lifecycle: dispose the inner EC, clear the captured
+        // state, and stash the (now empty) instance into the thread-local pool so
+        // the next Capture() on this thread can reuse it. Skipped on the
+        // exception path (the CPEC just GCs in that case).
+        private static void ReturnToPool(CulturePreservingExecutionContext ctx)
+        {
+            ctx._context?.Dispose();
+            ctx._context = null;
+            ctx._callback = null;
+            ctx._state = null;
+            ctx._culture = null;
+            ctx._uICulture = null;
+            ctx._disposed = true;
+
+            if (s_pooled == null)
+            {
+                s_pooled = ctx;
+            }
+        }
 
         #endregion
 
@@ -234,9 +269,9 @@ namespace MS.Internal
         }
 
 
-        private CulturePreservingExecutionContext()
+        private CulturePreservingExecutionContext(ExecutionContext ec)
         {
-            _context = ExecutionContext.Capture();
+            _context = ec;
         }
 
         #endregion
@@ -288,6 +323,15 @@ namespace MS.Internal
 
         // static delegate to prevent repeated implicit allocations during Run
         private static ContextCallback CallbackWrapperDelegate;
+
+        // Thread-local single-element pool. Populated by Run()'s ReturnToPool epilogue,
+        // drained by Capture() when non-null. Per-thread isolation lets the dispatcher
+        // thread's tight Capture-Run-Capture-Run cycle reuse one CPEC instance forever
+        // without locking. Producer-thread Capture (e.g. BackgroundWorker enqueuing a
+        // dispatcher operation) misses this pool harmlessly because the consumer
+        // (dispatcher) thread refills its own [ThreadStatic].
+        [ThreadStatic]
+        private static CulturePreservingExecutionContext s_pooled;
 
         #endregion
     }
