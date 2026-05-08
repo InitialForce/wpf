@@ -3264,15 +3264,6 @@ namespace System.Windows
             }
             set
             {
-                // Skip the Dirty-flag set on no-op assignments (e.g. SafeStyleSetter's
-                // `_Style = _Style | WS_VISIBLE` after ShowWindow has already set the
-                // WS_VISIBLE bit, or `_Style = _Style` on the Hide path). Without this
-                // check, every Show/Hide forces Flush to issue 2x SetWindowLong +
-                // SetWindowPos(SWP_FRAMECHANGED|SWP_DRAWFRAME) for a bit-identical state.
-                if (_styleDoNotUse == value)
-                {
-                    return;
-                }
                 _styleDoNotUse = value;
                 Manager.Dirty = true;
             }
@@ -3297,10 +3288,6 @@ namespace System.Windows
                 }
             set
             {
-                if (_styleExDoNotUse == value)
-                {
-                    return;
-                }
                 _styleExDoNotUse = value;
                 Manager.Dirty = true;
             }
