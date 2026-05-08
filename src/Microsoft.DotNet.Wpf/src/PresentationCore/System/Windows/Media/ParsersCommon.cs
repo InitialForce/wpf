@@ -150,9 +150,15 @@ namespace MS.Internal.Markup
                         }
                     }
 
-                    AbbreviatedGeometryParser parser = new AbbreviatedGeometryParser();
-            
-                    parser.ParseToGeometryContext(context, pathString, curIndex);
+                    AbbreviatedGeometryParser parser = AbbreviatedGeometryParser.Acquire();
+                    try
+                    {
+                        parser.ParseToGeometryContext(context, pathString, curIndex);
+                    }
+                    finally
+                    {
+                        parser.ReleaseToPool();
+                    }
                 }
             }
         }
@@ -171,6 +177,56 @@ namespace MS.Internal.Markup
         private const bool      IsClosed     = true;
         private const bool      IsStroked    = true;
         private const bool      IsSmoothJoin = true;
+
+        // Per-thread single-slot pool. AbbreviatedGeometryParser is stateful
+        // (mutable instance fields), but ParseToGeometryContext fully overwrites
+        // every used field at entry, so a previously-released instance is safe
+        // to hand back without an explicit reset. Pooling kills the per-call
+        // ~96 B class allocation on the Geometry.Parse hot path; on the
+        // GeometryParser microbench (100 paths/op), this drops the parser
+        // class allocation alone by ~9.6 KB out of the current ~89.9 KB/op
+        // baseline left by iter=032 (StreamGeometryCallbackContext pool) and
+        // iter=033 (FrugalStructList store pool).
+        [ThreadStatic]
+        private static AbbreviatedGeometryParser s_pooled;
+
+        /// <summary>
+        /// Acquire a per-thread pooled parser. Returns the [ThreadStatic]
+        /// slot's current instance (clearing the slot so a nested Parse on
+        /// the same thread cannot see and reuse it), or allocates a fresh
+        /// one when the slot is empty (first call on the thread, or while
+        /// a nested parse holds the previously-pooled instance).
+        /// </summary>
+        internal static AbbreviatedGeometryParser Acquire()
+        {
+            AbbreviatedGeometryParser parser = s_pooled;
+            if (parser is null)
+            {
+                return new AbbreviatedGeometryParser();
+            }
+            s_pooled = null;
+            return parser;
+        }
+
+        /// <summary>
+        /// Drop reference-typed fields (so the pooled instance does not pin
+        /// the parsed string, the StreamGeometryContext, or the format
+        /// provider alive across calls) and publish back to the
+        /// [ThreadStatic] slot. Single-slot pool: if the slot is occupied
+        /// (nested parse), the redundant instance is left for GC. Value-type
+        /// fields are intentionally not cleared — they are unconditionally
+        /// overwritten by ParseToGeometryContext at entry.
+        /// </summary>
+        internal void ReleaseToPool()
+        {
+            _pathString = null;
+            _context = null;
+            _formatProvider = null;
+            if (s_pooled is null)
+            {
+                s_pooled = this;
+            }
+        }
 
         private IFormatProvider _formatProvider;
         
