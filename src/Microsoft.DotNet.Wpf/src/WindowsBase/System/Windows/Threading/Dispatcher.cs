@@ -69,30 +69,6 @@ namespace System.Windows.Threading
         /// </remarks>
         public static Dispatcher FromThread(Thread thread)
         {
-            // Fast path: same-thread lookup.
-            //
-            // Every Dispatcher constructor assigns `_tlsDispatcher = this` on its
-            // owner thread (see ctor, line ~1721), and this is the dominant call
-            // shape (HwndSubclass.SubclassWndProc, Dispatcher.CurrentDispatcher,
-            // InputMethod, HostVisual, SystemResources, and ReaderWriterLockSlim-
-            // Wrapper all hit FromThread(Thread.CurrentThread) once per WndProc
-            // dispatch / DispatcherObject construction). A non-null cached value
-            // is necessarily the Dispatcher for Thread.CurrentThread (because the
-            // ctor only ever writes to its own thread's slot), and a null value
-            // means no Dispatcher has been created on this thread, in which case
-            // the _dispatchers list contains no matching entry either — so we can
-            // return without taking _globalLock or walking the list.
-            //
-            // (The slow path's preamble notes "managed TLS is very expensive" — a
-            // true statement in .NET Framework. In modern .NET RyuJIT compiles
-            // [ThreadStatic] reads to a segment-relative load comparable to an
-            // instance-field access, so the cost rationale that justified hiding
-            // _tlsDispatcher behind the lock no longer applies.)
-            if (thread != null && thread == Thread.CurrentThread)
-            {
-                return _tlsDispatcher;
-            }
-
             lock(_globalLock)
             {
                 Dispatcher dispatcher = null;
