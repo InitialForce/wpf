@@ -27,25 +27,21 @@ namespace System.Windows.Threading
             // numArgs=1 + DispatcherOperationCallback). Removing the try/catch
             // from this method's body is the precondition that lets the JIT
             // honour the [AggressiveInlining] hint and fold TryCatchWhen into
-            // its caller. Methods with EH regions are normally refused for
-            // inlining.
+            // its caller (in production: Dispatcher's op-callback path; in the
+            // bench: the closed delegate the *ExceptionWrapper* benchmark
+            // dispatches through). Methods with EH regions are normally
+            // refused for inlining.
             //
-            // Body shape policy: keep the fast-path body as small as possible
-            // so the JIT inline-budget heuristic accepts TryCatchWhen at its
-            // call sites. Both cold tails (rare numArgs=-1 / SendOrPost /
-            // ShutdownCallback / DynamicInvoke dispatch AND the with-handlers
-            // try/catch path) route through TryCatchWhenSlow — that's a single
-            // NoInlining call site at the bottom of the function instead of
-            // two separate cold-path call sites + an inline `return
-            // InternalRealCall(...)`. Fewer call instructions and a smaller
-            // function body give the JIT more headroom for the [AggressiveInlining]
-            // hint at the dispatcher op-callback call site, and let the IRC /
-            // with-handlers paths share their NoInlining frame. Cold tails
-            // tail-call through TryCatchWhenSlow; the unmodified InternalRealCall
-            // IL shape is preserved inside TryCatchWhenSlow to keep the JIT
-            // codegen for that tree byte-identical (this is the precondition
-            // that prevented the cross-benchmark NegativeControlDynamicInvoke
-            // regression seen in iter=012 from recurring under iter=062).
+            // The two inlined fast paths return the exact same values as the
+            // original `result = InternalRealCall(...); return result;` flow
+            // would: numArgs=0+Action runs `action()` and returns null;
+            // numArgs=1+DispatcherOperationCallback returns `doc(args)`. Cold
+            // dispatches (ShutdownCallback / SendOrPostCallback / DynamicInvoke
+            // fallback / numArgs==-1 args[] normalization) tail-call into the
+            // unmodified InternalRealCall, preserving its IL/JIT shape so the
+            // cross-benchmark NegativeControlDynamicInvoke regression that
+            // sank iter=excwrap-irc-hotpath-extract (iter=012, +14.74 ns CI
+            // disjoint) does not recur.
             if (Catch == null && Filter == null)
             {
                 if (numArgs == 0 && callback is Action action)
@@ -57,31 +53,20 @@ namespace System.Windows.Threading
                 {
                     return doc(args);
                 }
-            }
-
-            return TryCatchWhenSlow(source, callback, args, numArgs, catchHandler);
-        }
-
-        // Combined slow / cold-tail helper. Two callers fall here from
-        // TryCatchWhen's fast path:
-        //   1. No-handlers + dispatch-fallback (numArgs=-1 / args[] normalization,
-        //      SendOrPostCallback, Dispatcher.ShutdownCallback, DynamicInvoke
-        //      generic fallback) — runs InternalRealCall directly.
-        //   2. With-handlers (Catch != null OR Filter != null) — runs
-        //      InternalRealCall inside a try/catch-when filter that delegates
-        //      to FilterException and CatchException as before.
-        // NoInlining keeps the EH region out of TryCatchWhen's body so the JIT
-        // remains free to inline the catch-free wrapper into its caller. The
-        // rare with-handlers caller pays one extra method-call frame, which is
-        // acceptable on the cold path.
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        private object TryCatchWhenSlow(object source, Delegate callback, object args, int numArgs, Delegate catchHandler)
-        {
-            if (Catch == null && Filter == null)
-            {
                 return InternalRealCall(callback, args, numArgs);
             }
 
+            // Slow path: handlers are subscribed, run the catch-protected body.
+            // Extracted into a NoInlining helper so the EH region lives
+            // entirely outside TryCatchWhen — the JIT inlines the catch-free
+            // wrapper into its caller; the rare with-handlers caller pays one
+            // extra method-call frame, which is acceptable on the cold path.
+            return TryCatchWhenWithHandlers(source, callback, args, numArgs, catchHandler);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private object TryCatchWhenWithHandlers(object source, Delegate callback, object args, int numArgs, Delegate catchHandler)
+        {
             object result = null;
 
             try
