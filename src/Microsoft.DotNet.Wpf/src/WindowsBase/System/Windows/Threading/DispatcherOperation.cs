@@ -487,76 +487,35 @@ namespace System.Windows.Threading
         {
             SynchronizationContext oldSynchronizationContext = SynchronizationContext.Current;
 
-            // Read the per-Dispatcher cached compat-pref bools once (captured at Dispatcher ctor
-            // time so these are plain field reads, not BaseCompatibilityPreferences.Get*() static
-            // method calls with their Seal+volatile-read overhead).
-            Dispatcher dispatcher = _dispatcher;
-            bool reuseInstance = dispatcher._reuseDispatcherSyncCtxInstance;
-            bool flowPriority = dispatcher._flowDispatcherSyncCtxPriority;
-
-            // Structural-reuse fast path: if SynchronizationContext.Current is already a
-            // DispatcherSynchronizationContext bound to THIS dispatcher with the same effective
-            // priority that the slow path would (re)build, skip the per-op
-            // 'new DispatcherSynchronizationContext(_dispatcher, _priority)' allocation AND both
-            // SetSynchronizationContext(...) calls (entry + finally restore). The dominant case
-            // is the steady-state pump: PushFrameImpl set a DispatcherSyncCtx for this dispatcher
-            // at frame start, and CulturePreservingExecutionContext.Run restores the captured
-            // ExecutionContext's SyncCtx (which itself was a DispatcherSyncCtx for this dispatcher
-            // captured at BeginInvoke time). Re-allocating + re-setting the SyncCtx in this
-            // common case is pure overhead, and the per-call allocation is the largest single
-            // source of allocation in the dispatcher hot path (~32 B/op × every queued op).
-            bool sameSyncCtx = false;
-            if (oldSynchronizationContext is DispatcherSynchronizationContext oldDsc
-                && oldDsc._dispatcher == dispatcher)
-            {
-                if (reuseInstance)
-                {
-                    // Reuse mode: the slow path would assign _defaultDispatcherSynchronizationContext.
-                    // Reference-compare to confirm the existing Current is that exact shared instance.
-                    sameSyncCtx = ReferenceEquals(oldDsc, dispatcher._defaultDispatcherSynchronizationContext);
-                }
-                else if (flowPriority)
-                {
-                    // Default (.NET Core): slow path would allocate (_dispatcher, _priority).
-                    // Dispatcher already matches; check priority structurally.
-                    sameSyncCtx = oldDsc._priority == _priority;
-                }
-                else
-                {
-                    // Rare opt-out: slow path would allocate (_dispatcher, Normal).
-                    sameSyncCtx = oldDsc._priority == DispatcherPriority.Normal;
-                }
-            }
-
             try
             {
                 // We are executing under the "foreign" execution context, but the
                 // SynchronizationContext must be for the correct dispatcher and
                 // priority.
-                if (!sameSyncCtx)
+                DispatcherSynchronizationContext newSynchronizationContext;
+                if(BaseCompatibilityPreferences.GetReuseDispatcherSynchronizationContextInstance())
                 {
-                    DispatcherSynchronizationContext newSynchronizationContext;
-                    if (reuseInstance)
+                    newSynchronizationContext = Dispatcher._defaultDispatcherSynchronizationContext;
+                }
+                else
+                {
+                    if(BaseCompatibilityPreferences.GetFlowDispatcherSynchronizationContextPriority())
                     {
-                        newSynchronizationContext = dispatcher._defaultDispatcherSynchronizationContext;
-                    }
-                    else if (flowPriority)
-                    {
-                        newSynchronizationContext = new DispatcherSynchronizationContext(dispatcher, _priority);
+                        newSynchronizationContext = new DispatcherSynchronizationContext(_dispatcher, _priority);
                     }
                     else
                     {
-                        newSynchronizationContext = new DispatcherSynchronizationContext(dispatcher, DispatcherPriority.Normal);
+                        newSynchronizationContext = new DispatcherSynchronizationContext(_dispatcher, DispatcherPriority.Normal);
                     }
-                    SynchronizationContext.SetSynchronizationContext(newSynchronizationContext);
                 }
+                SynchronizationContext.SetSynchronizationContext(newSynchronizationContext);
 
 
                 // Win32 considers timers to be low priority.  Avalon does not, since different timers
                 // are associated with different priorities.  So we promote the timers before we
                 // invoke any work items.
-                dispatcher.PromoteTimers(Environment.TickCount);
-
+                _dispatcher.PromoteTimers(Environment.TickCount);
+                
                 if(_useAsyncSemantics)
                 {
                     try
@@ -572,17 +531,14 @@ namespace System.Windows.Threading
                 else
                 {
                     // Invoke the delegate and route exceptions through the dispatcher events.
-                    _result = dispatcher.WrappedInvoke(_method, _args, _numArgs, null);
+                    _result = _dispatcher.WrappedInvoke(_method, _args, _numArgs, null);
 
                     // Note: we do not catch exceptions, they flow out the the Dispatcher.UnhandledException handling.
                 }
             }
             finally
             {
-                if (!sameSyncCtx)
-                {
-                    SynchronizationContext.SetSynchronizationContext(oldSynchronizationContext);
-                }
+                SynchronizationContext.SetSynchronizationContext(oldSynchronizationContext);
             }
         }
 

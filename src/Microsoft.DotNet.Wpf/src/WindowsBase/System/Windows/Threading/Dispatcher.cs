@@ -2881,8 +2881,8 @@ namespace System.Windows.Threading
         // Cached compat-pref values, captured once in the ctor (BaseCompatibilityPreferences seals
         // these on first read anyway). Lets the LegacyInvokeImpl fast path skip per-call
         // BaseCompatibilityPreferences.Get*() static method-call frames + their volatile reads.
-        internal bool _reuseDispatcherSyncCtxInstance;
-        internal bool _flowDispatcherSyncCtxPriority;
+        private bool _reuseDispatcherSyncCtxInstance;
+        private bool _flowDispatcherSyncCtxPriority;
 
         internal object _instanceLock = new object(); // Also used by DispatcherOperation
         private PriorityQueue<DispatcherOperation> _queue;
