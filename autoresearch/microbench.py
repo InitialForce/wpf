@@ -47,22 +47,31 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent.resolve()
 WPF_REPO = Path("/c/work/wpf-perf")
-BUILD_SCRIPT = WPF_REPO / "build-pc-perf.ps1"
+BUILD_SCRIPT = WPF_REPO / "build-pf-perf.ps1"
 
 # WPF product assemblies whose source is editable per the path allowlist AND
 # which we can build locally. Each entry's locally-built copy is staged and
 # swapped into microbench's publish dir for both the baseline and candidate BDN
 # runs — without that, edits in WindowsBase / System.Xaml silently no-op
 # because BDN keeps loading the system runtime pack version. Building
-# PresentationCore.csproj transitively rebuilds WindowsBase + System.Xaml via
-# project refs, so a single build script call produces all three DLLs.
+# PresentationFramework.csproj (via build-pf-perf.ps1) transitively rebuilds
+# PresentationCore + WindowsBase + System.Xaml via project refs, so a single
+# build script call produces all four DLLs.
 #
-# PresentationFramework is INTENTIONALLY OMITTED. Its DirectWriteForwarder
-# project ref isn't bypassed by `SkipDirectWriteForwarderProjectRef=true`
-# alone, so the local build fails on the missing $(VCTargetsPath) C++ import.
-# Until that's solved, *WindowLifecycle* (the only PF-resident filter on the
-# current menu) is skip-listed in program.md, which keeps the gap unobservable.
+# PresentationFramework is NOW included. build-pf-perf.ps1 bypasses the
+# DirectWriteForwarder.vcxproj C++ reference (and the transitive DWF ref in
+# ReachFramework.csproj) via SkipDirectWriteForwarderProjectRef=true +
+# DirectWriteForwarderBinaryPath pointing at the installed WindowsDesktop pack
+# — the same technique used for PresentationCore in the previous build script.
+# ABI verification (assembly version 10.0.0.0, PublicKeyToken=31bf3856ad364e35)
+# confirms the locally-built PF.dll is metadata-compatible with the shadow's
+# WindowsDesktop pack copy, so the same dual-swap mechanism (publish dir +
+# shadow pack) that works for PC also works for PF.
 ASSEMBLIES: list[dict] = [
+    {
+        "name": "PresentationFramework",
+        "build_dir": WPF_REPO / "artifacts" / "bin" / "PresentationFramework" / "x64" / "Release" / "net10.0",
+    },
     {
         "name": "PresentationCore",
         "build_dir": WPF_REPO / "artifacts" / "bin" / "PresentationCore" / "x64" / "Release" / "net10.0",
@@ -125,13 +134,13 @@ MIN_TIME_NS_PER_OP = float(os.environ.get("WPF_AR_MIN_TIME_NS", "5"))
 # scripts, or profile manifests — the consensus models flagged this as the
 # single biggest stop-the-line risk ("Goodhart's Law on benchmark code").
 #
-# PresentationFramework is intentionally NOT in this list: build-pc-perf.ps1
-# can't build PF locally yet (DirectWriteForwarder.vcxproj C++ cycle), so the
-# ASSEMBLIES list below doesn't include it, so any PF-resident edit would
-# silently no-op against the system runtime pack PF. Re-add this prefix once
-# build-pc-perf.ps1 grows a working SkipDirectWriteForwarderProjectRef path
-# AND ASSEMBLIES gets a PresentationFramework entry.
+# PresentationFramework is now included. build-pf-perf.ps1 bypasses the
+# DirectWriteForwarder C++ build via SkipDirectWriteForwarderProjectRef=true,
+# and the locally-built PF.dll is ABI-compatible with the shadow pack copy
+# (Version=10.0.0.0, PublicKeyToken=31bf3856ad364e35 match), so dual-swap
+# (publish dir + shadow WindowsDesktop pack) works identically to PC/WB/SX.
 ALLOWED_PATH_PREFIXES = (
+    "src/Microsoft.DotNet.Wpf/src/PresentationFramework/",
     "src/Microsoft.DotNet.Wpf/src/PresentationCore/",
     "src/Microsoft.DotNet.Wpf/src/WindowsBase/",
     "src/Microsoft.DotNet.Wpf/src/System.Xaml/",
@@ -198,7 +207,7 @@ def check_path_allowlist(sha: str) -> tuple[bool, list[str]]:
 
 
 def build_assemblies() -> bool:
-    """Build all four WPF product assemblies (Release, x64) via build-pc-perf.ps1.
+    """Build all WPF product assemblies (Release, x64) via build-pf-perf.ps1.
 
     Returns True iff every ASSEMBLIES entry's <Name>.dll exists at its build_dir
     after the build. We delete the per-assembly DLLs first so a stale copy from

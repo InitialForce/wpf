@@ -337,9 +337,15 @@
 
   <ItemGroup>
     <ProjectReference Include="$(WpfSourceDir)PresentationCore\PresentationCore.csproj" />
-    <ProjectReference Include="$(WpfSourceDir)DirectWriteForwarder\DirectWriteForwarder.vcxproj">
+    <ProjectReference Include="$(WpfSourceDir)DirectWriteForwarder\DirectWriteForwarder.vcxproj"
+                      Condition="'$(SkipDirectWriteForwarderProjectRef)'!='true'">
       <UndefineProperties>TargetFramework;TargetFrameworks</UndefineProperties>
     </ProjectReference>
+    <Reference Include="DirectWriteForwarder"
+               Condition="'$(SkipDirectWriteForwarderProjectRef)'=='true' and '$(DirectWriteForwarderBinaryPath)'!=''">
+      <HintPath>$(DirectWriteForwarderBinaryPath)</HintPath>
+      <Private>false</Private>
+    </Reference>
     <ProjectReference Include="$(WpfSourceDir)System.Xaml\System.Xaml.csproj" />
     <ProjectReference Include="$(WpfSourceDir)WindowsBase\WindowsBase.csproj" />
     <ProjectReference Include="$(WpfSourceDir)ReachFramework\ref\ReachFramework-ref.csproj">

@@ -60,12 +60,13 @@
 > `Allocated` column**. Rank by: alloc_pct_total > cpu_pct_total > novelty.
 >
 > **`*WindowLifecycle*` was broken under InProcess** — its baseline GlobalSetup
-> threw on `PresentationSource` type-init when shared-AppDomain. Status under
-> the new out-of-process shadow toolchain is unverified (each bench has its
-> own child process now, so type-init issues might be gone). DO NOT pick
-> this filter until the orchestrator retests and updates this note. Even if
-> it works, *WindowLifecycle* exercises PresentationFramework code paths
-> which we can't currently override (PF not in ASSEMBLIES — DWF cycle issue).
+> threw on `PresentationSource` type-init when shared-AppDomain. Under the
+> out-of-process shadow toolchain each bench has its own child process, so
+> type-init issues are gone. PresentationFramework is NOW on the allowlist and
+> in ASSEMBLIES (DWF cycle solved via SkipDirectWriteForwarderProjectRef=true
+> + binary Reference fallback in PF.csproj and ReachFramework.csproj;
+> ABI-verified: locally-built PF = Version=10.0.0.0 / PublicKeyToken=31bf3856ad364e35
+> matching the shadow pack). *WindowLifecycle* is available for picking.
 >
 > **You are still authorized to swing big.** Component rewrites, multi-file
 > refactors, sub-agent help — all on the table. The only hard constraints are
@@ -145,12 +146,12 @@ src/Microsoft.DotNet.Wpf/src/System.Xaml/
 src/Microsoft.DotNet.Wpf/src/Shared/
 ```
 
-**PresentationFramework is intentionally NOT on the allowlist** —
-build-pc-perf.ps1 can't build PF locally (DirectWriteForwarder.vcxproj C++
-cycle is unsolved), so the per-iter swap doesn't replace PF. A PF-resident
-edit would silently measure against the system runtime pack PF, producing
-"alloc Δ +0 / time Δ in noise" verdicts that look like REJECT-UNCLEAR but
-are actually unmeasured.
+**PresentationFramework IS on the allowlist** (re-enabled after DWF cycle fix).
+build-pf-perf.ps1 builds PF locally via SkipDirectWriteForwarderProjectRef=true
+(same technique as PresentationCore), and the locally-built PF.dll is
+ABI-compatible with the shadow pack. The dual-swap (publish dir + shadow
+WindowsDesktop pack) works identically to PC/WB/SX. PF-resident edits are
+now measurable.
 
 You **MUST NOT** edit:
 
@@ -210,7 +211,7 @@ Rules for sub-agents:
 
 2. **Pick ONE hot path** from `profile.json`. Rules (in order):
    a. Must have a non-null `bdn_filter` (so it's testable by microbench.py).
-   b. Must NOT be `*WindowLifecycle*` (currently BENCH-FAIL — see operational note).
+   b. `*WindowLifecycle*` is NOW eligible — PF is on the allowlist and in ASSEMBLIES (see operational note).
    c. Must NOT be `*GeometryParser*` (off-profile, exhausted — see operational note).
    d. Must NOT be on the cool list (2 consecutive REJECT-UNCLEAR → 5-iter cooldown).
    e. **Saturation skip**: if a filter has 3+ KEEPs total in this run AND its
