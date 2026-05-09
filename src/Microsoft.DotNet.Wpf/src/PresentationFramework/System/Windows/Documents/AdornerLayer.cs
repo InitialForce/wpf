@@ -9,6 +9,7 @@
 
 using System.Windows.Media;
 using System.Collections;
+using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Windows.Threading;
 using System.Windows.Controls;
@@ -779,8 +780,10 @@ namespace System.Windows.Documents
                 return;
             }
 
-            // We only expect one to have been removed on any one call.
-            ArrayList removeList = new ArrayList(1);
+            // Reuse pooled list to avoid per-call ArrayList allocation.
+            _removeList ??= new List<UIElement>(4);
+            _removeList.Clear();
+            List<UIElement> removeList = _removeList;
 
             if (element != null)
             {
@@ -797,12 +800,15 @@ namespace System.Windows.Documents
             else
             {
                 ICollection keyCollection = ElementMap.Keys;
-                UIElement[] keys = new UIElement[keyCollection.Count];
-                keyCollection.CopyTo(keys, 0);  // make a static copy of the keys to prevent any possible enumerator exceptions
+                int keysCount = keyCollection.Count;
+                // Reuse a grow-only snapshot buffer; min capacity 8.
+                if (_keysSnapshotBuffer == null || _keysSnapshotBuffer.Length < keysCount)
+                    _keysSnapshotBuffer = new UIElement[Math.Max(keysCount, 8)];
+                keyCollection.CopyTo(_keysSnapshotBuffer, 0);  // static snapshot to prevent enumerator exceptions
 
-                for (int i = 0; i < keys.Length; i++)
+                for (int i = 0; i < keysCount; i++)
                 {
-                    UIElement elTemp = (UIElement)keys[i];
+                    UIElement elTemp = _keysSnapshotBuffer[i];
 
                     // Make sure element is still beneath the adorner decorator
                     if (!elTemp.IsDescendantOf(adornerLayerParent))
@@ -814,11 +820,15 @@ namespace System.Windows.Documents
                         UpdateElementAdorners(elTemp);
                     }
                 }
+
+                // Clear used slots to release UIElement refs; prevents the buffer from
+                // retaining strong references to elements after this call returns.
+                Array.Clear(_keysSnapshotBuffer, 0, keysCount);
             }
 
             for (int i = 0; i < removeList.Count; i++)
             {
-                Clear((UIElement)removeList[i]);
+                Clear(removeList[i]);
             }
         }
 
@@ -1018,6 +1028,13 @@ namespace System.Windows.Documents
         private SortedList _zOrderMap = new SortedList(10);
         private const int DefaultZOrder = System.Int32.MaxValue;
         private VisualCollection _children;
+
+        // Pooled buffers for UpdateAdorner — avoids per-call heap allocation on the
+        // hot LayoutUpdated path (~570 fires/sec in MotionCatalyst profiling).
+        // Both fields are reused across calls; UpdateAdorner is UI-thread-only and
+        // not self-reentrant on the same AdornerLayer instance.
+        private List<UIElement> _removeList;
+        private UIElement[] _keysSnapshotBuffer;
 
         #endregion Private Fields
     }
