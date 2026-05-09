@@ -11,6 +11,10 @@ namespace MS.Internal
 {
     internal static class UIElementHelper
     {
+        [ThreadStatic]
+        private static Stack<DependencyObject> _branchNodeStackCache;
+
+
         internal static bool IsHitTestVisible(DependencyObject o)
         {
             Debug.Assert(o != null, "UIElementHelper.IsHitTestVisible called with null argument");
@@ -138,7 +142,8 @@ namespace MS.Internal
             UIElement3D e3d = null;
             ContentElement ce = null;
 
-            Stack<DependencyObject> branchNodeStack = new Stack<DependencyObject>();
+            var branchNodeStack = _branchNodeStackCache ??= new Stack<DependencyObject>();
+            branchNodeStack.Clear(); // defensive: guard against unexpected residue from any prior walk
             bool continueInvalidation = true;
 
             while (o != null && continueInvalidation)
