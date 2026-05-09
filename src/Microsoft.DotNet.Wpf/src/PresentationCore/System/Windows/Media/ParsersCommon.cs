@@ -446,19 +446,6 @@ namespace MS.Internal.Markup
         /// Read a floating point number
         /// </summary>
         /// <returns></returns>
-        // AggressiveInlining: ReadNumber is the dominant per-call frame on the
-        // parser hot path (called ~5000 times per ParseCorpus via ReadPoint and
-        // direct call sites in the M/L/H/V/C/Q/A do-while bodies). The CLR JIT
-        // refuses to inline any method that contains a try/catch block, so the
-        // try/catch around the double.Parse slow path on lines below is hoisted
-        // into a separate ReadNumberDoubleParseSlow helper. With the try/catch
-        // gone from ReadNumber's IL, AggressiveInlining lets the JIT fold the
-        // simple-integer fast path into ParseToGeometryContext directly, which
-        // collapses the ~2 ns/call frame overhead AND lets the JIT see the
-        // _curIndex / _token / _pathString locals across the call boundary
-        // (CSE wins, register allocation across the loop body, dead-store
-        // elimination on the simple-int path's _curIndex write).
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private double ReadNumber(bool allowComma)
         {
             if (!IsNumber(allowComma))
@@ -603,38 +590,20 @@ namespace MS.Internal.Markup
                 // the sign as a single conditional negate.
                 return (first == '-') ? -intValue : (double)intValue;
             }
-
-            return ReadNumberDoubleParseSlow(s, start, i);
-        }
-
-        /// <summary>
-        /// Slow-path tail of ReadNumber: invokes double.Parse on the substring
-        /// when the simple-integer fast path is rejected (decimal, exponent,
-        /// Infinity/NaN, or >8 digits).
-        /// </summary>
-        /// <remarks>
-        /// Extracted into a separate method so ReadNumber's main body contains
-        /// no try/catch — methods with try/catch cannot be JIT-inlined, so
-        /// keeping the try/catch here lets ReadNumber itself collapse into its
-        /// callers under [AggressiveInlining]. NoInlining on this slow path is
-        /// belt-and-suspenders: the body has try/catch which already blocks
-        /// inlining, but the attribute documents intent and prevents future
-        /// edits from accidentally enabling inline.
-        /// </remarks>
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        private double ReadNumberDoubleParseSlow(string s, int start, int i)
-        {
-            try
+            else
             {
+                try
+                {
 #if NET
-                return double.Parse(s.AsSpan(start, i - start), provider: _formatProvider);
+                    return double.Parse(s.AsSpan(start, i - start), provider: _formatProvider);
 #else
-                return double.Parse(s.Substring(start, i - start), provider: _formatProvider);
+                    return double.Parse(s.Substring(start, i - start), provider: _formatProvider);
 #endif
-            }
-            catch (FormatException except)
-            {
-                throw new System.FormatException(SR.Format(SR.Parser_UnexpectedToken, _pathString, start), except);
+                }
+                catch (FormatException except)
+                {
+                    throw new System.FormatException(SR.Format(SR.Parser_UnexpectedToken, _pathString, start), except);
+                }
             }
         }
 
@@ -671,14 +640,6 @@ namespace MS.Internal.Markup
         /// Read a relative point
         /// </summary>
         /// <returns></returns>
-        // AggressiveInlining: thin wrapper over two ReadNumber calls + an
-        // optional relative-coord add. With ReadNumber now also AggressiveInlined
-        // (its try/catch hoisted into ReadNumberDoubleParseSlow), inlining
-        // ReadPoint cascades the entire (IsNumber + integer-walk + ReadPoint
-        // adapter) sequence into the per-coord call sites in the M/L/C/Q/A
-        // case bodies. Eliminates ~2 ns/coord call frame on top of the
-        // ReadNumber inline win.
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private Point ReadPoint(char cmd, bool allowcomma)
         {
             double x = ReadNumber(allowcomma);
@@ -688,7 +649,7 @@ namespace MS.Internal.Markup
             {
                 x += _lastPoint.X;
                 y += _lastPoint.Y;
-            }
+            }                
 
             return new Point(x, y);
         }
