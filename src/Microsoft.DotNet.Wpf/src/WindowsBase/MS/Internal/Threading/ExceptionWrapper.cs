@@ -17,11 +17,36 @@ namespace System.Windows.Threading
         // Helper for exception filtering:
         public object TryCatchWhen(object source, Delegate callback, object args, int numArgs, Delegate catchHandler)
         {
-            object result = null;
-
             try
             {
-                result = InternalRealCall(callback, args, numArgs);
+                // Hot path #1: numArgs == 0 with Action delegate. This is the
+                // dominant production case — every Dispatcher.Invoke(Action) /
+                // BeginInvoke(Action) eventually lands here. Inline directly so
+                // the fast path does not pay the InternalRealCall frame, the
+                // numArgs==-1 normalization branch, or the
+                // ShutdownCallback type-test, and so the JIT can return the
+                // null literal directly from a register instead of routing it
+                // through a `result` local that must survive the try region.
+                if (numArgs == 0 && callback is Action action)
+                {
+                    action();
+                    return null;
+                }
+                // Hot path #2: numArgs == 1 with DispatcherOperationCallback.
+                // Second most common — every HwndSubclass.SubclassWndProc Win32
+                // message dispatch hits this via
+                // dispatcher.Invoke(Send, _dispatcherOperationCallback, param).
+                if (numArgs == 1 && callback is DispatcherOperationCallback doc)
+                {
+                    return doc(args);
+                }
+                // Cold path: ShutdownCallback / SendOrPostCallback /
+                // DynamicInvoke / numArgs==-1 normalization. Body is unchanged
+                // — this preserves InternalRealCall's IL size + JIT shape and
+                // avoids the cross-benchmark side effects that sank
+                // iter=excwrap-irc-hotpath-extract (NegativeControlDynamicInvoke
+                // regressed +14.74 ns when InternalRealCall was restructured).
+                return InternalRealCall(callback, args, numArgs);
             }
             catch (Exception e) when (FilterException(source, e))
             {
@@ -31,7 +56,7 @@ namespace System.Windows.Threading
                 }
             }
 
-            return result;
+            return null;
         }
 
         private object InternalRealCall(Delegate callback, object args, int numArgs)
