@@ -538,26 +538,41 @@ namespace System.Windows.Media
 
             while (cbDataSize > 0)
             {
-                int cbDataForThisChunk = Math.Min(cbDataSize,
-                    _chunkList[currentChunk].Length - bufferOffset);
+                // Hoist the FrugalStructList indexer to a local so the per-iteration
+                // .Length / copy-arg / post-update reads share one indexer call instead
+                // of three. SingleItemList<byte[]>'s indexer is fast but still emits a
+                // virtual call through the FrugalListBase store interface.
+                byte[] chunk = _chunkList[currentChunk];
+                int cbDataForThisChunk = Math.Min(cbDataSize, chunk.Length - bufferOffset);
 
                 if (cbDataForThisChunk > 0)
                 {
                     // At this point, _buffer must be non-null and
                     // _buffer.Length must be >= newOffset
-                    Invariant.Assert((_chunkList[currentChunk] != null) 
-                        && (_chunkList[currentChunk].Length >= bufferOffset + cbDataForThisChunk));
+                    Invariant.Assert((chunk != null)
+                        && (chunk.Length >= bufferOffset + cbDataForThisChunk));
 
                     // Also, because pinning a 0-length buffer fails, we assert this too.
-                    Invariant.Assert(_chunkList[currentChunk].Length > 0);
+                    Invariant.Assert(chunk.Length > 0);
 
-                    if (reading)
+                    // Use `fixed` + Buffer.MemoryCopy instead of Marshal.Copy. The
+                    // Marshal.Copy(byte[],int,IntPtr,int) / Marshal.Copy(IntPtr,byte[],int,int)
+                    // overloads pay a per-call array-pinning + boundary-cross overhead that
+                    // dominates the actual byte transfer for the small (16–48 byte) writes
+                    // typical in geometry stream construction (Point = 16 B, MIL_SEGMENT_POLY,
+                    // MIL_PATHFIGURE, MIL_SEGMENT_ARC). The `fixed` block registers the pin
+                    // via the JIT's GC-info table (no allocation, no P/Invoke transition) and
+                    // Buffer.MemoryCopy lowers to a JIT-recognized intrinsic memcpy.
+                    fixed (byte* pbChunk = chunk)
                     {
-                        Marshal.Copy(_chunkList[currentChunk], bufferOffset, (IntPtr)pbData, cbDataForThisChunk);
-                    }
-                    else
-                    {
-                        Marshal.Copy((IntPtr)pbData, _chunkList[currentChunk], bufferOffset, cbDataForThisChunk);
+                        if (reading)
+                        {
+                            Buffer.MemoryCopy(pbChunk + bufferOffset, pbData, cbDataForThisChunk, cbDataForThisChunk);
+                        }
+                        else
+                        {
+                            Buffer.MemoryCopy(pbData, pbChunk + bufferOffset, cbDataForThisChunk, cbDataForThisChunk);
+                        }
                     }
 
                     cbDataSize -= cbDataForThisChunk;
