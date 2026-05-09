@@ -491,22 +491,23 @@ namespace System.Windows.Threading
             {
                 // We are executing under the "foreign" execution context, but the
                 // SynchronizationContext must be for the correct dispatcher and
-                // priority.
+                // priority. Use the per-Dispatcher SyncCtx pool (lazy per-priority cache)
+                // and the cached compat-pref bools captured at Dispatcher ctor time, so
+                // every queued-dispatch call after the first per priority avoids the
+                // DispatcherSynchronizationContext allocation AND the two
+                // BaseCompatibilityPreferences.Get*() static method-call frames.
                 DispatcherSynchronizationContext newSynchronizationContext;
-                if(BaseCompatibilityPreferences.GetReuseDispatcherSynchronizationContextInstance())
+                if(_dispatcher._reuseDispatcherSyncCtxInstance)
                 {
-                    newSynchronizationContext = Dispatcher._defaultDispatcherSynchronizationContext;
+                    newSynchronizationContext = _dispatcher._defaultDispatcherSynchronizationContext;
+                }
+                else if(_dispatcher._flowDispatcherSyncCtxPriority)
+                {
+                    newSynchronizationContext = _dispatcher.GetOrCreateSyncCtx(_priority);
                 }
                 else
                 {
-                    if(BaseCompatibilityPreferences.GetFlowDispatcherSynchronizationContextPriority())
-                    {
-                        newSynchronizationContext = new DispatcherSynchronizationContext(_dispatcher, _priority);
-                    }
-                    else
-                    {
-                        newSynchronizationContext = new DispatcherSynchronizationContext(_dispatcher, DispatcherPriority.Normal);
-                    }
+                    newSynchronizationContext = _dispatcher.GetOrCreateSyncCtx(DispatcherPriority.Normal);
                 }
                 SynchronizationContext.SetSynchronizationContext(newSynchronizationContext);
 

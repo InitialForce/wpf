@@ -1319,6 +1319,32 @@ namespace System.Windows.Threading
             return InvokeImpl(operation, CancellationToken.None, timeout);
         }
 
+        // Returns a per-Dispatcher cached DispatcherSynchronizationContext for the requested
+        // priority, allocating one only on the first use of each priority. Used by
+        // DispatcherOperation.InvokeImpl on the queued-dispatch path where _priority is not
+        // statically known (Send is handled separately on the LegacyInvokeImpl/Invoke(Action)
+        // fast paths). DispatcherSynchronizationContext is sealed and only carries (Dispatcher,
+        // DispatcherPriority); cross-call reuse is therefore semantics-preserving for the same
+        // (this, priority) tuple — exactly the equivalence already used for the Send-priority
+        // cache.
+        internal DispatcherSynchronizationContext GetOrCreateSyncCtx(DispatcherPriority priority)
+        {
+            int idx = (int)priority;
+            DispatcherSynchronizationContext[] arr = _syncCtxByPriority;
+            if ((uint)idx < (uint)arr.Length)
+            {
+                DispatcherSynchronizationContext cached = arr[idx];
+                if (cached != null) return cached;
+                DispatcherSynchronizationContext fresh = new DispatcherSynchronizationContext(this, priority);
+                arr[idx] = fresh;
+                return fresh;
+            }
+            // Defensive: priority outside [0..Send]. ValidatePriority() rejects these earlier
+            // on the public API surface, so this is dead in practice; fall back to per-call
+            // alloc preserving the original semantics.
+            return new DispatcherSynchronizationContext(this, priority);
+        }
+
         private object InvokeImpl(DispatcherOperation operation, CancellationToken cancellationToken, TimeSpan timeout)
         {
             object result = null;
@@ -1753,6 +1779,12 @@ namespace System.Windows.Threading
             _reuseDispatcherSyncCtxInstance = BaseCompatibilityPreferences.GetReuseDispatcherSynchronizationContextInstance();
             _flowDispatcherSyncCtxPriority = BaseCompatibilityPreferences.GetFlowDispatcherSynchronizationContextPriority();
             _sendDispatcherSynchronizationContext = new DispatcherSynchronizationContext(this, DispatcherPriority.Send);
+
+            // Per-priority SyncCtx pool: one slot per valid DispatcherPriority (0..Send). Lazy
+            // populated by GetOrCreateSyncCtx; pre-populate the Send slot with the existing
+            // _sendDispatcherSynchronizationContext so the two caches share an instance.
+            _syncCtxByPriority = new DispatcherSynchronizationContext[(int)DispatcherPriority.Send + 1];
+            _syncCtxByPriority[(int)DispatcherPriority.Send] = _sendDispatcherSynchronizationContext;
 
             // Create the message-only window we use to receive messages
             // that tell us to process the queue.
@@ -2881,8 +2913,21 @@ namespace System.Windows.Threading
         // Cached compat-pref values, captured once in the ctor (BaseCompatibilityPreferences seals
         // these on first read anyway). Lets the LegacyInvokeImpl fast path skip per-call
         // BaseCompatibilityPreferences.Get*() static method-call frames + their volatile reads.
-        private bool _reuseDispatcherSyncCtxInstance;
-        private bool _flowDispatcherSyncCtxPriority;
+        // Internal (not private) so DispatcherOperation.InvokeImpl can read them on its own
+        // queued-dispatch path without re-doing the static Get*() calls.
+        internal bool _reuseDispatcherSyncCtxInstance;
+        internal bool _flowDispatcherSyncCtxPriority;
+
+        // Per-Dispatcher cached SyncCtx pool indexed by DispatcherPriority. Lazy-populated on
+        // first use of each priority by DispatcherOperation.InvokeImpl, which (unlike the Send
+        // fast path) sees an arbitrary _priority on the queued-dispatch path. Entries are
+        // immutable DispatcherSynchronizationContext instances bound to (this, priority); the
+        // sealed class only stores those two fields, so cross-call reuse is safe. The Send
+        // slot (index = (int)DispatcherPriority.Send) is pre-populated in the ctor with
+        // _sendDispatcherSynchronizationContext to avoid a duplicate allocation. Indexing is
+        // by raw enum value (0..(int)Send) so the lookup is a single bounds-checked array
+        // load + null-check.
+        private DispatcherSynchronizationContext[] _syncCtxByPriority;
 
         internal object _instanceLock = new object(); // Also used by DispatcherOperation
         private PriorityQueue<DispatcherOperation> _queue;
