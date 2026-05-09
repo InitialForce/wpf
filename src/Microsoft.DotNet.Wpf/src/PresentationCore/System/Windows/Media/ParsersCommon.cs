@@ -449,8 +449,8 @@ namespace MS.Internal.Markup
             if (!IsNumber(allowComma))
             {
                 ThrowBadToken();
-            }                
-            
+            }
+
             bool simple = true;
             int start = _curIndex;
 
@@ -467,6 +467,20 @@ namespace MS.Internal.Markup
             {
                 _curIndex ++;
             }
+
+            // intValue accumulates the digit run during the same walk that
+            // advances _curIndex past the integer portion of the number.
+            // The original implementation walked the digits twice — once via
+            // SkipDigits (advance only) and again in the simple-integer return
+            // block to fold the value. For the geometry corpus (1-3 digit
+            // unsigned integers, ~4000 ReadNumbers per parse), the second walk
+            // is pure waste. Combining the two saves ~one string-indexer pass
+            // per number on the hot path while preserving every semantics
+            // observable on the slow path: if a '.', 'E', or 'e' is
+            // encountered, simple is set false and intValue is discarded;
+            // double.Parse re-parses the full lexeme [start, _curIndex)
+            // including the sign exactly as before.
+            int intValue = 0;
 
             // Check for Infinity (or -Infinity).
             if (More() && (_pathString[_curIndex] == 'I'))
@@ -490,7 +504,32 @@ namespace MS.Internal.Markup
             }
             else
             {
-                SkipDigits(! AllowSign);
+                // Walk + accumulate digits in a single pass. Replaces
+                // SkipDigits(!AllowSign) followed by the post-hoc integer-fold
+                // loop that used to live in the simple-integer return block.
+                // Sign was already consumed above (and is reapplied via
+                // `first` below), so this loop starts at the first digit.
+                // Overflow is benign on the simple-integer return: the
+                // (_curIndex <= start + 8) gate below caps the digit count at
+                // 8 (positive numbers up to 99,999,999 — well within int32),
+                // and any longer run forces the slow path which discards
+                // intValue entirely.
+                {
+                    string s = _pathString;
+                    int end = _pathLength;
+                    int i = _curIndex;
+                    while (i < end)
+                    {
+                        uint d = (uint)(s[i] - '0');
+                        if (d > 9u)
+                        {
+                            break;
+                        }
+                        intValue = intValue * 10 + (int)d;
+                        i++;
+                    }
+                    _curIndex = i;
+                }
 
                 // Optional period, followed by more digits
                 if (More() && (_pathString[_curIndex] == '.'))
@@ -511,32 +550,13 @@ namespace MS.Internal.Markup
 
             if (simple && (_curIndex <= (start + 8))) // 32-bit integer
             {
-                // Hoist _pathString to a local so the JIT proves the ref is
-                // stable across the loop and folds away per-iteration field
-                // loads + null-checks on the string indexer.
-                string s = _pathString;
-                int end = _curIndex;
-                int sign = 1;
-
-                if (s[start] == '+')
-                {
-                    start ++;
-                }
-                else if (s[start] == '-')
-                {
-                    start ++;
-                    sign = -1;
-                }
-
-                int value = 0;
-
-                while (start < end)
-                {
-                    value = value * 10 + (s[start] - '0');
-                    start ++;
-                }
-
-                return value * sign;
+                // Sign comes from the original first char of the number token;
+                // intValue accumulated the digit-run in the loop above. Apply
+                // the sign as a single conditional negate. Equivalent to the
+                // prior `int sign = (s[start]=='-') ? -1 : 1; return value*sign;`
+                // pattern but without re-reading s[start] and without the
+                // multiply.
+                return (first == '-') ? -intValue : (double)intValue;
             }
             else
             {
