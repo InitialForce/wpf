@@ -375,6 +375,16 @@ def bdn_env() -> dict:
     WPF_AR_EXPECTED_PACK_DIR is the path ShadowGuard.cs (in microbench/) checks
       against Assembly.Location at module load — fails the inner child loudly
       if the shadow override didn't take effect.
+
+    WSLENV is the WSL → Windows env-var propagation whitelist. Without it,
+    NONE of the variables we set here would reach cmd.exe (and therefore BDN).
+    The colon-separated names list each var that should cross the bash-to-Windows
+    boundary; we keep any pre-existing value (e.g. WT_SESSION) and append ours.
+    Diagnosed 2026-05-09 after ShadowGuard kept tripping in BDN inner children
+    despite microbench.py setting the var — the var was set on python's side,
+    but WSL silently dropped everything except DOTNET_ROOT (and even that only
+    worked for iter 062 because BDN's customDotNetCliPath makes the inner
+    child use shadow's dotnet.exe regardless of the env).
     """
     env = os.environ.copy()
     env["DOTNET_ROOT"] = DOTNET_SHADOW_WIN
@@ -387,6 +397,17 @@ def bdn_env() -> dict:
     if pack_dir is not None:
         # Convert /c/foo/bar to C:\foo\bar for ShadowGuard's StartsWith match.
         env["WPF_AR_EXPECTED_PACK_DIR"] = to_winpath(pack_dir)
+
+    propagated = [
+        "DOTNET_ROOT", "DOTNET_ROOT_X64", "DOTNET_MULTILEVEL_LOOKUP",
+        "DOTNET_ReadyToRun", "WPF_AR_EXPECTED_PACK_DIR",
+    ]
+    existing_wslenv = env.get("WSLENV", "")
+    parts = [p for p in existing_wslenv.split(":") if p] if existing_wslenv else []
+    for name in propagated:
+        if name not in parts:
+            parts.append(name)
+    env["WSLENV"] = ":".join(parts)
 
     return env
 
@@ -476,7 +497,13 @@ def run_bdn(filter_pattern: str) -> tuple[int, str]:
 
 
 def parse_bdn_results() -> list[dict] | None:
-    """Read every *-report-full.json in results dir; return the Benchmarks list flat."""
+    """Read every *-report-full.json in results dir; return the Benchmarks list flat.
+
+    Treats benchmarks with null/missing Statistics as un-run (BDN writes them
+    when the inner child crashes on module load — e.g., ShadowGuard tripping).
+    Returns None if NO benchmarks have valid stats so the caller routes to the
+    BENCH-FAIL exit path instead of crashing in decide() on float(None).
+    """
     if not MICROBENCH_RESULTS.exists():
         return None
     out: list[dict] = []
@@ -484,10 +511,14 @@ def parse_bdn_results() -> list[dict] | None:
         try:
             data = json.loads(f.read_text())
             for b in data.get("Benchmarks", []):
+                stats = b.get("Statistics")
+                if stats is None or not isinstance(stats, dict) or "Mean" not in stats:
+                    log(f"  skipping {b.get('FullName','?')}: no Statistics (inner child crashed?)")
+                    continue
                 out.append({
                     "fullName": b["FullName"],
-                    "stats": b.get("Statistics", {}),
-                    "memory": b.get("Memory", {}),
+                    "stats": stats,
+                    "memory": b.get("Memory") or {},
                 })
         except Exception as e:
             log(f"  failed to parse {f.name}: {e}")
