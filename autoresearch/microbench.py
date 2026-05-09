@@ -124,9 +124,15 @@ MIN_TIME_NS_PER_OP = float(os.environ.get("WPF_AR_MIN_TIME_NS", "5"))
 # to WPF_REPO). Prevents the agent from editing benchmarks, baselines, harness
 # scripts, or profile manifests — the consensus models flagged this as the
 # single biggest stop-the-line risk ("Goodhart's Law on benchmark code").
+#
+# PresentationFramework is intentionally NOT in this list: build-pc-perf.ps1
+# can't build PF locally yet (DirectWriteForwarder.vcxproj C++ cycle), so the
+# ASSEMBLIES list below doesn't include it, so any PF-resident edit would
+# silently no-op against the system runtime pack PF. Re-add this prefix once
+# build-pc-perf.ps1 grows a working SkipDirectWriteForwarderProjectRef path
+# AND ASSEMBLIES gets a PresentationFramework entry.
 ALLOWED_PATH_PREFIXES = (
     "src/Microsoft.DotNet.Wpf/src/PresentationCore/",
-    "src/Microsoft.DotNet.Wpf/src/PresentationFramework/",
     "src/Microsoft.DotNet.Wpf/src/WindowsBase/",
     "src/Microsoft.DotNet.Wpf/src/System.Xaml/",
     "src/Microsoft.DotNet.Wpf/src/Shared/",
@@ -366,6 +372,9 @@ def bdn_env() -> dict:
     DOTNET_ReadyToRun=0 disables ReadyToRun so the host doesn't reject our
       pure-IL local builds for not matching the system pack's R2R metadata.
     PATH prepend ensures any indirect `dotnet` invocations also use the shadow.
+    WPF_AR_EXPECTED_PACK_DIR is the path ShadowGuard.cs (in microbench/) checks
+      against Assembly.Location at module load — fails the inner child loudly
+      if the shadow override didn't take effect.
     """
     env = os.environ.copy()
     env["DOTNET_ROOT"] = DOTNET_SHADOW_WIN
@@ -373,6 +382,12 @@ def bdn_env() -> dict:
     env["DOTNET_MULTILEVEL_LOOKUP"] = "0"
     env["DOTNET_ReadyToRun"] = "0"
     env["PATH"] = DOTNET_SHADOW_WIN + os.pathsep + env.get("PATH", "")
+
+    pack_dir = shadow_pack_dir()
+    if pack_dir is not None:
+        # Convert /c/foo/bar to C:\foo\bar for ShadowGuard's StartsWith match.
+        env["WPF_AR_EXPECTED_PACK_DIR"] = to_winpath(pack_dir)
+
     return env
 
 

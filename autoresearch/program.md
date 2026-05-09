@@ -59,10 +59,13 @@
 > `alloc_pct_total` whose `bdn_filter` covers benchmarks that show a non-zero
 > `Allocated` column**. Rank by: alloc_pct_total > cpu_pct_total > novelty.
 >
-> **`*WindowLifecycle*` is currently broken** — its baseline GlobalSetup throws
-> on `PresentationSource` type-init under InProcessEmitToolchain (BENCH-FAIL
-> auto-revert, no row written → no cooldown protection). DO NOT pick this filter
-> until the orchestrator clears the BENCH-FAIL note from this paragraph.
+> **`*WindowLifecycle*` was broken under InProcess** — its baseline GlobalSetup
+> threw on `PresentationSource` type-init when shared-AppDomain. Status under
+> the new out-of-process shadow toolchain is unverified (each bench has its
+> own child process now, so type-init issues might be gone). DO NOT pick
+> this filter until the orchestrator retests and updates this note. Even if
+> it works, *WindowLifecycle* exercises PresentationFramework code paths
+> which we can't currently override (PF not in ASSEMBLIES — DWF cycle issue).
 >
 > **You are still authorized to swing big.** Component rewrites, multi-file
 > refactors, sub-agent help — all on the table. The only hard constraints are
@@ -91,17 +94,26 @@ class→struct conversion, a Span<char>-based parser rewrite, a queue redesign,
 whatever fits. Compounding wins is the strategy; the size of each compound is
 yours to choose.
 
-**Strategic priority: alloc kills.** The TIME axis on STA-batch benchmarks has
-~1-3 ns/op cross-thread noise that swallows most micro-optimizations. The ALLOC
-axis is deterministic and the harness floor is 16 B/op. Prefer changes that
-**eliminate per-op heap allocation** (wrapper kills, struct-instead-of-class,
-removing event-arg boxing, caching delegates, pooling). A change that drops
-`Allocated` from 80 B/op → 32 B/op is a clear KEEP regardless of what time
-does. A change that shaves 2 ns/op without affecting Allocated is a coin flip.
+**Strategic priority: significant wins on EITHER axis.** With the
+out-of-process shadow toolchain (live since 2026-05-09), each benchmark runs
+in its own child process — no JIT/GC state leaks between benches. Time-axis
+noise is now at the BDN-default level (CIs typically 0.5–2 ns wide), so
+**5 ns/op time wins are real and measurable**, not coin flips. Iter 062
+proved this: ExceptionWrapper TryCatchWhenAction landed an 8.92 → 2.95 ns
+KEEP (-67%, CIs disjoint) where the InProcess harness would have buried it
+under cross-thread STA noise.
 
-When time IS the only available signal (e.g. `*GeometryParser*` which has
-lower CV and zero baseline allocation), bias toward changes large enough to
-clearly beat ~5 ns/op or ~10% relative.
+Prefer changes likely to register on EITHER:
+  * **Alloc axis** — wrapper kills (CCM=48B, boxed enum=24B, SyncCtx=32B),
+    struct-instead-of-class, removing event-arg boxing, delegate caching,
+    pooling. Floor is 16 B/op; alloc is deterministic (CV ≈ 0).
+  * **Time axis** — eliminating uncontended Monitor pairs, killing virtual
+    calls, hoisting field reads, inlining type-test hot paths,
+    [AggressiveInlining] on small wrappers (the iter-062 win pattern).
+    Floor is 5 ns/op; CI overlap rule still applies.
+
+A change that does both is gold. A clear win on either axis with no
+significant regression on the other = KEEP.
 
 ## Decision rule (executed by `microbench.py`, not by you)
 
@@ -128,11 +140,17 @@ anything else are rejected with exit code 6 before any build):
 
 ```
 src/Microsoft.DotNet.Wpf/src/PresentationCore/
-src/Microsoft.DotNet.Wpf/src/PresentationFramework/
 src/Microsoft.DotNet.Wpf/src/WindowsBase/
 src/Microsoft.DotNet.Wpf/src/System.Xaml/
 src/Microsoft.DotNet.Wpf/src/Shared/
 ```
+
+**PresentationFramework is intentionally NOT on the allowlist** —
+build-pc-perf.ps1 can't build PF locally (DirectWriteForwarder.vcxproj C++
+cycle is unsolved), so the per-iter swap doesn't replace PF. A PF-resident
+edit would silently measure against the system runtime pack PF, producing
+"alloc Δ +0 / time Δ in noise" verdicts that look like REJECT-UNCLEAR but
+are actually unmeasured.
 
 You **MUST NOT** edit:
 
@@ -202,8 +220,11 @@ Rules for sub-agents:
       grep '"tier":"B"' results.jsonl | jq -r '"\(.filter)\t\(.verdict)"' | grep '<filter>' | tail -3
       ```
    f. Among eligible paths, **prefer the one with the highest
-      `alloc_pct_total`** (ALLOC-axis priority — see Goal). Use `cpu_pct_total`
-      only as a tiebreaker among entries with similar alloc.
+      `alloc_pct_total`** OR `cpu_pct_total` whose covering benchmark has
+      shown a meaningful baseline value on the matching axis (≥ 16 B/op
+      Allocated for alloc plays, or ≥ 10 ns/op Mean for CPU plays). Both
+      axes are now first-class with the out-of-process toolchain. Use the
+      other axis as a tiebreaker among similarly-ranked entries.
    g. If ALL non-null `bdn_filter` paths are on cooldown, pick the one with the
       longest time since its last cooldown trigger (least-recently-rejected). Log
       that you are overriding cooldown and why.
