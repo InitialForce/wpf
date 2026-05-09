@@ -42,22 +42,7 @@ namespace System.Windows.Threading
             // cross-benchmark NegativeControlDynamicInvoke regression that
             // sank iter=excwrap-irc-hotpath-extract (iter=012, +14.74 ns CI
             // disjoint) does not recur.
-            //
-            // Single-bool no-handlers gate. Replaces the per-call pair of
-            // `Catch == null && Filter == null` field reads + null tests with
-            // one byte read + one test against the cached `_hasNoHandlers`
-            // flag. The flag is maintained by the explicit Catch/Filter event
-            // accessors (writes happen at Dispatcher-ctor time only; the
-            // handlers are wired once in Dispatcher's instance ctor and never
-            // mutated thereafter). Saves one mov+test in the hot path.
-            // Production observability: in real WPF the dispatcher always
-            // wires Catch+Filter so `_hasNoHandlers` is false there, and the
-            // gate immediately diverts to the with-handlers slow path —
-            // matching the previous behaviour while eliminating one of the
-            // pre-gate field loads. The fresh-wrapper bench (which never
-            // wires handlers) keeps `_hasNoHandlers=true` and exercises the
-            // inlined fast path, the same as before iter=062.
-            if (_hasNoHandlers)
+            if (Catch == null && Filter == null)
             {
                 if (numArgs == 0 && callback is Action action)
                 {
@@ -190,10 +175,10 @@ namespace System.Windows.Threading
         {
             // If we have a Catch handler we should catch the exception
             // unless the Filter handler says we shouldn't.
-            bool shouldCatch = (null != _catchHandler);
-            if(null != _filterHandler)
+            bool shouldCatch = (null != Catch);
+            if(null != Filter)
             {
-                shouldCatch = _filterHandler(source, e);
+                shouldCatch = Filter(source, e);
             }
             return shouldCatch;
         }
@@ -214,8 +199,8 @@ namespace System.Windows.Threading
                 }
             }
 
-            if(null != _catchHandler)
-                return _catchHandler(source, e);
+            if(null != Catch)
+                return Catch(source, e);
 
             return false;
         }
@@ -232,77 +217,10 @@ namespace System.Windows.Threading
         ///  Returns true if the exception is "handled"
         ///  Returns false if the caller should rethow the exception.
         /// </summary>
-        // Explicit event with custom add/remove. The custom accessors maintain
-        // the cached `_hasNoHandlers` flag that TryCatchWhen reads on every
-        // dispatch. Add/Remove use the same Interlocked.CompareExchange loop
-        // pattern the auto-event would have generated, preserving thread-safe
-        // delegate combination semantics. The cache write is a plain bool
-        // store after the delegate change commits — the fields are only ever
-        // mutated during Dispatcher construction (Catch+Filter wired once in
-        // the instance ctor, never mutated after), so the brief un-fenced
-        // window between the delegate update and the bool update is not
-        // observable in practice.
-        public event CatchHandler Catch
-        {
-            add
-            {
-                CatchHandler current, computed;
-                do
-                {
-                    current = _catchHandler;
-                    computed = (CatchHandler)Delegate.Combine(current, value);
-                } while (Interlocked.CompareExchange(ref _catchHandler, computed, current) != current);
-                _hasNoHandlers = (_catchHandler == null) && (_filterHandler == null);
-            }
-            remove
-            {
-                CatchHandler current, computed;
-                do
-                {
-                    current = _catchHandler;
-                    computed = (CatchHandler)Delegate.Remove(current, value);
-                } while (Interlocked.CompareExchange(ref _catchHandler, computed, current) != current);
-                _hasNoHandlers = (_catchHandler == null) && (_filterHandler == null);
-            }
-        }
+        public event CatchHandler Catch;
 
         public delegate bool FilterHandler(object source, Exception e);
-
-        public event FilterHandler Filter
-        {
-            add
-            {
-                FilterHandler current, computed;
-                do
-                {
-                    current = _filterHandler;
-                    computed = (FilterHandler)Delegate.Combine(current, value);
-                } while (Interlocked.CompareExchange(ref _filterHandler, computed, current) != current);
-                _hasNoHandlers = (_catchHandler == null) && (_filterHandler == null);
-            }
-            remove
-            {
-                FilterHandler current, computed;
-                do
-                {
-                    current = _filterHandler;
-                    computed = (FilterHandler)Delegate.Remove(current, value);
-                } while (Interlocked.CompareExchange(ref _filterHandler, computed, current) != current);
-                _hasNoHandlers = (_catchHandler == null) && (_filterHandler == null);
-            }
-        }
-
-        // Backing fields for the explicit Catch/Filter events. Replaces the
-        // compiler-synthesized fields the previous auto-events used.
-        private CatchHandler _catchHandler;
-        private FilterHandler _filterHandler;
-
-        // Cached "no handlers attached" flag. Initialized true (a fresh
-        // wrapper has neither handler subscribed) and set to false the
-        // first time either event is added. Read by the TryCatchWhen
-        // hot-path gate to skip the per-call double-field-load that the
-        // previous `Catch == null && Filter == null` test required.
-        private bool _hasNoHandlers = true;
+        public event FilterHandler Filter;
     }
 }
 
