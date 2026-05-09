@@ -637,6 +637,24 @@ namespace MS.Internal.Markup
         }
         
         /// <summary>
+        /// Read a relative point
+        /// </summary>
+        /// <returns></returns>
+        private Point ReadPoint(char cmd, bool allowcomma)
+        {
+            double x = ReadNumber(allowcomma);
+            double y = ReadNumber(AllowComma);
+
+            if (cmd >= 'a') // 'A' < 'a'. lower case for relative
+            {
+                x += _lastPoint.X;
+                y += _lastPoint.Y;
+            }                
+
+            return new Point(x, y);
+        }
+    
+        /// <summary>
         /// Reflect _secondLastPoint over _lastPoint to get a new point for smooth curve
         /// </summary>
         /// <returns></returns>
@@ -645,7 +663,16 @@ namespace MS.Internal.Markup
             return new Point(2 * _lastPoint.X - _secondLastPoint.X,
                              2 * _lastPoint.Y - _secondLastPoint.Y);
         }
-
+        
+        private void EnsureFigure()
+        {
+            if (!_figureStarted)
+            {
+                _context.BeginFigure(_lastStart, IsFilled, ! IsClosed);
+                _figureStarted = true;
+            }
+        }
+        
         /// <summary>
         /// Parse a PathFigureCollection string
         /// </summary>
@@ -655,24 +682,24 @@ namespace MS.Internal.Markup
             int startIndex)
         {
             // We really should throw an ArgumentNullException here for context and pathString.
-
+            
             // From original code
             // This is only used in call to Double.Parse
             _formatProvider = System.Globalization.CultureInfo.InvariantCulture;
-
+            
             _context         = context;
             _pathString      = pathString;
             _pathLength      = pathString.Length;
             _curIndex        = startIndex;
-
+            
             _secondLastPoint = new Point(0, 0);
             _lastPoint       = new Point(0, 0);
             _lastStart       = new Point(0, 0);
-
+            
             _figureStarted = false;
-
+            
             bool  first = true;
-
+            
             char last_cmd = ' ';
 
             while (ReadToken()) // Empty path is allowed in XAML
@@ -685,79 +712,48 @@ namespace MS.Internal.Markup
                     {
                         ThrowBadToken();
                     }
-
+            
                     first = false;
-                }
-
-                // `relative` is loop-invariant for the duration of the do-while
-                // bodies in the L/C/Q/A cases (cmd does not change inside the
-                // inner loops). Computing it once here lets the inlined
-                // ReadPoint bodies below skip a per-iteration `cmd >= 'a'`
-                // compare on the integer-only fast path.
-                bool relative = cmd >= 'a';
-
+                }                    
+                
                 switch (cmd)
                 {
                 case 'm': case 'M':
-                {
-                    // XAML allows multiple points after M/m.
-                    // Inline ReadPoint(cmd, !AllowComma) for the M start point.
-                    double mx = ReadNumber(!AllowComma);
-                    double my = ReadNumber(AllowComma);
-                    if (relative) { mx += _lastPoint.X; my += _lastPoint.Y; }
-                    _lastPoint = new Point(mx, my);
-
+                    // XAML allows multiple points after M/m
+                    _lastPoint = ReadPoint(cmd, ! AllowComma);
+                    
                     context.BeginFigure(_lastPoint, IsFilled, ! IsClosed);
                     _figureStarted = true;
                     _lastStart = _lastPoint;
                     last_cmd = 'M';
-
+                    
                     while (IsNumber(AllowComma))
                     {
-                        // Inline ReadPoint(cmd, !AllowComma) for each implicit-LineTo point.
-                        double ix = ReadNumber(!AllowComma);
-                        double iy = ReadNumber(AllowComma);
-                        if (relative) { ix += _lastPoint.X; iy += _lastPoint.Y; }
-                        _lastPoint = new Point(ix, iy);
-
+                        _lastPoint = ReadPoint(cmd, ! AllowComma);
+                        
                         context.LineTo(_lastPoint, IsStroked, ! IsSmoothJoin);
                         last_cmd = 'L';
                     }
                     break;
-                }
 
                 case 'l': case 'L':
                 case 'h': case 'H':
                 case 'v': case 'V':
-                    // Inline EnsureFigure().
-                    if (!_figureStarted)
-                    {
-                        context.BeginFigure(_lastStart, IsFilled, ! IsClosed);
-                        _figureStarted = true;
-                    }
+                    EnsureFigure();
 
                     do
                     {
                         switch (cmd)
                         {
-                        case 'l': case 'L':
-                        {
-                            // Inline ReadPoint(cmd, !AllowComma) — l/L share the
-                            // same body modulo `relative`, so the inner switch
-                            // collapses to a single case body for the whole pair.
-                            double lx = ReadNumber(!AllowComma);
-                            double ly = ReadNumber(AllowComma);
-                            if (relative) { lx += _lastPoint.X; ly += _lastPoint.Y; }
-                            _lastPoint = new Point(lx, ly);
-                            break;
-                        }
+                        case 'l': _lastPoint    = ReadPoint(cmd, ! AllowComma); break;
+                        case 'L': _lastPoint    = ReadPoint(cmd, ! AllowComma); break;
                         case 'h': _lastPoint.X += ReadNumber(! AllowComma); break;
-                        case 'H': _lastPoint.X  = ReadNumber(! AllowComma); break;
+                        case 'H': _lastPoint.X  = ReadNumber(! AllowComma); break; 
                         case 'v': _lastPoint.Y += ReadNumber(! AllowComma); break;
                         case 'V': _lastPoint.Y  = ReadNumber(! AllowComma); break;
                         }
 
-                        context.LineTo(_lastPoint, IsStroked, ! IsSmoothJoin);
+                        context.LineTo(_lastPoint, IsStroked, ! IsSmoothJoin); 
                     }
                     while (IsNumber(AllowComma));
 
@@ -766,17 +762,12 @@ namespace MS.Internal.Markup
 
                 case 'c': case 'C': // cubic Bezier
                 case 's': case 'S': // smooth cublic Bezier
-                    // Inline EnsureFigure().
-                    if (!_figureStarted)
-                    {
-                        context.BeginFigure(_lastStart, IsFilled, ! IsClosed);
-                        _figureStarted = true;
-                    }
-
+                    EnsureFigure();
+                    
                     do
                     {
                         Point p;
-
+                        
                         if ((cmd == 's') || (cmd == 'S'))
                         {
                             if (last_cmd == 'C')
@@ -788,50 +779,29 @@ namespace MS.Internal.Markup
                                 p = _lastPoint;
                             }
 
-                            // Inline ReadPoint(cmd, !AllowComma) -> _secondLastPoint
-                            double sx = ReadNumber(!AllowComma);
-                            double sy = ReadNumber(AllowComma);
-                            if (relative) { sx += _lastPoint.X; sy += _lastPoint.Y; }
-                            _secondLastPoint = new Point(sx, sy);
+                            _secondLastPoint = ReadPoint(cmd, ! AllowComma);
                         }
                         else
                         {
-                            // Inline ReadPoint(cmd, !AllowComma) -> p
-                            double px = ReadNumber(!AllowComma);
-                            double py = ReadNumber(AllowComma);
-                            if (relative) { px += _lastPoint.X; py += _lastPoint.Y; }
-                            p = new Point(px, py);
+                            p = ReadPoint(cmd, ! AllowComma);
 
-                            // Inline ReadPoint(cmd, AllowComma) -> _secondLastPoint
-                            double sx = ReadNumber(AllowComma);
-                            double sy = ReadNumber(AllowComma);
-                            if (relative) { sx += _lastPoint.X; sy += _lastPoint.Y; }
-                            _secondLastPoint = new Point(sx, sy);
+                            _secondLastPoint = ReadPoint(cmd, AllowComma);
                         }
-
-                        // Inline ReadPoint(cmd, AllowComma) -> _lastPoint
-                        double lpx = ReadNumber(AllowComma);
-                        double lpy = ReadNumber(AllowComma);
-                        if (relative) { lpx += _lastPoint.X; lpy += _lastPoint.Y; }
-                        _lastPoint = new Point(lpx, lpy);
+                            
+                        _lastPoint = ReadPoint(cmd, AllowComma);
 
                         context.BezierTo(p, _secondLastPoint, _lastPoint, IsStroked, ! IsSmoothJoin);
-
+                        
                         last_cmd = 'C';
                     }
                     while (IsNumber(AllowComma));
-
+                    
                     break;
-
+                    
                 case 'q': case 'Q': // quadratic Bezier
                 case 't': case 'T': // smooth quadratic Bezier
-                    // Inline EnsureFigure().
-                    if (!_figureStarted)
-                    {
-                        context.BeginFigure(_lastStart, IsFilled, ! IsClosed);
-                        _figureStarted = true;
-                    }
-
+                    EnsureFigure();
+                    
                     do
                     {
                         if ((cmd == 't') || (cmd == 'T'))
@@ -845,43 +815,25 @@ namespace MS.Internal.Markup
                                 _secondLastPoint = _lastPoint;
                             }
 
-                            // Inline ReadPoint(cmd, !AllowComma) -> _lastPoint
-                            double tx = ReadNumber(!AllowComma);
-                            double ty = ReadNumber(AllowComma);
-                            if (relative) { tx += _lastPoint.X; ty += _lastPoint.Y; }
-                            _lastPoint = new Point(tx, ty);
+                            _lastPoint = ReadPoint(cmd, ! AllowComma);
                         }
                         else
                         {
-                            // Inline ReadPoint(cmd, !AllowComma) -> _secondLastPoint
-                            double sx = ReadNumber(!AllowComma);
-                            double sy = ReadNumber(AllowComma);
-                            if (relative) { sx += _lastPoint.X; sy += _lastPoint.Y; }
-                            _secondLastPoint = new Point(sx, sy);
-
-                            // Inline ReadPoint(cmd, AllowComma) -> _lastPoint
-                            double lpx = ReadNumber(AllowComma);
-                            double lpy = ReadNumber(AllowComma);
-                            if (relative) { lpx += _lastPoint.X; lpy += _lastPoint.Y; }
-                            _lastPoint = new Point(lpx, lpy);
+                            _secondLastPoint = ReadPoint(cmd, ! AllowComma);
+                            _lastPoint = ReadPoint(cmd, AllowComma);
                         }
 
                         context.QuadraticBezierTo(_secondLastPoint, _lastPoint, IsStroked, ! IsSmoothJoin);
-
+                        
                         last_cmd = 'Q';
                     }
                     while (IsNumber(AllowComma));
-
+                    
                     break;
-
+                    
                 case 'a': case 'A':
-                    // Inline EnsureFigure().
-                    if (!_figureStarted)
-                    {
-                        context.BeginFigure(_lastStart, IsFilled, ! IsClosed);
-                        _figureStarted = true;
-                    }
-
+                    EnsureFigure();
+                    
                     do
                     {
                         // A 3,4 5, 0, 0, 6,7
@@ -890,12 +842,8 @@ namespace MS.Internal.Markup
                         double rotation = ReadNumber(AllowComma);
                         bool large      = ReadBool();
                         bool sweep      = ReadBool();
-
-                        // Inline ReadPoint(cmd, AllowComma) -> _lastPoint
-                        double ax = ReadNumber(AllowComma);
-                        double ay = ReadNumber(AllowComma);
-                        if (relative) { ax += _lastPoint.X; ay += _lastPoint.Y; }
-                        _lastPoint = new Point(ax, ay);
+                        
+                        _lastPoint = ReadPoint(cmd, AllowComma);
 
                         context.ArcTo(
                             _lastPoint,
@@ -912,26 +860,21 @@ namespace MS.Internal.Markup
                             );
                     }
                     while (IsNumber(AllowComma));
-
+                    
                     last_cmd = 'A';
                     break;
-
+                    
                 case 'z':
                 case 'Z':
-                    // Inline EnsureFigure().
-                    if (!_figureStarted)
-                    {
-                        context.BeginFigure(_lastStart, IsFilled, ! IsClosed);
-                        _figureStarted = true;
-                    }
+                    EnsureFigure();
                     context.SetClosedState(IsClosed);
-
+                    
                     _figureStarted = false;
                     last_cmd = 'Z';
-
+                    
                     _lastPoint = _lastStart; // Set reference point to be first point of current figure
                     break;
-
+                    
                 default:
                     ThrowBadToken();
                     break;
