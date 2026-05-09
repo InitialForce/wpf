@@ -299,32 +299,12 @@ def wpf_attributed_alloc_from_nettrace(nettrace: Path) -> int | None:
 # ─── Scenario runner ──────────────────────────────────────────────────────────
 
 
-def run_scenario_once(
-    scenario_slug: str, result_dir: Path, run_idx: int,
-) -> int | None:
-    """Run the scenario script once; return WPF-attributed alloc bytes or None.
-
-    The scenario script captures a .nettrace (includes GCAllocationTick events
-    via Microsoft-Windows-DotNETRuntime:0x1FFBCCBFF:5). We parse that nettrace
-    via AllocParser to get WPF-attributed allocation bytes for this run.
-    """
-    script = SCENARIO_SCRIPTS.get(scenario_slug)
-    if script is None:
-        log(f"  unknown scenario: {scenario_slug}")
-        return None
-
-    run_dir = result_dir / f"run-{run_idx:02d}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    env = os.environ.copy()
-    env["SCENARIO_RESULT_DIR"] = str(run_dir)
-    env["SCENARIO_NAME"] = f"{scenario_slug}-run{run_idx:02d}"
-    env["MC_PERF_MODE"] = "1"
-
-    log(f"  run {run_idx}: launching {script.name} -> {run_dir}")
-    t0 = time.monotonic()
-
+def _run_scenario_attempt(
+    script: Path, env: dict, run_dir: Path, run_label: str,
+) -> tuple[int, list[str], float]:
+    """Run scenario script once; return (rc, stdout_lines, elapsed_s)."""
     stdout_lines: list[str] = []
+    t0 = time.monotonic()
     try:
         p = subprocess.Popen(
             ["python3", str(script)],
@@ -335,35 +315,87 @@ def run_scenario_once(
             text=True,
         )
 
-        # Drain stdout in a background thread so the pipe never blocks.
         def _drain() -> None:
             for line in p.stdout:  # type: ignore[union-attr]
                 stdout_lines.append(line.rstrip())
 
         drain = threading.Thread(target=_drain, daemon=True)
         drain.start()
-
         try:
             rc = p.wait(timeout=SCENARIO_TIMEOUT_S)
         except subprocess.TimeoutExpired:
-            log(f"  run {run_idx}: TIMEOUT after {SCENARIO_TIMEOUT_S}s")
+            log(f"  {run_label}: TIMEOUT after {SCENARIO_TIMEOUT_S}s")
             p.kill()
             drain.join(timeout=5.0)
-            return None
+            return -1, stdout_lines, time.monotonic() - t0
         drain.join(timeout=10.0)
-
+        return rc, stdout_lines, time.monotonic() - t0
     except Exception as exc:
-        log(f"  run {run_idx}: launch failed: {exc}")
+        log(f"  {run_label}: launch failed: {exc}")
+        return -1, stdout_lines, time.monotonic() - t0
+
+
+def run_scenario_once(
+    scenario_slug: str, result_dir: Path, run_idx: int,
+) -> int | None:
+    """Run the scenario script once; return WPF-attributed alloc bytes or None.
+
+    The scenario script captures a .nettrace (includes GCAllocationTick events
+    via Microsoft-Windows-DotNETRuntime:0x1FFBCCBFF:5). We parse that nettrace
+    via AllocParser to get WPF-attributed allocation bytes for this run.
+
+    Automatically retries once on rc=99 (unhandled exception in the scenario
+    script — typically a transient DISPATCHER_BUSY or broker IPC hiccup).
+    The retry uses a fresh result sub-directory (run-NN-retry1) so the
+    original artefacts are preserved for debugging.
+    """
+    script = SCENARIO_SCRIPTS.get(scenario_slug)
+    if script is None:
+        log(f"  unknown scenario: {scenario_slug}")
         return None
 
-    elapsed = time.monotonic() - t0
+    # Up to 2 attempts: the initial run plus one retry on rc=99.
+    for attempt in range(2):
+        attempt_suffix = "" if attempt == 0 else f"-retry{attempt}"
+        run_dir = result_dir / f"run-{run_idx:02d}{attempt_suffix}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        env = os.environ.copy()
+        env["SCENARIO_RESULT_DIR"] = str(run_dir)
+        env["SCENARIO_NAME"] = f"{scenario_slug}-run{run_idx:02d}{attempt_suffix}"
+        env["MC_PERF_MODE"] = "1"
+
+        run_label = f"run {run_idx}" + (f" retry{attempt}" if attempt else "")
+        log(f"  {run_label}: launching {script.name} -> {run_dir}")
+
+        rc, stdout_lines, elapsed = _run_scenario_attempt(script, env, run_dir, run_label)
+
+        if rc == 99 and attempt == 0:
+            # rc=99 is the scenario's bare except-Exception sentinel — a transient
+            # IPC or dispatcher failure.  Retry once with a 5 s cool-down to let
+            # any lingering MC-cli processes from the crashed run exit cleanly.
+            log(f"  {run_label}: rc=99 (transient exception); retrying in 5 s ...")
+            for line in stdout_lines[-10:]:
+                log(f"    {line}")
+            time.sleep(5.0)
+            continue
+
+        elapsed_str = f"{elapsed:.1f}s"
+        if rc != 0:
+            log(f"  {run_label}: scenario failed (rc={rc}, {elapsed_str})")
+            for line in stdout_lines[-5:]:
+                log(f"    {line}")
+            return None
+
+        log(f"  {run_label}: scenario done ({elapsed_str})")
+        break  # success or non-retryable failure
+    else:
+        # Both attempts returned rc=99.
+        log(f"  run {run_idx}: both attempts failed (rc=99); giving up")
+        return None
+
     if rc != 0:
-        log(f"  run {run_idx}: scenario failed (rc={rc}, {elapsed:.1f}s)")
-        for line in stdout_lines[-5:]:
-            log(f"    {line}")
         return None
-
-    log(f"  run {run_idx}: scenario done ({elapsed:.1f}s)")
 
     # Find the nettrace produced by this run.
     nettraces = sorted(

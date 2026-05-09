@@ -448,6 +448,31 @@ def import_takes(hive_dir: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
+def kill_stray_mc_cli(label: str = "preflight") -> None:
+    """Kill any MC-cli processes left over from a prior crashed run.
+
+    SAFE: we only kill processes that existed BEFORE our own mc_connect
+    spawns a new one.  Calling this before pre_pids is captured means
+    the snapshot is clean and find_new_pid() reliably identifies the
+    process we own.  Without this, a zombie from run-N can hold the
+    UiMcpHost IPC pipe and cause ALREADY_RUNNING errors in run-N+1.
+    We never call this after our own mc_connect because mc_pid is
+    tracked separately and killed in the finally block.
+    """
+    stray_pids = list_mc_pids()
+    for pid in stray_pids:
+        try:
+            print(f"[{label}] taskkill /F /PID {pid} (stray MC-cli)", flush=True)
+            subprocess.run(
+                ["taskkill.exe", "/F", "/PID", str(pid)],
+                capture_output=True, timeout=15,
+            )
+        except Exception as exc:
+            print(f"[{label}] failed to kill stray MC-cli pid={pid}: {exc}", flush=True)
+    if stray_pids:
+        time.sleep(1.0)  # let the process table settle before snapshotting pre_pids
+
+
 def main() -> int:
     RESULT_DIR.mkdir(parents=True, exist_ok=True)
     timeline: list[dict[str, object]] = []
@@ -460,6 +485,10 @@ def main() -> int:
         print(f"[t+{e:7.3f}s] {lbl} {extra if extra else ''}", flush=True)
 
     dotnet_trace = find_dotnet_trace()
+    # Kill any MC-cli processes left over from a prior crashed run BEFORE
+    # snapshotting pre_pids.  A zombie MC holds the UiMcpHost IPC pipe and
+    # causes the next run's mc_connect to fail with ALREADY_RUNNING.
+    kill_stray_mc_cli()
     pre_pids = list_mc_pids()
     nettrace_path = RESULT_DIR / f"{SCENARIO_NAME}.nettrace"
 
@@ -596,10 +625,14 @@ def main() -> int:
                 return 4
 
             mark("warmup.select_first_student", nodeId=list_node)
-            call_strict(
-                driver, "wpf_select_item_by_index",
-                {"nodeId": list_node, "index": 0}, timeout=10.0,
-            )
+            try:
+                call_strict(
+                    driver, "wpf_select_item_by_index",
+                    {"nodeId": list_node, "index": 0}, timeout=10.0,
+                )
+            except RuntimeError as exc:
+                mark("FATAL.select_student_failed", err=str(exc))
+                return 4
             time.sleep(1.5)
 
             mark("warmup.click_next")
@@ -607,10 +640,14 @@ def main() -> int:
             if not next_node:
                 mark("FATAL.no_next_button")
                 return 7
-            call_strict(
-                driver, "wpf_click",
-                {"nodeId": next_node}, timeout=10.0,
-            )
+            try:
+                call_strict(
+                    driver, "wpf_click",
+                    {"nodeId": next_node}, timeout=10.0,
+                )
+            except RuntimeError as exc:
+                mark("FATAL.click_next_failed", err=str(exc))
+                return 7
 
             # Now on Analysis / Quick Start panel. Open the Explorer dialog.
             mark("warmup.click_open_swing_explorer")
@@ -618,10 +655,14 @@ def main() -> int:
             if open_explorer is None:
                 mark("FATAL.no_open_swing_explorer")
                 return 10
-            call_strict(
-                driver, "wpf_click",
-                {"nodeId": open_explorer}, timeout=10.0,
-            )
+            try:
+                call_strict(
+                    driver, "wpf_click",
+                    {"nodeId": open_explorer}, timeout=10.0,
+                )
+            except RuntimeError as exc:
+                mark("FATAL.click_open_explorer_failed", err=str(exc))
+                return 10
 
             mark("warmup.wait_for_explorer_window")
             dialog_root = find_window_by_title(
@@ -643,10 +684,14 @@ def main() -> int:
             if students < 1:
                 mark("FATAL.empty_student_list")
                 return 11
-            call_strict(
-                driver, "wpf_select_item_by_index",
-                {"nodeId": student_list, "index": 0}, timeout=10.0,
-            )
+            try:
+                call_strict(
+                    driver, "wpf_select_item_by_index",
+                    {"nodeId": student_list, "index": 0}, timeout=10.0,
+                )
+            except RuntimeError as exc:
+                mark("FATAL.select_student_in_dialog_failed", err=str(exc))
+                return 11
 
             mark("warmup.wait_for_session_list")
             session_list = find_in_window(driver, dialog_root, "SessionListBox", 30.0)
@@ -658,10 +703,14 @@ def main() -> int:
             if sessions < 1:
                 mark("FATAL.empty_session_list")
                 return 12
-            call_strict(
-                driver, "wpf_select_item_by_index",
-                {"nodeId": session_list, "index": 0}, timeout=10.0,
-            )
+            try:
+                call_strict(
+                    driver, "wpf_select_item_by_index",
+                    {"nodeId": session_list, "index": 0}, timeout=10.0,
+                )
+            except RuntimeError as exc:
+                mark("FATAL.select_session_failed", err=str(exc))
+                return 12
 
             mark("warmup.wait_for_take_list")
             take_list = find_in_window(driver, dialog_root, "TakeListBox", 30.0)
@@ -679,10 +728,14 @@ def main() -> int:
             # but bypasses ExplorerMultiSelectBehavior's SelectItemCommand. We
             # then double-click the realized item; DoubleClickItemCommand routes
             # through SessionVM.HandleLibraryTakeDoubleClick → OpenFocusedTake.
-            take_items_r = call_strict(
-                driver, "wpf_get_list_items",
-                {"nodeId": take_list}, timeout=10.0,
-            )
+            try:
+                take_items_r = call_strict(
+                    driver, "wpf_get_list_items",
+                    {"nodeId": take_list}, timeout=10.0,
+                )
+            except RuntimeError as exc:
+                mark("FATAL.get_take_items_failed", err=str(exc))
+                return 15
             take_items_env = _envelope(take_items_r)
             take_items: list = []
             if isinstance(take_items_env, list):
@@ -718,10 +771,14 @@ def main() -> int:
             # Set selection (fires SelectItemCommand via SelectionChanged) so
             # FocusedTake is populated before the double-click.
             mark("warmup.select_take_item", nodeId=take_list, index=0)
-            call_strict(
-                driver, "wpf_select_item_by_index",
-                {"nodeId": take_list, "index": 0}, timeout=10.0,
-            )
+            try:
+                call_strict(
+                    driver, "wpf_select_item_by_index",
+                    {"nodeId": take_list, "index": 0}, timeout=10.0,
+                )
+            except RuntimeError as exc:
+                mark("FATAL.select_take_failed", err=str(exc))
+                return 15
             time.sleep(0.5)
 
             # --- CAPTURE WINDOW BEGINS HERE ---
@@ -738,17 +795,33 @@ def main() -> int:
             )
             mark("trace.start", duration_s=TRACE_DURATION_S)
             trace_capture.start()
-            trace_capture.wait_started(timeout=15.0)
-            mark("trace.attached")
+            # Wait up to 30 s for dotnet-trace to confirm session started.
+            # In production runs the IPC handshake takes 10-16 s (observed in
+            # timeline artefacts); the old 15 s ceiling sometimes expired just
+            # as the handshake was completing, causing a missed-start that
+            # turned into an empty nettrace or a subsequent DISPATCHER_BUSY
+            # exception (the MC process stalls briefly during EventPipe attach).
+            trace_started = trace_capture.wait_started(timeout=30.0)
+            mark("trace.attached", started=trace_started)
 
             # Double-click the take item — this fires the take-open code path.
             mark("take_open.double_click", nodeId=first_take_id)
-            dclick_r = call_strict(
-                driver, "wpf_double_click",
-                {"nodeId": first_take_id}, timeout=10.0,
-            )
-            (RESULT_DIR / "diag-wpf_double_click-response.json").write_text(
-                json.dumps(dclick_r, indent=2, default=str), encoding="utf-8")
+            try:
+                dclick_r = call_strict(
+                    driver, "wpf_double_click",
+                    {"nodeId": first_take_id}, timeout=10.0,
+                )
+            except RuntimeError as exc:
+                mark("FATAL.double_click_failed", err=str(exc))
+                trc_rc = trace_capture.terminate(flush_timeout=30.0)
+                trace_capture = None
+                mark("trace.stopped_on_failure", rc=trc_rc)
+                return 16
+            try:
+                (RESULT_DIR / "diag-wpf_double_click-response.json").write_text(
+                    json.dumps(dclick_r, indent=2, default=str), encoding="utf-8")
+            except Exception:
+                pass
             mark("take_open.double_click.done")
 
             # Poll VideoSlider.Maximum > 0 — same completion signal as spike-9.
