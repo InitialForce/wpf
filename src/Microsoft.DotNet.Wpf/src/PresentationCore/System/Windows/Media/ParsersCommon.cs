@@ -640,6 +640,20 @@ namespace MS.Internal.Markup
         /// Read a relative point
         /// </summary>
         /// <returns></returns>
+        // AggressiveInlining: ReadPoint is a thin (~40 IL byte) wrapper over two
+        // ReadNumber calls plus a relative-coord branch and a Point ctor. It is
+        // called from ~7 distinct sites in ParseToGeometryContext (M, L, C, S
+        // primary + secondary, Q, T primary + secondary, A) — at every such
+        // site `cmd` is loop-invariant within the surrounding do/while. With
+        // ReadPoint inlined the JIT can fold `(cmd >= 'a')` into a constant per
+        // call site (or hoist it out of the do/while loop), eliminating the
+        // per-coord-pair relative-vs-absolute branch on the dominant absolute-
+        // coord SVG path corpus, plus the per-call method-call frame.
+        // ReadNumber itself stays a separate function — its try/catch around
+        // double.Parse is an inlining barrier and iter=051's attempt to lift
+        // both barriers simultaneously bloated bodies and near-regressed; this
+        // change isolates the ReadPoint inlining opportunity.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private Point ReadPoint(char cmd, bool allowcomma)
         {
             double x = ReadNumber(allowcomma);
@@ -649,7 +663,7 @@ namespace MS.Internal.Markup
             {
                 x += _lastPoint.X;
                 y += _lastPoint.Y;
-            }                
+            }
 
             return new Point(x, y);
         }
