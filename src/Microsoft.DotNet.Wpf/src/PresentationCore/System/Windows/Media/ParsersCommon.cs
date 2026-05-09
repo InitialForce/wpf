@@ -279,8 +279,7 @@ namespace MS.Internal.Markup
         {
             // Hoist fields to locals so the JIT proves they don't change across
             // the loop and folds away per-iteration field loads + null-checks on
-            // the string indexer. _curIndex is only written back at exit. Same
-            // pattern already applied to SkipDigits.
+            // the string indexer. _curIndex is only written back at exit.
             string s = _pathString;
             int end = _pathLength;
             int i = _curIndex;
@@ -392,30 +391,7 @@ namespace MS.Internal.Markup
             return false;
         }
 
-        private void SkipDigits(bool signAllowed)
-        {
-            // Hoist fields to locals so the JIT proves they don't change across
-            // the loop and folds away per-iteration field loads + null-checks
-            // on the string indexer. _curIndex is only written back at the end.
-            string s = _pathString;
-            int end = _pathLength;
-            int i = _curIndex;
-
-            // Allow for a sign
-            if (signAllowed && i < end && (s[i] == '-' || s[i] == '+'))
-            {
-                i++;
-            }
-
-            while (i < end && s[i] >= '0' && s[i] <= '9')
-            {
-                i++;
-            }
-
-            _curIndex = i;
-        }
-        
-//       
+//
 //         /// <summary>
 //         /// See if the current token matches the string s. If so, advance and
 //         /// return true. Else, return false.
@@ -423,7 +399,7 @@ namespace MS.Internal.Markup
 //         bool TryAdvance(string s)
 //         {
 //             Debug.Assert(s.Length != 0);
-// 
+//
 //             bool match = false;
 //             if (More() && _pathString[_currentIndex] == s[0])
 //             {
@@ -432,14 +408,14 @@ namespace MS.Internal.Markup
 //                 // do this for us later.
 //                 //
 //                 _currentIndex = Math.Min(_currentIndex + s.Length, _pathLength);
-// 
+//
 //                 match = true;
 //             }
-// 
+//
 //             return match;
 //         }
-// 
-      
+//
+
         /// <summary>
         /// Read a floating point number
         /// </summary>
@@ -451,111 +427,141 @@ namespace MS.Internal.Markup
                 ThrowBadToken();
             }
 
-            bool simple = true;
-            int start = _curIndex;
+            // Hoist _pathString / _pathLength / _curIndex into locals across
+            // the whole function. The integer/period/exponent walks all share
+            // the same s/end/i; keeping them in registers eliminates the
+            // _curIndex = i; ... if (More()) ... _pathString[_curIndex] ping-
+            // pong that the prior structure forced between each sub-walk
+            // (digit run -> period scan -> exponent scan -> SkipDigits inner-
+            // hoist). _curIndex is only written back once, just before return.
+            string s = _pathString;
+            int end = _pathLength;
+            int i = _curIndex;
+            int start = i;
 
-            //
-            // Allow for a sign
-            //
-            // There are numbers that cannot be preceded with a sign, for instance, -NaN, but it's
-            // fine to ignore that at this point, since the CLR parser will catch this later.
-            //
-            // IsNumber already loaded _pathString[_curIndex] into _token and proved we're in
-            // bounds, so reuse it instead of re-doing More() + two string indexer fetches.
+            // IsNumber already loaded _pathString[_curIndex] into _token and
+            // proved we're in bounds, so `first` is the head char of the
+            // number lexeme (one of '-', '+', '.', '0'..'9', 'I', 'N').
             char first = _token;
-            if (first == '-' || first == '+')
-            {
-                _curIndex ++;
-            }
-
-            // intValue accumulates the digit run during the same walk that
-            // advances _curIndex past the integer portion of the number.
-            // The original implementation walked the digits twice — once via
-            // SkipDigits (advance only) and again in the simple-integer return
-            // block to fold the value. For the geometry corpus (1-3 digit
-            // unsigned integers, ~4000 ReadNumbers per parse), the second walk
-            // is pure waste. Combining the two saves ~one string-indexer pass
-            // per number on the hot path while preserving every semantics
-            // observable on the slow path: if a '.', 'E', or 'e' is
-            // encountered, simple is set false and intValue is discarded;
-            // double.Parse re-parses the full lexeme [start, _curIndex)
-            // including the sign exactly as before.
+            bool simple = true;
             int intValue = 0;
 
-            // Check for Infinity (or -Infinity).
-            if (More() && (_pathString[_curIndex] == 'I'))
+            // Sign consumption. There are numbers that cannot be preceded
+            // with a sign, e.g. -NaN, but it's fine to ignore that at this
+            // point — double.Parse on the slow path will catch any malformed
+            // lexeme with the original error semantics.
+            //
+            // For the unsigned-digit dominant case (the geometry corpus is
+            // ~all unsigned integers), this branch is never taken: i stays
+            // == start, and the I/N pre-empt below is dispatched against
+            // `first` (already in a register from _token) rather than re-
+            // reading _pathString[_curIndex].
+            if (first == '-' || first == '+')
             {
-                //
-                // Don't bother reading the characters, as the CLR parser will
-                // do this for us later.
-                //
-                _curIndex = Math.Min(_curIndex+8, _pathLength); // "Infinity" has 8 characters
+                i++;
+            }
+
+            // Detect the head of the number body (the char immediately after
+            // the optional sign). For unsigned numbers, `first` already IS
+            // the head — reuse it instead of issuing another string-indexer
+            // load. For signed numbers we have to read s[i].
+            char head = (first == '-' || first == '+')
+                ? (i < end ? s[i] : '\0')
+                : first;
+
+            // Check for Infinity / NaN — slow path: don't bother reading the
+            // rest of the lexeme, the CLR's double.Parse will validate it.
+            if (head == 'I')
+            {
+                i = Math.Min(i + 8, end); // "Infinity" has 8 characters
                 simple = false;
             }
-            // Check for NaN
-            else if (More() && (_pathString[_curIndex] == 'N'))
+            else if (head == 'N')
             {
-                //
-                // Don't bother reading the characters, as the CLR parser will
-                // do this for us later.
-                //
-                _curIndex = Math.Min(_curIndex+3, _pathLength); // "NaN" has 3 characters
+                i = Math.Min(i + 3, end); // "NaN" has 3 characters
                 simple = false;
             }
             else
             {
-                // Walk + accumulate digits in a single pass. Replaces
-                // SkipDigits(!AllowSign) followed by the post-hoc integer-fold
-                // loop that used to live in the simple-integer return block.
-                // Sign was already consumed above (and is reapplied via
-                // `first` below), so this loop starts at the first digit.
-                // Overflow is benign on the simple-integer return: the
-                // (_curIndex <= start + 8) gate below caps the digit count at
-                // 8 (positive numbers up to 99,999,999 — well within int32),
-                // and any longer run forces the slow path which discards
-                // intValue entirely.
+                // Walk + accumulate the integer digit run in a single pass.
+                // Capture the loop-terminating char into `endChar` so the
+                // following period / exponent / end-of-number checks compare
+                // a register instead of re-issuing a More()+_pathString[_curIndex]
+                // pair. For the integer-only dominant case in the corpus,
+                // endChar is the trailing whitespace and both the period and
+                // exponent branches short-circuit on a single register-resident
+                // compare each.
+                //
+                // Overflow on intValue is benign: the (i <= start + 8) gate
+                // on the simple-integer return below caps the digit count at
+                // 8 (positive numbers up to 99,999,999 — well inside int32),
+                // and any longer run forces simple=false anyway via the
+                // period/exponent branches or via the gate, both of which
+                // discard intValue and re-parse via double.Parse.
+                char endChar = '\0';
+                while (i < end)
                 {
-                    string s = _pathString;
-                    int end = _pathLength;
-                    int i = _curIndex;
+                    char ch = s[i];
+                    uint d = (uint)(ch - '0');
+                    if (d > 9u)
+                    {
+                        endChar = ch;
+                        break;
+                    }
+                    intValue = intValue * 10 + (int)d;
+                    i++;
+                }
+
+                // Optional period, followed by more digits.
+                // SkipDigits(!AllowSign) inlined: walk plain digits, no sign.
+                if (endChar == '.')
+                {
+                    simple = false;
+                    i++;
+                    endChar = '\0';
                     while (i < end)
                     {
-                        uint d = (uint)(s[i] - '0');
+                        char c2 = s[i];
+                        uint d = (uint)(c2 - '0');
                         if (d > 9u)
+                        {
+                            endChar = c2;
+                            break;
+                        }
+                        i++;
+                    }
+                }
+
+                // Exponent.
+                // SkipDigits(AllowSign) inlined: optional sign, then digits.
+                // No need to track endChar past this point — the only post-
+                // exponent action is the slow-path double.Parse.
+                if (endChar == 'E' || endChar == 'e')
+                {
+                    simple = false;
+                    i++;
+                    if (i < end && (s[i] == '-' || s[i] == '+'))
+                    {
+                        i++;
+                    }
+                    while (i < end)
+                    {
+                        if ((uint)(s[i] - '0') > 9u)
                         {
                             break;
                         }
-                        intValue = intValue * 10 + (int)d;
                         i++;
                     }
-                    _curIndex = i;
-                }
-
-                // Optional period, followed by more digits
-                if (More() && (_pathString[_curIndex] == '.'))
-                {
-                    simple = false;
-                    _curIndex ++;
-                    SkipDigits(! AllowSign);
-                }
-
-                // Exponent
-                if (More() && ((_pathString[_curIndex] == 'E') || (_pathString[_curIndex] == 'e')))
-                {
-                    simple = false;
-                    _curIndex ++;
-                    SkipDigits(AllowSign);
                 }
             }
 
-            if (simple && (_curIndex <= (start + 8))) // 32-bit integer
+            _curIndex = i;
+
+            if (simple && (i <= (start + 8))) // 32-bit integer
             {
                 // Sign comes from the original first char of the number token;
                 // intValue accumulated the digit-run in the loop above. Apply
-                // the sign as a single conditional negate. Equivalent to the
-                // prior `int sign = (s[start]=='-') ? -1 : 1; return value*sign;`
-                // pattern but without re-reading s[start] and without the
-                // multiply.
+                // the sign as a single conditional negate.
                 return (first == '-') ? -intValue : (double)intValue;
             }
             else
@@ -563,9 +569,9 @@ namespace MS.Internal.Markup
                 try
                 {
 #if NET
-                    return double.Parse(_pathString.AsSpan(start, _curIndex - start), provider: _formatProvider);
+                    return double.Parse(s.AsSpan(start, i - start), provider: _formatProvider);
 #else
-                    return double.Parse(_pathString.Substring(start, _curIndex - start), provider: _formatProvider);
+                    return double.Parse(s.Substring(start, i - start), provider: _formatProvider);
 #endif
                 }
                 catch (FormatException except)
