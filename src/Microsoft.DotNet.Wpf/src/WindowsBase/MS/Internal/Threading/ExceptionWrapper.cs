@@ -42,26 +42,42 @@ namespace System.Windows.Threading
             // cross-benchmark NegativeControlDynamicInvoke regression that
             // sank iter=excwrap-irc-hotpath-extract (iter=012, +14.74 ns CI
             // disjoint) does not recur.
-            if (Catch == null && Filter == null)
+            // Invert the gate so the slow (with-handlers) tail call is the
+            // out-of-line jump and the fast path is the fall-through. Same
+            // assembly shape as `if (==null && ==null) { fast } else slow`,
+            // but reads more directly as "exit early; rest is hot".
+            if (Catch != null || Filter != null)
             {
-                if (numArgs == 0 && callback is Action action)
-                {
-                    action();
-                    return null;
-                }
-                if (numArgs == 1 && callback is DispatcherOperationCallback doc)
-                {
-                    return doc(args);
-                }
-                return InternalRealCall(callback, args, numArgs);
+                return TryCatchWhenWithHandlers(source, callback, args, numArgs, catchHandler);
             }
 
-            // Slow path: handlers are subscribed, run the catch-protected body.
-            // Extracted into a NoInlining helper so the EH region lives
-            // entirely outside TryCatchWhen — the JIT inlines the catch-free
-            // wrapper into its caller; the rare with-handlers caller pays one
-            // extra method-call frame, which is acceptable on the cold path.
-            return TryCatchWhenWithHandlers(source, callback, args, numArgs, catchHandler);
+            // Fast path: dispatch by numArgs+type. Switch on numArgs lets
+            // the JIT lower the dual-shape selection to a single cmp/jne
+            // pair (with default→InternalRealCall as the fall-through),
+            // versus the prior `if (numArgs==0 ...) ... if (numArgs==1 ...)`
+            // structure which paid a numArgs==0 cmp+jne on every Doc-path
+            // call before falling into the numArgs==1 branch. Both Action
+            // and DispatcherOperationCallback are sealed delegate types so
+            // the JIT lowers `is X x` directly to a method-table compare
+            // (no isinst/cast bookkeeping); a successful match binds the
+            // typed local without a copy.
+            switch (numArgs)
+            {
+                case 0:
+                    if (callback is Action action)
+                    {
+                        action();
+                        return null;
+                    }
+                    break;
+                case 1:
+                    if (callback is DispatcherOperationCallback doc)
+                    {
+                        return doc(args);
+                    }
+                    break;
+            }
+            return InternalRealCall(callback, args, numArgs);
         }
 
         [MethodImpl(MethodImplOptions.NoInlining)]
