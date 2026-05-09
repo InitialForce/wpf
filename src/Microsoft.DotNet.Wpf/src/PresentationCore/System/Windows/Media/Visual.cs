@@ -4446,6 +4446,20 @@ namespace System.Windows.Media
         }
 
         /// <summary>
+        /// Zero-allocation fast path: fills <paramref name="matrix"/> with the
+        /// accumulated 2-D affine transform from this Visual to <paramref name="ancestor"/>.
+        /// Returns true if the path is purely affine (no Effects, no 3D embedding);
+        /// returns false if a GeneralTransform is required (caller should fall back
+        /// to TransformToAncestor()).
+        /// </summary>
+        internal bool TryTransformToAncestorAsMatrix(Visual ancestor, out Matrix matrix)
+        {
+            ArgumentNullException.ThrowIfNull(ancestor);
+            GeneralTransform unused;
+            return TrySimpleTransformToAncestor(ancestor, /*inverse:*/ false, out unused, out matrix);
+        }
+
+        /// <summary>
         /// Provides the transform or the inverse transform between this visual and the specified ancestor.
         /// Returns true if the transform is "simple" - in which case the GeneralTransform is null
         /// and the caller should use the Matrix.
