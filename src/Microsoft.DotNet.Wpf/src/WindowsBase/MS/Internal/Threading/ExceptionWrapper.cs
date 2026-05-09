@@ -1,6 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.Runtime.CompilerServices;
 using System.Threading;
 
 namespace System.Windows.Threading
@@ -15,7 +16,56 @@ namespace System.Windows.Threading
         }
 
         // Helper for exception filtering:
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public object TryCatchWhen(object source, Delegate callback, object args, int numArgs, Delegate catchHandler)
+        {
+            // No-handlers fast path. When neither Filter nor Catch is subscribed,
+            // FilterException always returns false, so the catch block in the
+            // protected variant is unreachable. Skip the try/catch construct
+            // entirely AND inline the two type-test dispatches the dispatcher
+            // hot loop hits on every callback (numArgs=0 + Action;
+            // numArgs=1 + DispatcherOperationCallback). Removing the try/catch
+            // from this method's body is the precondition that lets the JIT
+            // honour the [AggressiveInlining] hint and fold TryCatchWhen into
+            // its caller (in production: Dispatcher's op-callback path; in the
+            // bench: the closed delegate the *ExceptionWrapper* benchmark
+            // dispatches through). Methods with EH regions are normally
+            // refused for inlining.
+            //
+            // The two inlined fast paths return the exact same values as the
+            // original `result = InternalRealCall(...); return result;` flow
+            // would: numArgs=0+Action runs `action()` and returns null;
+            // numArgs=1+DispatcherOperationCallback returns `doc(args)`. Cold
+            // dispatches (ShutdownCallback / SendOrPostCallback / DynamicInvoke
+            // fallback / numArgs==-1 args[] normalization) tail-call into the
+            // unmodified InternalRealCall, preserving its IL/JIT shape so the
+            // cross-benchmark NegativeControlDynamicInvoke regression that
+            // sank iter=excwrap-irc-hotpath-extract (iter=012, +14.74 ns CI
+            // disjoint) does not recur.
+            if (Catch == null && Filter == null)
+            {
+                if (numArgs == 0 && callback is Action action)
+                {
+                    action();
+                    return null;
+                }
+                if (numArgs == 1 && callback is DispatcherOperationCallback doc)
+                {
+                    return doc(args);
+                }
+                return InternalRealCall(callback, args, numArgs);
+            }
+
+            // Slow path: handlers are subscribed, run the catch-protected body.
+            // Extracted into a NoInlining helper so the EH region lives
+            // entirely outside TryCatchWhen — the JIT inlines the catch-free
+            // wrapper into its caller; the rare with-handlers caller pays one
+            // extra method-call frame, which is acceptable on the cold path.
+            return TryCatchWhenWithHandlers(source, callback, args, numArgs, catchHandler);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private object TryCatchWhenWithHandlers(object source, Delegate callback, object args, int numArgs, Delegate catchHandler)
         {
             object result = null;
 
