@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Runtime.CompilerServices;
 
 #if PRESENTATION_CORE
 
@@ -269,12 +270,24 @@ namespace MS.Internal.Markup
             throw new System.FormatException(SR.Format(SR.Parser_UnexpectedToken, _pathString, _curIndex - 1));
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private bool More()
         {
             return _curIndex < _pathLength;
         }
-        
-        // Skip white space, one comma if allowed
+
+        // Skip white space, one comma if allowed.
+        //
+        // AggressiveInlining: SkipWhiteSpace is the inner-most prelude on
+        // ReadToken / IsNumber / ReadBool, all of which are called from the
+        // ReadNumber + do-while hot loops in ParseToGeometryContext. Forcing
+        // inlining at every call site eliminates the ~3-5 ns method-call
+        // frame paid on each of the ~6700 SkipWhiteSpace invocations per
+        // ParseCorpus. The body is moderately sized (~80 IL bytes incl. the
+        // switch) but well within the AggressiveInlining budget; the outer
+        // callers (IsNumber, ReadToken) are themselves marked AggressiveInlining
+        // so the inlining cascades into ReadNumber + the loop tests.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private bool SkipWhiteSpace(bool allowComma)
         {
             // Hoist fields to locals so the JIT proves they don't change across
@@ -339,6 +352,12 @@ namespace MS.Internal.Markup
         /// Read the next non whitespace character
         /// </summary>
         /// <returns>True if not end of string</returns>
+        // AggressiveInlining: thin wrapper over SkipWhiteSpace + More + curIndex
+        // advance. Called from the outer `while (ReadToken())` loop and inlining
+        // here lets the JIT see the entire prelude (SkipWhiteSpace + More) in
+        // one body and fold the loop's per-token bookkeeping with the SkipWS
+        // body that follows it.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private bool ReadToken()
         {
             SkipWhiteSpace(!AllowComma);
@@ -357,6 +376,13 @@ namespace MS.Internal.Markup
             }
         }
 
+        // AggressiveInlining: called once per ReadNumber prelude (~5000/op) and
+        // once per do-while loop test in ParseToGeometryContext (~1700/op).
+        // Inlining eliminates the call-frame on the per-number hot path AND
+        // — combined with SkipWhiteSpace's own AggressiveInlining — collapses
+        // the prelude into a tight load+compare sequence inside ReadNumber
+        // and the loop tests, killing two method-call frames per ReadNumber.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private bool IsNumber(bool allowComma)
         {
             bool commaMet = SkipWhiteSpace(allowComma);
