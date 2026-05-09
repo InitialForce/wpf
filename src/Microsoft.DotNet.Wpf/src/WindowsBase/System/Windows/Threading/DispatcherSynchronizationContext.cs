@@ -124,7 +124,7 @@ namespace System.Windows.Threading
 
 
         internal Dispatcher _dispatcher;
-        private DispatcherPriority _priority;
+        internal DispatcherPriority _priority;
     }
 }
 
