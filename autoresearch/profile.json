@@ -1,549 +1,410 @@
 {
   "schema_version": 1,
   "phase": 1,
-  "captured_at": "2026-05-07T15:21:50Z",
-  "source": "profile.py from startup.nettrace (144943KB)",
+  "captured_at": "2026-05-09T08:55:44Z",
+  "source": [
+    {
+      "scenario": "startup",
+      "trace": "startup.nettrace",
+      "size_mb": 138.6
+    },
+    {
+      "scenario": "take-open",
+      "trace": "take-open.nettrace",
+      "size_mb": 247.1
+    },
+    {
+      "scenario": "playback",
+      "trace": "playback.nettrace",
+      "size_mb": 218.6
+    }
+  ],
   "notes": [
-    "Tier A profile: top-K WPF methods by CPU sample-count from a",
-    "single scenario (startup) run.",
+    "Tier A profile: union of top-10 WPF methods per scenario from",
+    "{startup, take-open, playback}, deduped to \u226420 entries.",
+    "cpu_pct_total = max across scenarios; scenario_cpu_pct shows breakdown.",
     "alloc_bytes uses AllocationTick events (sampled ~100 KB; absent frames may be undersampled).",
+    "AllocationTick noise floor \u2248 100 KB per stack path (CLR sampling interval).",
     "Entries with bdn_filter:null have no covering microbenchmark.",
-    "The orchestrator's benchmark-writer pass scaffolds new ones."
+    "bdn_filter mapping patched 2026-05-09 to cover ExceptionWrapper/CulturePreservingExecutionContext/HwndWrapper/HwndSubclass/Application/Window types (post-KEEP reprofile)."
   ],
   "hot_paths": [
     {
       "method": "WindowsBase!System.Windows.Threading.Dispatcher.PushFrameImpl(class System.Windows.Threading.DispatcherFrame)",
-      "samples": 33482.26,
-      "cpu_pct_total": 2.28,
-      "bdn_filter": null,
-      "needs_benchmark": true,
-      "benchmark_status": "skipped-is-message-loop",
-      "skip_reference": "see bench-notes/bench-skipped.tsv: Dispatcher.PushFrameImpl(DispatcherFrame)",
+      "samples": 111461.54,
+      "cpu_pct_total": 2.24,
+      "bdn_filter": "*WindowLifecycle*",
+      "needs_benchmark": false,
       "scenarios": [
-        "startup"
+        "startup",
+        "take-open",
+        "playback"
       ],
       "scenario_cpu_pct": {
-        "startup": 2.28
+        "startup": 2.24,
+        "take-open": 2.05,
+        "playback": 1.65
       },
-      "alloc_bytes": 34088712,
-      "alloc_pct_total": 2.3477
-    },
-    {
-      "method": "PresentationFramework!System.Windows.Application.RunDispatcher(class System.Object)",
-      "samples": 33440.43,
-      "cpu_pct_total": 2.28,
-      "bdn_filter": null,
-      "needs_benchmark": true,
-      "benchmark_status": "proxy-only",
-      "skip_reference": "see bench-notes/bench-skipped.tsv: Application.RunDispatcher(object)",
-      "benchmark_class": "WindowLifecycleBenchmark",
-      "scenarios": [
-        "startup"
-      ],
-      "scenario_cpu_pct": {
-        "startup": 2.28
-      },
-      "alloc_bytes": 33982368,
-      "alloc_pct_total": 2.3404
-    },
-    {
-      "method": "PresentationFramework!System.Windows.Application.RunInternal(class System.Windows.Window)",
-      "samples": 33429.84,
-      "cpu_pct_total": 2.28,
-      "bdn_filter": null,
-      "needs_benchmark": true,
-      "benchmark_status": "proxy-only",
-      "skip_reference": "see bench-notes/bench-skipped.tsv: Application.RunInternal(Window)",
-      "benchmark_class": "WindowLifecycleBenchmark",
-      "scenarios": [
-        "startup"
-      ],
-      "scenario_cpu_pct": {
-        "startup": 2.28
-      },
-      "alloc_bytes": 33982368,
-      "alloc_pct_total": 2.3404
+      "alloc_bytes": 12885351096,
+      "alloc_pct_total": 4.4133
     },
     {
       "method": "PresentationFramework!System.Windows.Application.Run(class System.Windows.Window)",
-      "samples": 33412.39,
-      "cpu_pct_total": 2.28,
-      "bdn_filter": null,
-      "needs_benchmark": true,
-      "benchmark_status": "proxy-only",
-      "skip_reference": "see bench-notes/bench-skipped.tsv: Application.Run(Window)",
-      "benchmark_class": "WindowLifecycleBenchmark",
+      "samples": 111161.91,
+      "cpu_pct_total": 2.24,
+      "bdn_filter": "*WindowLifecycle*",
+      "needs_benchmark": false,
       "scenarios": [
-        "startup"
+        "startup",
+        "take-open",
+        "playback"
       ],
       "scenario_cpu_pct": {
-        "startup": 2.28
+        "startup": 2.24,
+        "take-open": 2.04,
+        "playback": 1.65
       },
-      "alloc_bytes": 31750168,
-      "alloc_pct_total": 2.1866
+      "alloc_bytes": 12881242744,
+      "alloc_pct_total": 4.4119
+    },
+    {
+      "method": "PresentationFramework!System.Windows.Application.RunInternal(class System.Windows.Window)",
+      "samples": 111177.57,
+      "cpu_pct_total": 2.24,
+      "bdn_filter": "*WindowLifecycle*",
+      "needs_benchmark": false,
+      "scenarios": [
+        "startup",
+        "take-open",
+        "playback"
+      ],
+      "scenario_cpu_pct": {
+        "startup": 2.24,
+        "take-open": 2.04,
+        "playback": 1.65
+      },
+      "alloc_bytes": 12883647776,
+      "alloc_pct_total": 4.4128
+    },
+    {
+      "method": "PresentationFramework!System.Windows.Application.RunDispatcher(class System.Object)",
+      "samples": 111189.24,
+      "cpu_pct_total": 2.24,
+      "bdn_filter": "*WindowLifecycle*",
+      "needs_benchmark": false,
+      "scenarios": [
+        "startup",
+        "take-open",
+        "playback"
+      ],
+      "scenario_cpu_pct": {
+        "startup": 2.24,
+        "take-open": 2.04,
+        "playback": 1.65
+      },
+      "alloc_bytes": 12883753864,
+      "alloc_pct_total": 4.4128
     },
     {
       "method": "PresentationFramework!System.Windows.Application.Run()",
-      "samples": 33203.38,
-      "cpu_pct_total": 2.27,
-      "bdn_filter": null,
-      "needs_benchmark": true,
-      "benchmark_status": "proxy-only",
-      "skip_reference": "see bench-notes/bench-skipped.tsv: Application.Run()",
-      "benchmark_class": "WindowLifecycleBenchmark",
+      "samples": 110985.95,
+      "cpu_pct_total": 2.23,
+      "bdn_filter": "*WindowLifecycle*",
+      "needs_benchmark": false,
       "scenarios": [
-        "startup"
+        "startup",
+        "take-open",
+        "playback"
       ],
       "scenario_cpu_pct": {
-        "startup": 2.27
+        "startup": 2.23,
+        "take-open": 2.04,
+        "playback": 1.65
       },
-      "alloc_bytes": 30126048,
-      "alloc_pct_total": 2.0748
+      "alloc_bytes": 12879724640,
+      "alloc_pct_total": 4.4114
     },
     {
-      "method": "WindowsBase!System.Windows.Threading.Dispatcher.GetMessage(value class System.Windows.Interop.MSG&,int,int32,int32)",
-      "samples": 27756.81,
-      "cpu_pct_total": 1.89,
+      "method": "WindowsBase!System.Windows.Threading.DispatcherOperation+DispatcherOperationEvent.WaitOne()",
+      "samples": 87187.37,
+      "cpu_pct_total": 2.06,
       "bdn_filter": null,
       "needs_benchmark": true,
-      "benchmark_status": "not-yet-scheduled",
-      "skip_reference": "not assigned to a cluster in B3-B5; private Win32 GetMessage wrapper inside PushFrameImpl loop",
       "scenarios": [
-        "startup"
+        "startup",
+        "take-open",
+        "playback"
       ],
       "scenario_cpu_pct": {
-        "startup": 1.89
+        "startup": 0.6,
+        "take-open": 2.06,
+        "playback": 1.65
       },
-      "alloc_bytes": 0,
+      "alloc_bytes": 110488,
       "alloc_pct_total": 0.0
     },
     {
-      "method": "WindowsBase!MS.Win32.HwndWrapper.WndProc(int,int32,int,int,bool&)",
-      "samples": 9601.05,
-      "cpu_pct_total": 0.66,
-      "bdn_filter": "*HwndWin32*",
-      "needs_benchmark": false,
-      "benchmark_class": "HwndWin32Benchmark",
+      "method": "WindowsBase!System.Windows.Threading.DispatcherOperation.Wait(value class System.TimeSpan)",
+      "samples": 87187.37,
+      "cpu_pct_total": 2.06,
+      "bdn_filter": null,
+      "needs_benchmark": true,
       "scenarios": [
-        "startup"
+        "startup",
+        "take-open",
+        "playback"
       ],
       "scenario_cpu_pct": {
-        "startup": 0.66
+        "startup": 0.6,
+        "take-open": 2.06,
+        "playback": 1.65
       },
-      "alloc_bytes": 0,
+      "alloc_bytes": 110488,
       "alloc_pct_total": 0.0
     },
     {
-      "method": "WindowsBase!System.Windows.Threading.ExceptionWrapper.InternalRealCall(class System.Delegate,class System.Object,int32)",
-      "samples": 9596.36,
-      "cpu_pct_total": 0.65,
-      "bdn_filter": "*ExceptionWrapper*",
-      "needs_benchmark": false,
-      "benchmark_class": "ExceptionWrapperBenchmark",
+      "method": "WindowsBase!System.Windows.Threading.DispatcherOperation.Wait()",
+      "samples": 87187.37,
+      "cpu_pct_total": 2.06,
+      "bdn_filter": null,
+      "needs_benchmark": true,
       "scenarios": [
-        "startup"
+        "startup",
+        "take-open",
+        "playback"
       ],
       "scenario_cpu_pct": {
-        "startup": 0.65
+        "startup": 0.6,
+        "take-open": 2.06,
+        "playback": 1.65
       },
-      "alloc_bytes": 34829896,
-      "alloc_pct_total": 2.3987
+      "alloc_bytes": 110488,
+      "alloc_pct_total": 0.0
+    },
+    {
+      "method": "WindowsBase!System.Windows.Threading.Dispatcher.InvokeImpl(class System.Windows.Threading.DispatcherOperation,value class System.Threading.CancellationToken,value class System.TimeSpan)",
+      "samples": 87187.37,
+      "cpu_pct_total": 2.06,
+      "bdn_filter": null,
+      "needs_benchmark": true,
+      "scenarios": [
+        "startup",
+        "take-open",
+        "playback"
+      ],
+      "scenario_cpu_pct": {
+        "startup": 0.6,
+        "take-open": 2.06,
+        "playback": 1.65
+      },
+      "alloc_bytes": 110488,
+      "alloc_pct_total": 0.0
     },
     {
       "method": "WindowsBase!System.Windows.Threading.ExceptionWrapper.TryCatchWhen(class System.Object,class System.Delegate,class System.Object,int32,class System.Delegate)",
-      "samples": 9585.78,
-      "cpu_pct_total": 0.65,
+      "samples": 88358.51,
+      "cpu_pct_total": 2.05,
       "bdn_filter": "*ExceptionWrapper*",
       "needs_benchmark": false,
-      "benchmark_class": "ExceptionWrapperBenchmark",
       "scenarios": [
-        "startup"
+        "startup",
+        "take-open",
+        "playback"
       ],
       "scenario_cpu_pct": {
-        "startup": 0.65
+        "startup": 0.7,
+        "take-open": 2.05,
+        "playback": 1.65
       },
-      "alloc_bytes": 34829896,
-      "alloc_pct_total": 2.3987
+      "alloc_bytes": 12887157256,
+      "alloc_pct_total": 4.414
+    },
+    {
+      "method": "WindowsBase!System.Windows.Threading.ExceptionWrapper.InternalRealCall(class System.Delegate,class System.Object,int32)",
+      "samples": 88415.1,
+      "cpu_pct_total": 2.05,
+      "bdn_filter": "*ExceptionWrapper*",
+      "needs_benchmark": false,
+      "scenarios": [
+        "startup",
+        "take-open",
+        "playback"
+      ],
+      "scenario_cpu_pct": {
+        "startup": 0.7,
+        "take-open": 2.05,
+        "playback": 1.65
+      },
+      "alloc_bytes": 12887263600,
+      "alloc_pct_total": 4.414
     },
     {
       "method": "WindowsBase!MS.Win32.HwndSubclass.SubclassWndProc(int,int32,int,int)",
-      "samples": 9565.16,
-      "cpu_pct_total": 0.65,
+      "samples": 88308.52,
+      "cpu_pct_total": 2.05,
       "bdn_filter": "*HwndWin32*",
       "needs_benchmark": false,
-      "benchmark_class": "HwndWin32Benchmark",
       "scenarios": [
-        "startup"
+        "startup",
+        "take-open",
+        "playback"
       ],
       "scenario_cpu_pct": {
-        "startup": 0.65
+        "startup": 0.7,
+        "take-open": 2.05,
+        "playback": 1.65
       },
       "alloc_bytes": 0,
       "alloc_pct_total": 0.0
     },
     {
       "method": "WindowsBase!System.Windows.Threading.Dispatcher.ProcessQueue()",
-      "samples": 9526.41,
-      "cpu_pct_total": 0.65,
+      "samples": 88322.15,
+      "cpu_pct_total": 2.05,
       "bdn_filter": null,
       "needs_benchmark": true,
-      "benchmark_status": "needs-pump",
-      "skip_reference": "see bench-notes/bench-skipped.tsv: Dispatcher.ProcessQueue()",
       "scenarios": [
-        "startup"
+        "startup",
+        "take-open",
+        "playback"
       ],
       "scenario_cpu_pct": {
-        "startup": 0.65
+        "startup": 0.69,
+        "take-open": 2.05,
+        "playback": 1.65
       },
-      "alloc_bytes": 34510112,
-      "alloc_pct_total": 2.3767
-    },
-    {
-      "method": "WindowsBase!System.Windows.Threading.DispatcherOperation.InvokeImpl()",
-      "samples": 9383.06,
-      "cpu_pct_total": 0.64,
-      "bdn_filter": null,
-      "needs_benchmark": true,
-      "benchmark_status": "high-cv",
-      "skip_reference": "see bench-notes/bench-skipped.tsv: DispatcherOperationInvokeBenchmark.DispatcherOperationInvoke",
-      "benchmark_class": "DispatcherOperationInvokeBenchmark",
-      "scenarios": [
-        "startup"
-      ],
-      "scenario_cpu_pct": {
-        "startup": 0.64
-      },
-      "alloc_bytes": 33442728,
-      "alloc_pct_total": 2.3032
-    },
-    {
-      "method": "WindowsBase!MS.Internal.CulturePreservingExecutionContext.CallbackWrapper(class System.Object)",
-      "samples": 9379.27,
-      "cpu_pct_total": 0.64,
-      "bdn_filter": "*CultureContext*",
-      "needs_benchmark": false,
-      "benchmark_class": "CultureContextBenchmark",
-      "scenarios": [
-        "startup"
-      ],
-      "scenario_cpu_pct": {
-        "startup": 0.64
-      },
-      "alloc_bytes": 33547656,
-      "alloc_pct_total": 2.3104
-    },
-    {
-      "method": "WindowsBase!System.Windows.Threading.DispatcherOperation.Invoke()",
-      "samples": 9360.27,
-      "cpu_pct_total": 0.64,
-      "bdn_filter": null,
-      "needs_benchmark": true,
-      "benchmark_status": "high-cv",
-      "skip_reference": "see bench-notes/bench-skipped.tsv: DispatcherOperationInvokeBenchmark.DispatcherOperationInvoke",
-      "benchmark_class": "DispatcherOperationInvokeBenchmark",
-      "scenarios": [
-        "startup"
-      ],
-      "scenario_cpu_pct": {
-        "startup": 0.64
-      },
-      "alloc_bytes": 33121232,
-      "alloc_pct_total": 2.2811
+      "alloc_bytes": 12886835872,
+      "alloc_pct_total": 4.4139
     },
     {
       "method": "WindowsBase!System.Windows.Threading.Dispatcher.Invoke(class System.Action)",
-      "samples": 7807.2,
-      "cpu_pct_total": 0.53,
-      "bdn_filter": "*DispatcherInvokeAction*",
+      "samples": 87043.46,
+      "cpu_pct_total": 2.05,
+      "bdn_filter": "*Dispatcher*",
       "needs_benchmark": false,
-      "benchmark_class": "DispatcherInvokeActionBenchmark",
       "scenarios": [
-        "startup"
+        "startup",
+        "take-open",
+        "playback"
       ],
       "scenario_cpu_pct": {
-        "startup": 0.53
+        "startup": 0.6,
+        "take-open": 2.05,
+        "playback": 1.65
       },
-      "alloc_bytes": 0,
+      "alloc_bytes": 110488,
       "alloc_pct_total": 0.0
+    },
+    {
+      "method": "WindowsBase!System.Windows.Threading.DispatcherOperation.Invoke()",
+      "samples": 88281.27,
+      "cpu_pct_total": 2.05,
+      "bdn_filter": "*CultureContext*",
+      "needs_benchmark": false,
+      "scenarios": [
+        "startup",
+        "take-open",
+        "playback"
+      ],
+      "scenario_cpu_pct": {
+        "startup": 0.69,
+        "take-open": 2.05,
+        "playback": 1.65
+      },
+      "alloc_bytes": 12884813416,
+      "alloc_pct_total": 4.4132
+    },
+    {
+      "method": "WindowsBase!System.Windows.Threading.DispatcherOperation.InvokeImpl()",
+      "samples": 88301.13,
+      "cpu_pct_total": 2.05,
+      "bdn_filter": "*Dispatcher*",
+      "needs_benchmark": false,
+      "scenarios": [
+        "startup",
+        "take-open",
+        "playback"
+      ],
+      "scenario_cpu_pct": {
+        "startup": 0.69,
+        "take-open": 2.05,
+        "playback": 1.65
+      },
+      "alloc_bytes": 12885878416,
+      "alloc_pct_total": 4.4135
     },
     {
       "method": "WindowsBase!System.Windows.Threading.Dispatcher.Invoke(class System.Action,value class System.Windows.Threading.DispatcherPriority,value class System.Threading.CancellationToken,value class System.TimeSpan)",
-      "samples": 7807.2,
-      "cpu_pct_total": 0.53,
-      "bdn_filter": "*DispatcherInvokeAction*",
+      "samples": 87043.46,
+      "cpu_pct_total": 2.05,
+      "bdn_filter": "*Dispatcher*",
       "needs_benchmark": false,
-      "benchmark_class": "DispatcherInvokeActionBenchmark",
       "scenarios": [
-        "startup"
+        "startup",
+        "take-open",
+        "playback"
       ],
       "scenario_cpu_pct": {
-        "startup": 0.53
+        "startup": 0.6,
+        "take-open": 2.05,
+        "playback": 1.65
       },
-      "alloc_bytes": 0,
+      "alloc_bytes": 110488,
       "alloc_pct_total": 0.0
     },
     {
-      "method": "WindowsBase!System.Windows.Threading.Dispatcher.InvokeImpl(class System.Windows.Threading.DispatcherOperation,value class System.Threading.CancellationToken,value class System.TimeSpan)",
-      "samples": 7794.71,
-      "cpu_pct_total": 0.53,
-      "bdn_filter": null,
-      "needs_benchmark": true,
-      "benchmark_status": "needs-pump",
-      "skip_reference": "see bench-notes/bench-skipped.tsv: Dispatcher.InvokeImpl(DispatcherOperation,CancellationToken,TimeSpan)",
-      "scenarios": [
-        "startup"
-      ],
-      "scenario_cpu_pct": {
-        "startup": 0.53
-      },
-      "alloc_bytes": 0,
-      "alloc_pct_total": 0.0
-    },
-    {
-      "method": "WindowsBase!System.Windows.Threading.DispatcherOperation.Wait()",
-      "samples": 7792.7,
-      "cpu_pct_total": 0.53,
-      "bdn_filter": null,
-      "needs_benchmark": true,
-      "benchmark_status": "needs-pump",
-      "skip_reference": "see bench-notes/bench-skipped.tsv: DispatcherOperation.Wait()",
-      "scenarios": [
-        "startup"
-      ],
-      "scenario_cpu_pct": {
-        "startup": 0.53
-      },
-      "alloc_bytes": 0,
-      "alloc_pct_total": 0.0
-    },
-    {
-      "method": "WindowsBase!System.Windows.Threading.DispatcherOperation.Wait(value class System.TimeSpan)",
-      "samples": 7792.7,
-      "cpu_pct_total": 0.53,
-      "bdn_filter": null,
-      "needs_benchmark": true,
-      "benchmark_status": "needs-pump",
-      "skip_reference": "see bench-notes/bench-skipped.tsv: DispatcherOperation.Wait(TimeSpan)",
-      "scenarios": [
-        "startup"
-      ],
-      "scenario_cpu_pct": {
-        "startup": 0.53
-      },
-      "alloc_bytes": 0,
-      "alloc_pct_total": 0.0
-    },
-    {
-      "method": "WindowsBase!System.Windows.Threading.DispatcherOperation+DispatcherOperationEvent.WaitOne()",
-      "samples": 7792.7,
-      "cpu_pct_total": 0.53,
-      "bdn_filter": null,
-      "needs_benchmark": true,
-      "benchmark_status": "needs-pump",
-      "skip_reference": "see bench-notes/bench-skipped.tsv: DispatcherOperation+DispatcherOperationEvent.WaitOne()",
-      "scenarios": [
-        "startup"
-      ],
-      "scenario_cpu_pct": {
-        "startup": 0.53
-      },
-      "alloc_bytes": 0,
-      "alloc_pct_total": 0.0
-    },
-    {
-      "method": "PresentationFramework!System.Windows.Window.ShowHelper(class System.Object)",
-      "samples": 6568.56,
-      "cpu_pct_total": 0.45,
-      "bdn_filter": "*WindowLifecycle*",
+      "method": "WindowsBase!MS.Win32.HwndWrapper.WndProc(int,int32,int,int,bool&)",
+      "samples": 88403.88,
+      "cpu_pct_total": 2.05,
+      "bdn_filter": "*HwndWin32*",
       "needs_benchmark": false,
-      "benchmark_class": "WindowLifecycleBenchmark",
       "scenarios": [
-        "startup"
+        "startup",
+        "take-open",
+        "playback"
       ],
       "scenario_cpu_pct": {
-        "startup": 0.45
-      },
-      "alloc_bytes": 13600752,
-      "alloc_pct_total": 0.9367
-    },
-    {
-      "method": "PresentationFramework!System.Windows.Window.Show()",
-      "samples": 6557.74,
-      "cpu_pct_total": 0.45,
-      "bdn_filter": "*WindowLifecycle*",
-      "needs_benchmark": false,
-      "benchmark_class": "WindowLifecycleBenchmark",
-      "scenarios": [
-        "startup"
-      ],
-      "scenario_cpu_pct": {
-        "startup": 0.45
-      },
-      "alloc_bytes": 13176008,
-      "alloc_pct_total": 0.9074
-    },
-    {
-      "method": "WindowsBase!System.Windows.Threading.DispatcherOperation.InvokeDelegateCore()",
-      "samples": 6451.18,
-      "cpu_pct_total": 0.44,
-      "bdn_filter": null,
-      "needs_benchmark": true,
-      "benchmark_status": "not-yet-scheduled",
-      "skip_reference": "not assigned to a cluster in B3-B5; private method in DispatcherOperation.Invoke() call chain",
-      "scenarios": [
-        "startup"
-      ],
-      "scenario_cpu_pct": {
-        "startup": 0.44
-      },
-      "alloc_bytes": 20320672,
-      "alloc_pct_total": 1.3995
-    },
-    {
-      "method": "PresentationFramework!System.Windows.Window.ShowDialog()",
-      "samples": 5424.8,
-      "cpu_pct_total": 0.37,
-      "bdn_filter": null,
-      "needs_benchmark": true,
-      "benchmark_status": "high-cv",
-      "skip_reference": "see bench-notes/bench-skipped.tsv: Window.ShowDialog()",
-      "benchmark_class": "WindowLifecycleBenchmark",
-      "scenarios": [
-        "startup"
-      ],
-      "scenario_cpu_pct": {
-        "startup": 0.37
-      },
-      "alloc_bytes": 11031856,
-      "alloc_pct_total": 0.7598
-    },
-    {
-      "method": "WindowsBase!MS.Win32.HwndSubclass.DispatcherCallbackOperation(class System.Object)",
-      "samples": 2950.82,
-      "cpu_pct_total": 0.2,
-      "bdn_filter": null,
-      "needs_benchmark": true,
-      "benchmark_status": "not-yet-scheduled",
-      "skip_reference": "not assigned to a cluster in B3-B5; private callback in HwndSubclass message-dispatch path",
-      "scenarios": [
-        "startup"
-      ],
-      "scenario_cpu_pct": {
-        "startup": 0.2
+        "startup": 0.7,
+        "take-open": 2.05,
+        "playback": 1.65
       },
       "alloc_bytes": 0,
       "alloc_pct_total": 0.0
     },
     {
-      "method": "WindowsBase!System.Windows.Threading.Dispatcher.LegacyInvokeImpl(value class System.Windows.Threading.DispatcherPriority,value class System.TimeSpan,class System.Delegate,class System.Object,int32)",
-      "samples": 2949.62,
-      "cpu_pct_total": 0.2,
-      "bdn_filter": null,
-      "needs_benchmark": true,
-      "benchmark_status": "not-yet-scheduled",
-      "skip_reference": "not assigned to a cluster in B3-B5; legacy Delegate-based Dispatcher.Invoke overload path",
-      "scenarios": [
-        "startup"
-      ],
-      "scenario_cpu_pct": {
-        "startup": 0.2
-      },
-      "alloc_bytes": 19750104,
-      "alloc_pct_total": 1.3602
-    },
-    {
-      "method": "WindowsBase!System.Windows.Threading.Dispatcher.WrappedInvoke(class System.Delegate,class System.Object,int32,class System.Delegate)",
-      "samples": 2948.02,
-      "cpu_pct_total": 0.2,
-      "bdn_filter": null,
-      "needs_benchmark": true,
-      "benchmark_status": "not-yet-scheduled",
-      "skip_reference": "not assigned to a cluster in B3-B5; internal Dispatcher.WrappedInvoke called by LegacyInvokeImpl",
-      "scenarios": [
-        "startup"
-      ],
-      "scenario_cpu_pct": {
-        "startup": 0.2
-      },
-      "alloc_bytes": 19750104,
-      "alloc_pct_total": 1.3602
-    },
-    {
-      "method": "WindowsBase!System.Windows.Threading.Dispatcher.WndProcHook(int,int32,int,int,bool&)",
-      "samples": 2935.28,
-      "cpu_pct_total": 0.2,
-      "bdn_filter": null,
-      "needs_benchmark": true,
-      "benchmark_status": "not-yet-scheduled",
-      "skip_reference": "not assigned to a cluster in B3-B5; Dispatcher WndProc hook inside HwndWrapper message loop",
-      "scenarios": [
-        "startup"
-      ],
-      "scenario_cpu_pct": {
-        "startup": 0.2
-      },
-      "alloc_bytes": 19962792,
-      "alloc_pct_total": 1.3748
-    },
-    {
-      "method": "WindowsBase!MS.Win32.UnsafeNativeMethods.GetMessageW(value class System.Windows.Interop.MSG&,value class System.Runtime.InteropServices.HandleRef,int32,int32)",
-      "samples": 2894.73,
-      "cpu_pct_total": 0.2,
-      "bdn_filter": null,
-      "needs_benchmark": true,
-      "benchmark_status": "not-yet-scheduled",
-      "skip_reference": "not assigned to a cluster in B3-B5; P/Invoke wrapper for Win32 GetMessage inside PushFrameImpl",
-      "scenarios": [
-        "startup"
-      ],
-      "scenario_cpu_pct": {
-        "startup": 0.2
-      },
-      "alloc_bytes": 0,
-      "alloc_pct_total": 0.0
-    },
-    {
-      "method": "WindowsBase!MS.Internal.CulturePreservingExecutionContext.Run(class MS.Internal.CulturePreservingExecutionContext,class System.Threading.ContextCallback,class System.Object)",
-      "samples": 2870.1,
-      "cpu_pct_total": 0.2,
+      "method": "WindowsBase!MS.Internal.CulturePreservingExecutionContext.CallbackWrapper(class System.Object)",
+      "samples": 88297.14,
+      "cpu_pct_total": 2.05,
       "bdn_filter": "*CultureContext*",
       "needs_benchmark": false,
-      "benchmark_class": "CultureContextBenchmark",
       "scenarios": [
-        "startup"
+        "startup",
+        "take-open",
+        "playback"
       ],
       "scenario_cpu_pct": {
-        "startup": 0.2
+        "startup": 0.69,
+        "take-open": 2.05,
+        "playback": 1.65
       },
-      "alloc_bytes": 18999800,
-      "alloc_pct_total": 1.3085
+      "alloc_bytes": 12885559128,
+      "alloc_pct_total": 4.4134
     },
     {
-      "method": "(benchmarked) Geometry.Parse()",
-      "samples": 0.0,
-      "cpu_pct_total": 0.0,
-      "bdn_filter": "*GeometryParser*",
-      "needs_benchmark": false,
+      "method": "WindowsBase!System.Windows.Threading.Dispatcher.GetMessage(value class System.Windows.Interop.MSG&,int,int32,int32)",
+      "samples": 44671.03,
+      "cpu_pct_total": 1.91,
+      "bdn_filter": null,
+      "needs_benchmark": true,
       "scenarios": [
-        "startup"
+        "startup",
+        "take-open",
+        "playback"
       ],
       "scenario_cpu_pct": {
-        "startup": 0.0
-      },
-      "alloc_bytes": 0,
-      "alloc_pct_total": 0.0
-    },
-    {
-      "method": "(benchmarked) Size.Equals()",
-      "samples": 0.0,
-      "cpu_pct_total": 0.0,
-      "bdn_filter": "*Smoke*",
-      "needs_benchmark": false,
-      "scenarios": [
-        "startup"
-      ],
-      "scenario_cpu_pct": {
-        "startup": 0.0
+        "startup": 1.91,
+        "take-open": 0.55,
+        "playback": 0.01
       },
       "alloc_bytes": 0,
       "alloc_pct_total": 0.0

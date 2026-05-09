@@ -464,6 +464,14 @@ def existing_benchmarks() -> dict[str, str]:
         "Color", "Matrix", "Rect", "Size", "Point", "Vector",
         "XamlReader", "XamlWriter",
         "Border", "Panel", "Grid", "StackPanel",
+        # Threading / dispatcher infrastructure (added 2026-05-09 after the
+        # post-KEEP reprofile surfaced ExceptionWrapper.TryCatchWhen and
+        # CulturePreservingExecutionContext.CallbackWrapper as top alloc
+        # entries with bdn_filter=NONE despite having covering benchmarks).
+        "ExceptionWrapper",
+        "CulturePreservingExecutionContext",
+        "HwndWrapper", "HwndSubclass",
+        "Window", "Application",
     )
     for f in MICROBENCH_DIR.glob("*.cs"):
         text = f.read_text(encoding="utf-8")
