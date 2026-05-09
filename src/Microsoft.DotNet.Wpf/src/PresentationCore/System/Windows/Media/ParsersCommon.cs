@@ -443,16 +443,37 @@ namespace MS.Internal.Markup
 //
 
         /// <summary>
-        /// Read a floating point number
+        /// Read a floating point number. Validates that the cursor is at a
+        /// number-start char (sign / digit / period / I / N) before delegating
+        /// to ReadNumberCore. Callers that have already validated the position
+        /// (typically via the loop-test `IsNumber(AllowComma)` of an inner
+        /// command loop in ParseToGeometryContext) call ReadNumberCore directly
+        /// to skip the redundant SkipWhiteSpace+digit-range prelude — which on
+        /// the integer-only corpus reduces to a 0-iteration whitespace skip
+        /// plus one digit-range compare per redundant call.
         /// </summary>
         /// <returns></returns>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private double ReadNumber(bool allowComma)
         {
             if (!IsNumber(allowComma))
             {
                 ThrowBadToken();
             }
+            return ReadNumberCore();
+        }
 
+        /// <summary>
+        /// Read-number body. Assumes the cursor is positioned at a valid
+        /// number-start char and `_token` holds the head char (the post-condition
+        /// established by IsNumber returning true). Used directly by the
+        /// peeled inner command loops so that iterations 2..N skip the IsNumber
+        /// prelude (the loop-test IsNumber already established the
+        /// post-condition; running it again at the start of the next ReadNumber
+        /// is a 0-iter no-op SkipWhiteSpace + digit-range compare).
+        /// </summary>
+        private double ReadNumberCore()
+        {
             // Hoist _pathString / _pathLength / _curIndex into locals across
             // the whole function. The integer/period/exponent walks all share
             // the same s/end/i; keeping them in registers eliminates the
@@ -649,7 +670,29 @@ namespace MS.Internal.Markup
             {
                 x += _lastPoint.X;
                 y += _lastPoint.Y;
-            }                
+            }
+
+            return new Point(x, y);
+        }
+
+        /// <summary>
+        /// Read a relative point assuming the cursor is already positioned at
+        /// a number-start char (post-condition of an immediately-preceding
+        /// IsNumber call — typically the do-while loop test in
+        /// ParseToGeometryContext). Skips the leading SkipWhiteSpace+digit-range
+        /// check on the X coordinate; the Y coordinate still needs full
+        /// validation since it follows the X digit-walk's terminator.
+        /// </summary>
+        private Point ReadPointPositioned(char cmd)
+        {
+            double x = ReadNumberCore();          // No prelude — already at number-start
+            double y = ReadNumber(AllowComma);    // Standard prelude (skip ws between x and y)
+
+            if (cmd >= 'a') // 'A' < 'a'. lower case for relative
+            {
+                x += _lastPoint.X;
+                y += _lastPoint.Y;
+            }
 
             return new Point(x, y);
         }
@@ -721,16 +764,20 @@ namespace MS.Internal.Markup
                 case 'm': case 'M':
                     // XAML allows multiple points after M/m
                     _lastPoint = ReadPoint(cmd, ! AllowComma);
-                    
+
                     context.BeginFigure(_lastPoint, IsFilled, ! IsClosed);
                     _figureStarted = true;
                     _lastStart = _lastPoint;
                     last_cmd = 'M';
-                    
+
+                    // Subsequent implicit-LineTo points: the loop-test IsNumber
+                    // already established that _curIndex is at a number-start
+                    // char and _token holds it, so use the positioned helper to
+                    // skip the redundant prelude in the first ReadNumber.
                     while (IsNumber(AllowComma))
                     {
-                        _lastPoint = ReadPoint(cmd, ! AllowComma);
-                        
+                        _lastPoint = ReadPointPositioned(cmd);
+
                         context.LineTo(_lastPoint, IsStroked, ! IsSmoothJoin);
                         last_cmd = 'L';
                     }
@@ -741,21 +788,43 @@ namespace MS.Internal.Markup
                 case 'v': case 'V':
                     EnsureFigure();
 
-                    do
+                    // First iteration: cursor sits on whitespace between the
+                    // command letter and the first number, so the embedded
+                    // ReadNumber's IsNumber prelude has real work (skip ws +
+                    // throw on missing first number). Use the validating
+                    // ReadPoint / ReadNumber overloads here.
+                    switch (cmd)
+                    {
+                    case 'l': _lastPoint    = ReadPoint(cmd, ! AllowComma); break;
+                    case 'L': _lastPoint    = ReadPoint(cmd, ! AllowComma); break;
+                    case 'h': _lastPoint.X += ReadNumber(! AllowComma); break;
+                    case 'H': _lastPoint.X  = ReadNumber(! AllowComma); break;
+                    case 'v': _lastPoint.Y += ReadNumber(! AllowComma); break;
+                    case 'V': _lastPoint.Y  = ReadNumber(! AllowComma); break;
+                    }
+
+                    context.LineTo(_lastPoint, IsStroked, ! IsSmoothJoin);
+
+                    // Subsequent iterations: the loop-test IsNumber has already
+                    // skipped whitespace and confirmed a number-start char, so
+                    // the FIRST per-iteration ReadNumber is redundant if it
+                    // re-runs the IsNumber+SkipWhiteSpace prelude. Switch to
+                    // ReadPointPositioned / ReadNumberCore which assume the
+                    // post-condition holds.
+                    while (IsNumber(AllowComma))
                     {
                         switch (cmd)
                         {
-                        case 'l': _lastPoint    = ReadPoint(cmd, ! AllowComma); break;
-                        case 'L': _lastPoint    = ReadPoint(cmd, ! AllowComma); break;
-                        case 'h': _lastPoint.X += ReadNumber(! AllowComma); break;
-                        case 'H': _lastPoint.X  = ReadNumber(! AllowComma); break; 
-                        case 'v': _lastPoint.Y += ReadNumber(! AllowComma); break;
-                        case 'V': _lastPoint.Y  = ReadNumber(! AllowComma); break;
+                        case 'l': _lastPoint    = ReadPointPositioned(cmd); break;
+                        case 'L': _lastPoint    = ReadPointPositioned(cmd); break;
+                        case 'h': _lastPoint.X += ReadNumberCore(); break;
+                        case 'H': _lastPoint.X  = ReadNumberCore(); break;
+                        case 'v': _lastPoint.Y += ReadNumberCore(); break;
+                        case 'V': _lastPoint.Y  = ReadNumberCore(); break;
                         }
 
-                        context.LineTo(_lastPoint, IsStroked, ! IsSmoothJoin); 
+                        context.LineTo(_lastPoint, IsStroked, ! IsSmoothJoin);
                     }
-                    while (IsNumber(AllowComma));
 
                     last_cmd = 'L';
                     break;
@@ -763,11 +832,12 @@ namespace MS.Internal.Markup
                 case 'c': case 'C': // cubic Bezier
                 case 's': case 'S': // smooth cublic Bezier
                     EnsureFigure();
-                    
-                    do
+
+                    // First iteration: validate the first number in the first
+                    // ReadPoint (cursor on whitespace after the command letter).
                     {
                         Point p;
-                        
+
                         if ((cmd == 's') || (cmd == 'S'))
                         {
                             if (last_cmd == 'C')
@@ -787,22 +857,57 @@ namespace MS.Internal.Markup
 
                             _secondLastPoint = ReadPoint(cmd, AllowComma);
                         }
-                            
+
                         _lastPoint = ReadPoint(cmd, AllowComma);
 
                         context.BezierTo(p, _secondLastPoint, _lastPoint, IsStroked, ! IsSmoothJoin);
-                        
+
                         last_cmd = 'C';
                     }
-                    while (IsNumber(AllowComma));
-                    
+
+                    // Subsequent iterations: the loop-test IsNumber positioned
+                    // the cursor on the next number-start char, so the FIRST
+                    // ReadPoint of each iteration uses the positioned helper.
+                    // The remaining ReadPoints follow a digit-walk and still
+                    // need the standard prelude.
+                    while (IsNumber(AllowComma))
+                    {
+                        Point p;
+
+                        if ((cmd == 's') || (cmd == 'S'))
+                        {
+                            if (last_cmd == 'C')
+                            {
+                                p = Reflect();
+                            }
+                            else
+                            {
+                                p = _lastPoint;
+                            }
+
+                            _secondLastPoint = ReadPointPositioned(cmd);
+                        }
+                        else
+                        {
+                            p = ReadPointPositioned(cmd);
+
+                            _secondLastPoint = ReadPoint(cmd, AllowComma);
+                        }
+
+                        _lastPoint = ReadPoint(cmd, AllowComma);
+
+                        context.BezierTo(p, _secondLastPoint, _lastPoint, IsStroked, ! IsSmoothJoin);
+
+                        last_cmd = 'C';
+                    }
+
                     break;
                     
                 case 'q': case 'Q': // quadratic Bezier
                 case 't': case 'T': // smooth quadratic Bezier
                     EnsureFigure();
-                    
-                    do
+
+                    // First iteration: validate first number.
                     {
                         if ((cmd == 't') || (cmd == 'T'))
                         {
@@ -824,17 +929,43 @@ namespace MS.Internal.Markup
                         }
 
                         context.QuadraticBezierTo(_secondLastPoint, _lastPoint, IsStroked, ! IsSmoothJoin);
-                        
+
                         last_cmd = 'Q';
                     }
-                    while (IsNumber(AllowComma));
-                    
+
+                    // Subsequent iterations: positioned (loop-test IsNumber)
+                    while (IsNumber(AllowComma))
+                    {
+                        if ((cmd == 't') || (cmd == 'T'))
+                        {
+                            if (last_cmd == 'Q')
+                            {
+                                _secondLastPoint = Reflect();
+                            }
+                            else
+                            {
+                                _secondLastPoint = _lastPoint;
+                            }
+
+                            _lastPoint = ReadPointPositioned(cmd);
+                        }
+                        else
+                        {
+                            _secondLastPoint = ReadPointPositioned(cmd);
+                            _lastPoint = ReadPoint(cmd, AllowComma);
+                        }
+
+                        context.QuadraticBezierTo(_secondLastPoint, _lastPoint, IsStroked, ! IsSmoothJoin);
+
+                        last_cmd = 'Q';
+                    }
+
                     break;
                     
                 case 'a': case 'A':
                     EnsureFigure();
-                    
-                    do
+
+                    // First iteration: validate first number.
                     {
                         // A 3,4 5, 0, 0, 6,7
                         double w        = ReadNumber(! AllowComma);
@@ -842,7 +973,7 @@ namespace MS.Internal.Markup
                         double rotation = ReadNumber(AllowComma);
                         bool large      = ReadBool();
                         bool sweep      = ReadBool();
-                        
+
                         _lastPoint = ReadPoint(cmd, AllowComma);
 
                         context.ArcTo(
@@ -859,8 +990,33 @@ namespace MS.Internal.Markup
                             ! IsSmoothJoin
                             );
                     }
-                    while (IsNumber(AllowComma));
-                    
+
+                    // Subsequent iterations: positioned first number.
+                    while (IsNumber(AllowComma))
+                    {
+                        double w        = ReadNumberCore();
+                        double h        = ReadNumber(AllowComma);
+                        double rotation = ReadNumber(AllowComma);
+                        bool large      = ReadBool();
+                        bool sweep      = ReadBool();
+
+                        _lastPoint = ReadPoint(cmd, AllowComma);
+
+                        context.ArcTo(
+                            _lastPoint,
+                            new Size(w, h),
+                            rotation,
+                            large,
+#if PBTCOMPILER
+                            sweep,
+#else
+                            sweep ? SweepDirection.Clockwise : SweepDirection.Counterclockwise,
+#endif
+                            IsStroked,
+                            ! IsSmoothJoin
+                            );
+                    }
+
                     last_cmd = 'A';
                     break;
                     
