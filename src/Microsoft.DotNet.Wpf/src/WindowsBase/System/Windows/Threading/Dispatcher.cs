@@ -1556,21 +1556,36 @@ namespace System.Windows.Threading
         ///     that is raised if the priority is not suitable for use by
         ///     the dispatcher.
         /// </param>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static void ValidatePriority(DispatcherPriority priority, string parameterName) // NOTE: should be Priority
         {
-            // First make sure the Priority is valid.
-            // Priority.ValidatePriority(priority, paramName);
-
-            // Second, make sure the priority is in a range recognized by
-            // the dispatcher.
-            if(!_foregroundPriorityRange.Contains(priority) &&
-               !_backgroundPriorityRange.Contains(priority) &&
-               !_idlePriorityRange.Contains(priority) &&
-               DispatcherPriority.Inactive != priority)  // NOTE: should be Priority.Min
+            // The set of priorities accepted by the dispatcher is exactly the
+            // contiguous range [Inactive(0) .. Send(10)] — every named
+            // DispatcherPriority value (Inactive, SystemIdle, ApplicationIdle,
+            // ContextIdle, Background, Input, Loaded, Render, DataBind, Normal,
+            // Send) maps to one of those 11 integers, and the only sentinel
+            // outside it is Invalid(-1). The original implementation expressed
+            // that as a 3× PriorityRange.Contains chain plus an explicit
+            // Inactive equality test, which compiled to ~20 comparisons + 3
+            // out-of-line struct method calls and overshot the JIT default
+            // inline budget. Collapse the whole admissibility test to a single
+            // unsigned compare against Send: any negative priority (including
+            // Invalid=-1 and arbitrary negative casts) wraps to a uint above
+            // Send and is rejected; everything in [0..10] passes; anything
+            // above 10 is rejected. The body now fits comfortably under the
+            // inline budget, and [AggressiveInlining] folds the check directly
+            // into Dispatcher.Invoke / BeginInvoke / SetPriority callers
+            // (with the throw remaining out-of-line as a cold helper).
+            if ((uint)priority > (uint)DispatcherPriority.Send)
             {
-                // If we move to a Priority class, this exception will have to change too.
-                throw new System.ComponentModel.InvalidEnumArgumentException(parameterName, (int)priority, typeof(DispatcherPriority));
+                ThrowInvalidPriority(priority, parameterName);
             }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void ThrowInvalidPriority(DispatcherPriority priority, string parameterName)
+        {
+            throw new System.ComponentModel.InvalidEnumArgumentException(parameterName, (int)priority, typeof(DispatcherPriority));
         }
 
         /// <summary>
