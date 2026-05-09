@@ -69,7 +69,26 @@ namespace System.Windows.Documents
             }
 
             /// <summary>
-            /// Transform on the Visual
+            /// Transform on the Visual — affine fast path.
+            /// Set when TryTransformToAncestorAsMatrix returns true. Prefer this over
+            /// <see cref="Transform"/> on the hot LayoutUpdated path to avoid
+            /// MatrixTransform + Matrix DP-box allocations.
+            /// </summary>
+            internal Matrix SimpleTransform;
+
+            /// <summary>
+            /// True when <see cref="SimpleTransform"/> is valid; false when the visual
+            /// chain has Effects or 3D embedding and only <see cref="Transform"/> is set.
+            /// </summary>
+            internal bool HasSimpleTransform;
+
+            /// <summary>
+            /// Transform on the Visual — GeneralTransform fallback.
+            /// Non-null only when <see cref="HasSimpleTransform"/> is false (rare).
+            /// Downstream consumers (ArrangeOverride, GetDesiredTransform) use
+            /// <see cref="GetTransformForArrange"/> which materialises a MatrixTransform
+            /// from SimpleTransform when needed; the alloc is amortised to the arrange
+            /// pass rather than the hot update pass.
             /// </summary>
             internal GeneralTransform Transform
             {
@@ -81,6 +100,21 @@ namespace System.Windows.Documents
                 {
                     _transform = value;
                 }
+            }
+
+            /// <summary>
+            /// Returns the transform in GeneralTransform form for callers that need it
+            /// (e.g. ArrangeOverride → GetDesiredTransform).  On the simple path this
+            /// allocates a MatrixTransform, but that path is called once per arrange
+            /// (not on every LayoutUpdated fire).
+            /// </summary>
+            internal GeneralTransform GetTransformForArrange()
+            {
+                if (HasSimpleTransform)
+                    return SimpleTransform.IsIdentity
+                        ? System.Windows.Media.Transform.Identity
+                        : new MatrixTransform(SimpleTransform);
+                return _transform;
             }
 
             internal int ZOrder
@@ -474,7 +508,7 @@ namespace System.Windows.Documents
                         // We're dependent on Arrange to get the rendersize of the adorner, so Arrange before
                         // doing our transform magic.
                         adornerInfo.Adorner.Arrange(new Rect(new Point(), adornerInfo.Adorner.DesiredSize));
-                        GeneralTransform proposedTransform = adornerInfo.Adorner.GetDesiredTransform(adornerInfo.Transform);
+                        GeneralTransform proposedTransform = adornerInfo.Adorner.GetDesiredTransform(adornerInfo.GetTransformForArrange());
                         GeneralTransform adornerTransform = GetProposedTransform(adornerInfo.Adorner, proposedTransform);
 
                         int index = _children.IndexOf(adornerInfo.Adorner);
@@ -550,6 +584,8 @@ namespace System.Windows.Documents
             adornerInfo.Adorner.InvalidateVisual();
             adornerInfo.RenderSize = new Size(double.NaN, double.NaN);
             adornerInfo.Transform = null;
+            adornerInfo.HasSimpleTransform = false;
+            adornerInfo.SimpleTransform = default;
         }
 
         /// <summary>
@@ -770,9 +806,14 @@ namespace System.Windows.Documents
             bool dirty = false;
 
             //
-            // See if the adorners need to be rerendered due to object resizing
+            // See if the adorners need to be rerendered due to object resizing.
+            // Fast path: TryTransformToAncestorAsMatrix avoids MatrixTransform +
+            // Matrix DP-box allocations on the common purely-affine visual chain.
+            // Fall back to the GeneralTransform overload only when Effects or 3D
+            // embedding are present in the ancestor chain.
             //
-            GeneralTransform transform = element.TransformToAncestor(adornerLayerParent);                            
+            bool isSimpleTransform = element.TryTransformToAncestorAsMatrix(adornerLayerParent as Visual, out Matrix simpleMatrix);
+            GeneralTransform transform = isSimpleTransform ? null : element.TransformToAncestor(adornerLayerParent);
 
             for (int i = 0; i < adornerInfos.Count; i++)
             {
@@ -790,16 +831,37 @@ namespace System.Windows.Documents
                     }
                 }
 
-                if (adornerInfo.Adorner.NeedsUpdate(adornerInfo.RenderSize) || adornerInfo.Transform == null ||
-                    transform.AffineTransform == null || adornerInfo.Transform.AffineTransform == null ||
-                    transform.AffineTransform.Value != adornerInfo.Transform.AffineTransform.Value ||
-                    clipChanged)
+                // Determine whether the transform has changed since the last update.
+                bool transformChanged;
+                if (isSimpleTransform && adornerInfo.HasSimpleTransform)
+                {
+                    // Both old and new are simple affines — compare matrices directly.
+                    transformChanged = simpleMatrix != adornerInfo.SimpleTransform;
+                }
+                else if (!isSimpleTransform && !adornerInfo.HasSimpleTransform)
+                {
+                    // Both are GeneralTransforms — use the existing affine-value comparison.
+                    transformChanged = adornerInfo.Transform == null ||
+                        transform.AffineTransform == null || adornerInfo.Transform.AffineTransform == null ||
+                        transform.AffineTransform.Value != adornerInfo.Transform.AffineTransform.Value;
+                }
+                else
+                {
+                    // The simple/complex path changed — always treat as dirty.
+                    transformChanged = true;
+                }
+
+                if (adornerInfo.Adorner.NeedsUpdate(adornerInfo.RenderSize) || transformChanged || clipChanged)
                 {
                     adornerInfo.Adorner.InvalidateMeasure();
                     adornerInfo.Adorner.InvalidateVisual();
 
                     adornerInfo.RenderSize = size;
-                    adornerInfo.Transform = transform;
+
+                    // Store the transform in whichever representation was computed.
+                    adornerInfo.HasSimpleTransform = isSimpleTransform;
+                    adornerInfo.SimpleTransform = isSimpleTransform ? simpleMatrix : default;
+                    adornerInfo.Transform = isSimpleTransform ? null : transform;
 
                     if (adornerInfo.Adorner.IsClipEnabled)
                     {
