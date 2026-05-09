@@ -293,13 +293,19 @@ namespace MS.Internal.Markup
             // Hoist fields to locals so the JIT proves they don't change across
             // the loop and folds away per-iteration field loads + null-checks on
             // the string indexer. _curIndex is only written back at exit.
+            //
+            // The loop test compares against `s.Length` (not the cached
+            // `_pathLength` field) so the JIT's bounds-check elision pattern
+            // matcher recognizes the canonical `i < s.Length` + `s[i]` shape
+            // and removes the per-iteration bounds check on the indexer.
+            // `_pathLength == _pathString.Length` by construction (set once at
+            // ParseToGeometryContext entry), so behavior is identical.
             string s = _pathString;
-            int end = _pathLength;
             int i = _curIndex;
 
             bool commaMet = false;
 
-            while (i < end)
+            while (i < s.Length)
             {
                 char ch = s[i];
 
@@ -453,15 +459,24 @@ namespace MS.Internal.Markup
                 ThrowBadToken();
             }
 
-            // Hoist _pathString / _pathLength / _curIndex into locals across
-            // the whole function. The integer/period/exponent walks all share
-            // the same s/end/i; keeping them in registers eliminates the
-            // _curIndex = i; ... if (More()) ... _pathString[_curIndex] ping-
-            // pong that the prior structure forced between each sub-walk
-            // (digit run -> period scan -> exponent scan -> SkipDigits inner-
-            // hoist). _curIndex is only written back once, just before return.
+            // Hoist _pathString / _curIndex into locals across the whole
+            // function. The integer/period/exponent walks all share the same
+            // s/i; keeping them in registers eliminates the _curIndex = i;
+            // ... if (More()) ... _pathString[_curIndex] ping-pong that the
+            // prior structure forced between each sub-walk (digit run ->
+            // period scan -> exponent scan -> SkipDigits inner-hoist).
+            // _curIndex is only written back once, just before return.
+            //
+            // The three inner digit walks all use `i < s.Length` (not the
+            // cached `_pathLength` field) so the JIT's bounds-check elision
+            // pattern matcher recognizes the canonical `i < s.Length` +
+            // `s[i]` shape and removes the per-iteration bounds check on the
+            // indexer. `_pathLength == _pathString.Length` by construction
+            // (set once at ParseToGeometryContext entry), so behavior is
+            // identical. The two Math.Min(i+8/3, ...) sign-prefix and
+            // Infinity / NaN clamps and the optional sign-after-E test
+            // likewise compare against `s.Length` for consistency.
             string s = _pathString;
-            int end = _pathLength;
             int i = _curIndex;
             int start = i;
 
@@ -492,19 +507,19 @@ namespace MS.Internal.Markup
             // the head — reuse it instead of issuing another string-indexer
             // load. For signed numbers we have to read s[i].
             char head = (first == '-' || first == '+')
-                ? (i < end ? s[i] : '\0')
+                ? (i < s.Length ? s[i] : '\0')
                 : first;
 
             // Check for Infinity / NaN — slow path: don't bother reading the
             // rest of the lexeme, the CLR's double.Parse will validate it.
             if (head == 'I')
             {
-                i = Math.Min(i + 8, end); // "Infinity" has 8 characters
+                i = Math.Min(i + 8, s.Length); // "Infinity" has 8 characters
                 simple = false;
             }
             else if (head == 'N')
             {
-                i = Math.Min(i + 3, end); // "NaN" has 3 characters
+                i = Math.Min(i + 3, s.Length); // "NaN" has 3 characters
                 simple = false;
             }
             else
@@ -525,7 +540,7 @@ namespace MS.Internal.Markup
                 // period/exponent branches or via the gate, both of which
                 // discard intValue and re-parse via double.Parse.
                 char endChar = '\0';
-                while (i < end)
+                while (i < s.Length)
                 {
                     char ch = s[i];
                     uint d = (uint)(ch - '0');
@@ -545,7 +560,7 @@ namespace MS.Internal.Markup
                     simple = false;
                     i++;
                     endChar = '\0';
-                    while (i < end)
+                    while (i < s.Length)
                     {
                         char c2 = s[i];
                         uint d = (uint)(c2 - '0');
@@ -566,11 +581,11 @@ namespace MS.Internal.Markup
                 {
                     simple = false;
                     i++;
-                    if (i < end && (s[i] == '-' || s[i] == '+'))
+                    if (i < s.Length && (s[i] == '-' || s[i] == '+'))
                     {
                         i++;
                     }
-                    while (i < end)
+                    while (i < s.Length)
                     {
                         if ((uint)(s[i] - '0') > 9u)
                         {
