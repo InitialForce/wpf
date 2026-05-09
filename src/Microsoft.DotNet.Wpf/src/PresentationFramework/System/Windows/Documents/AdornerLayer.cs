@@ -198,6 +198,14 @@ namespace System.Windows.Documents
             RemoveAdornerInfo(_zOrderMap, adorner, adornerInfo.ZOrder);
             _children.Remove(adorner);
             RemoveLogicalChild(adorner);
+
+            // If no more adorners remain for this element, unsubscribe from its LayoutUpdated
+            // to break the AdornerLayer/UIElement retention cycle.
+            if (ElementMap[adorner.AdornedElement] == null)
+            {
+                UnsubscribeFromElementLayout(adorner.AdornedElement);
+            }
+            _layoutDirty = true;
         }
 
         /// <summary>
@@ -219,11 +227,12 @@ namespace System.Windows.Documents
                 }
             }
 
+            _layoutDirty = true;
             UpdateAdorner(null);
         }
 
         /// <summary>
-        /// Update (layout and render) all adorners for the given element.  
+        /// Update (layout and render) all adorners for the given element.
         /// </summary>
         /// <param name="element">element key for redraw</param>
         public void Update(UIElement element)
@@ -242,6 +251,7 @@ namespace System.Windows.Documents
                 InvalidateAdorner((AdornerInfo)adornerInfos[i++]);
             }
 
+            _layoutDirty = true;
             UpdateAdorner(element);
         }
 
@@ -517,10 +527,15 @@ namespace System.Windows.Documents
 
             AddAdornerInfo(ElementMap, adornerInfo, adorner.AdornedElement);
 
+            // Subscribe to the adorned element's LayoutUpdated so we can arm _layoutDirty
+            // only when something actually changes, rather than on every layer-level fire.
+            SubscribeToElementLayout(adorner.AdornedElement);
+
             AddAdornerToVisualTree(adornerInfo, zOrder);
 
             AddLogicalChild(adorner);
 
+            _layoutDirty = true;
             UpdateAdorner(adorner.AdornedElement);
         }
 
@@ -544,10 +559,47 @@ namespace System.Windows.Documents
         /// <param name="args"></param>
         internal void OnLayoutUpdated(object sender, EventArgs args)
         {
-            if (ElementMap.Count == 0)
+            if (ElementMap.Count == 0 || !_layoutDirty)
                 return;
 
+            // Clear before walking; if a per-element LayoutUpdated fires re-entrantly
+            // during the walk it will re-arm the flag for the next pass.
+            _layoutDirty = false;
             UpdateAdorner(null);
+        }
+
+        /// <summary>
+        /// LayoutUpdated handler subscribed per adorned element.
+        /// Arms the layer-level dirty bit so the next OnLayoutUpdated fires UpdateAdorner.
+        /// </summary>
+        private void OnAdornedElementLayoutUpdated(object sender, EventArgs e)
+        {
+            _layoutDirty = true;
+        }
+
+        /// <summary>
+        /// Subscribe to LayoutUpdated on the given element exactly once (tracked via
+        /// _subscribedElements).  Called when the first adorner is registered for an element.
+        /// </summary>
+        private void SubscribeToElementLayout(UIElement element)
+        {
+            _subscribedElements ??= new HashSet<UIElement>();
+            if (_subscribedElements.Add(element))
+            {
+                element.LayoutUpdated += OnAdornedElementLayoutUpdated;
+            }
+        }
+
+        /// <summary>
+        /// Unsubscribe from LayoutUpdated on the given element.
+        /// Called when the last adorner for an element is removed.
+        /// </summary>
+        private void UnsubscribeFromElementLayout(UIElement element)
+        {
+            if (_subscribedElements != null && _subscribedElements.Remove(element))
+            {
+                element.LayoutUpdated -= OnAdornedElementLayoutUpdated;
+            }
         }
 
         /// <summary>
@@ -573,6 +625,7 @@ namespace System.Windows.Documents
             adornerInfo.ZOrder = zOrder;
             AddAdornerToVisualTree(adornerInfo, zOrder);
             InvalidateAdorner(adornerInfo);
+            _layoutDirty = true;
             UpdateAdorner(adorner.AdornedElement);
         }
 
@@ -1035,6 +1088,15 @@ namespace System.Windows.Documents
         // not self-reentrant on the same AdornerLayer instance.
         private List<UIElement> _removeList;
         private UIElement[] _keysSnapshotBuffer;
+
+        // Dirty-bit gate for OnLayoutUpdated.  Set on adorner add/remove and on any
+        // per-element LayoutUpdated event; cleared at the top of UpdateAdorner so a
+        // re-entrant fire during the walk re-arms for the next pass.
+        // Starts true so the very first layout pass is never skipped.
+        private bool _layoutDirty = true;
+        // Set of elements for which we have a LayoutUpdated subscription.
+        // Maintained to ensure subscribe/unsubscribe are balanced.
+        private HashSet<UIElement> _subscribedElements;
 
         #endregion Private Fields
     }
