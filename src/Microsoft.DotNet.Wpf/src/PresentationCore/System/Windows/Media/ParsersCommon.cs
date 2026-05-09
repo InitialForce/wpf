@@ -297,21 +297,40 @@ namespace MS.Internal.Markup
             int end = _pathLength;
             int i = _curIndex;
 
+            // Plain-ASCII-whitespace fast pre-loop. The SVG-integer corpus has
+            // exactly one space between every two tokens; on M-prefix paths
+            // this loop fires ~6700 times per ParseCorpus op (once per token
+            // boundary). The original implementation routed every iteration
+            // through the case-list switch on ch, which the JIT lowers to a
+            // jump table on x64 and still consumes a load + bounded compare +
+            // indirect branch per WS char. The four short-circuited
+            // equality compares below collapse to two branches in the dominant
+            // ' ' case (ch != ' ' fails fast for any letter / digit / comma)
+            // and let the JIT keep `i` and `s[i]` in registers across the
+            // whole run with no jump-table dispatch.
+            //
+            // Everything inside the original switch's WS-case block did the
+            // same thing — `break` then `i++` — so peeling it out of the
+            // switch is observationally equivalent. Comma handling and the
+            // non-WS exit logic remain in the post-loop body below.
+            while (i < end)
+            {
+                char ch = s[i];
+                if (ch != ' ' && ch != '\t' && ch != '\n' && ch != '\r')
+                {
+                    break;
+                }
+                i++;
+            }
+
             bool commaMet = false;
 
             while (i < end)
             {
                 char ch = s[i];
 
-                switch (ch)
+                if (ch == ',')
                 {
-                case ' ' :
-                case '\n':
-                case '\r':
-                case '\t': // SVG whitespace
-                    break;
-
-                case ',':
                     if (allowComma)
                     {
                         commaMet   = true;
@@ -322,25 +341,42 @@ namespace MS.Internal.Markup
                         _curIndex = i;
                         ThrowBadToken();
                     }
-                    break;
+                    i++;
 
-                default:
-                    // Avoid calling IsWhiteSpace for ch in (' ' .. 'z']
-                    if (((ch >' ') && (ch <= 'z')) || ! Char.IsWhiteSpace(ch))
+                    // Re-enter the plain-ASCII-WS pre-loop after the comma:
+                    // SVG/XAML often writes "x,y" but also "x, y" and even
+                    // "x ,y" patterns, and ReadNumber callers pass
+                    // allowComma=true explicitly when they want this. Skip
+                    // any plain WS that follows the comma so the next iter
+                    // either lands on the next number's first char (default
+                    // branch below returns) or on end-of-string.
+                    while (i < end)
                     {
-                        _curIndex = i;
-                        // Stash the non-WS char into _token so callers
-                        // (ReadToken, IsNumber, ReadBool) can skip a redundant
-                        // _pathString[_curIndex] reload + bounds-check after
-                        // SkipWhiteSpace returns. _token retains its prior value
-                        // when SkipWhiteSpace exits at end-of-string (default
-                        // case did not fire); callers must check More() first.
-                        _token = ch;
-                        return commaMet;
+                        char ch2 = s[i];
+                        if (ch2 != ' ' && ch2 != '\t' && ch2 != '\n' && ch2 != '\r')
+                        {
+                            break;
+                        }
+                        i++;
                     }
-                    break;
+                    continue;
                 }
 
+                // Avoid calling IsWhiteSpace for ch in (' ' .. 'z']
+                if (((ch >' ') && (ch <= 'z')) || ! Char.IsWhiteSpace(ch))
+                {
+                    _curIndex = i;
+                    // Stash the non-WS char into _token so callers
+                    // (ReadToken, IsNumber, ReadBool) can skip a redundant
+                    // _pathString[_curIndex] reload + bounds-check after
+                    // SkipWhiteSpace returns. _token retains its prior value
+                    // when SkipWhiteSpace exits at end-of-string (default
+                    // case did not fire); callers must check More() first.
+                    _token = ch;
+                    return commaMet;
+                }
+
+                // Exotic Unicode whitespace (rare): advance and continue scanning.
                 i++;
             }
 
