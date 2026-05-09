@@ -79,30 +79,36 @@ namespace MS.Internal
         /// </remarks>
         public static CulturePreservingExecutionContext Capture()
         {
-            // ExecutionContext.Capture() already returns null when flow is
-            // suppressed (ec.m_isFlowSuppressed is checked inside Capture and
-            // collapses to a null return). The explicit IsFlowSuppressed
-            // precheck here was a redundant second TLS-backed call — dropped.
-            // The single Capture() call covers both the suppressed path
-            // (returns null -> we return null) and the normal path.
-            var ec = ExecutionContext.Capture();
-            if (ec == null)
+            // ExecutionContext.SuppressFlow had been called - we expect
+            // ExecutionContext.Capture() to return null, so match that
+            // behavior and return null.
+            if (ExecutionContext.IsFlowSuppressed())
             {
                 return null;
             }
 
+            var ec = ExecutionContext.Capture();
+            if (ec == null)
+            {
+                // If ExecutionContext.Capture() returns null for any other
+                // reason besides IsFlowSuppressed, then match that behavior
+                // and return null.
+                return null;
+            }
+
             // Reuse a thread-local pooled instance when available. The pool is
-            // refilled by Run()'s ReturnToPool epilogue, so the dominant
-            // Capture-Run-Capture-Run pattern on the dispatcher thread (and the
-            // bench) hits the pool on every cycle after warm-up, killing the
-            // per-Run heap allocation. Cross-thread Capture (producer thread)
-            // -> Run (dispatcher thread) misses the pool harmlessly because the
+            // refilled by Run()'s finally block, so the dominant Capture-Run-
+            // Capture-Run pattern on the dispatcher thread (and the bench) hits
+            // the pool on every cycle after warm-up, killing the per-Run heap
+            // allocation. Cross-thread Capture (producer thread) -> Run
+            // (dispatcher thread) misses the pool harmlessly because the
             // pool is [ThreadStatic].
             var pooled = s_pooled;
             if (pooled != null)
             {
                 s_pooled = null;
                 pooled._context = ec;
+                pooled._disposed = false;
                 return pooled;
             }
 
@@ -203,27 +209,19 @@ namespace MS.Internal
             ReturnToPool(executionContext);
 }
 
-        // Single-Run-per-CPEC lifecycle: clear the user-callback / state refs
-        // (so the GC can reclaim them) and stash the instance into the
-        // thread-local pool for the next Capture() on this thread. Skipped on
-        // the exception path (the CPEC just GCs in that case).
-        //
-        // Three slots that ReturnToPool used to clear are NOT cleared here:
-        //   - _context: overwritten unconditionally by next Capture() before
-        //     reuse, and we no longer call _context.Dispose() (it is a no-op
-        //     since .NET 5+ — ExecutionContext.Dispose has an empty body, so
-        //     the null check + virtual dispatch added overhead with no effect).
-        //   - _culture / _uICulture: overwritten unconditionally by next Run()
-        //     before CallbackWrapper observes them, and CultureInfo.CurrentCulture
-        //     is a shared singleton that does not need to be released for GC.
-        // _callback and _state, in contrast, hold user-supplied delegates and
-        // state objects whose lifetimes should not extend past the dispatch,
-        // so we still null them out.
+        // Single-Run-per-CPEC lifecycle: dispose the inner EC, clear the captured
+        // state, and stash the (now empty) instance into the thread-local pool so
+        // the next Capture() on this thread can reuse it. Skipped on the
+        // exception path (the CPEC just GCs in that case).
         private static void ReturnToPool(CulturePreservingExecutionContext ctx)
         {
+            ctx._context?.Dispose();
             ctx._context = null;
             ctx._callback = null;
             ctx._state = null;
+            ctx._culture = null;
+            ctx._uICulture = null;
+            ctx._disposed = true;
 
             if (s_pooled == null)
             {
@@ -312,22 +310,24 @@ namespace MS.Internal
         /// <param name="disposing"></param>
         protected virtual void Dispose(bool disposing)
         {
-            // ExecutionContext.Dispose() has been an empty-body no-op since
-            // .NET 5+, so there is nothing to release on the inner context.
-            // The previous double-dispose-guard via the _disposed flag was
-            // therefore guarding nothing observable; both the flag and its
-            // accompanying _context?.Dispose() call have been removed.
+            if (!_disposed && disposing)
+            {
+                _context?.Dispose();
+                _disposed = true;
+            }
         }
 
         /// <summary>
         ///     Releases all resources used by the current instance of the <see cref="CulturePreservingExecutionContext"/>
-        ///     class. Retained on the IDisposable surface for source compatibility
-        ///     with existing call sites; the body is a no-op (see Dispose(bool)).
+        ///     class, which will indirectly release the resources held by the encapsulated <see cref="ExecutionContext"/>
+        ///     instance.
         /// </summary>
         public void Dispose()
         {
             Dispose(true);
         }
+
+        private bool _disposed = false;
 
         #endregion
 
