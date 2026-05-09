@@ -580,30 +580,21 @@ namespace System.Windows.Threading
 
                 try
                 {
-                    // priority is statically Send inside this guard. Mirror LegacyInvokeImpl's
-                    // Send fast path: use the per-Dispatcher cached SyncCtx + cached compat
-                    // bools (captured at ctor time) to skip the per-call BaseCompatibilityPreferences
-                    // Get*() calls AND the per-call DispatcherSynchronizationContext allocation
-                    // under the .NET Core defaults (reuseInstance=false, flowPriority=true).
                     DispatcherSynchronizationContext newSynchronizationContext;
-                    if(_reuseDispatcherSyncCtxInstance)
+                    if(BaseCompatibilityPreferences.GetReuseDispatcherSynchronizationContextInstance())
                     {
                         newSynchronizationContext = _defaultDispatcherSynchronizationContext;
                     }
-                    else if(_flowDispatcherSyncCtxPriority)
-                    {
-                        // .NET Core default: flow Send priority. Reuse the cached Send-priority
-                        // instance (constructed at ctor time with DispatcherPriority.Send) instead
-                        // of allocating a fresh one per call. The cache is per-Dispatcher so
-                        // cross-Dispatcher (cross-thread) instances stay distinct.
-                        newSynchronizationContext = _sendDispatcherSynchronizationContext;
-                    }
                     else
                     {
-                        // Rare opt-out: reuseInstance=false && flow=false. Preserve the original
-                        // per-call Normal-priority alloc so callers that key off reference identity
-                        // in this config continue to see a unique instance.
-                        newSynchronizationContext = new DispatcherSynchronizationContext(this, DispatcherPriority.Normal);
+                        if(BaseCompatibilityPreferences.GetFlowDispatcherSynchronizationContextPriority())
+                        {
+                            newSynchronizationContext = new DispatcherSynchronizationContext(this, priority);
+                        }
+                        else
+                        {
+                            newSynchronizationContext = new DispatcherSynchronizationContext(this, DispatcherPriority.Normal);
+                        }
                     }
                     SynchronizationContext.SetSynchronizationContext(newSynchronizationContext);
 
@@ -731,29 +722,21 @@ namespace System.Windows.Threading
 
                 try
                 {
-                    // priority is statically Send inside this guard. Mirror LegacyInvokeImpl's
-                    // Send fast path (and the Action 4-arg overload above): use the per-Dispatcher
-                    // cached SyncCtx + cached compat bools to skip the per-call
-                    // BaseCompatibilityPreferences Get*() calls AND the per-call
-                    // DispatcherSynchronizationContext allocation under the .NET Core defaults
-                    // (reuseInstance=false, flowPriority=true).
                     DispatcherSynchronizationContext newSynchronizationContext;
-                    if(_reuseDispatcherSyncCtxInstance)
+                    if(BaseCompatibilityPreferences.GetReuseDispatcherSynchronizationContextInstance())
                     {
                         newSynchronizationContext = _defaultDispatcherSynchronizationContext;
                     }
-                    else if(_flowDispatcherSyncCtxPriority)
-                    {
-                        // .NET Core default: flow Send priority. Reuse the cached Send-priority
-                        // instance instead of allocating a fresh one per call.
-                        newSynchronizationContext = _sendDispatcherSynchronizationContext;
-                    }
                     else
                     {
-                        // Rare opt-out: reuseInstance=false && flow=false. Preserve the original
-                        // per-call Normal-priority alloc so callers that key off reference identity
-                        // in this config continue to see a unique instance.
-                        newSynchronizationContext = new DispatcherSynchronizationContext(this, DispatcherPriority.Normal);
+                        if(BaseCompatibilityPreferences.GetFlowDispatcherSynchronizationContextPriority())
+                        {
+                            newSynchronizationContext = new DispatcherSynchronizationContext(this, priority);
+                        }
+                        else
+                        {
+                            newSynchronizationContext = new DispatcherSynchronizationContext(this, DispatcherPriority.Normal);
+                        }
                     }
                     SynchronizationContext.SetSynchronizationContext(newSynchronizationContext);
 
