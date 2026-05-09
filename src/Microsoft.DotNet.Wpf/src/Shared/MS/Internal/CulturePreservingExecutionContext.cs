@@ -189,21 +189,24 @@ namespace MS.Internal
             }
             finally
             {
-                // Restore culture information that may have been modified during the
-                // callback. Skip the property setter when the thread is already at
-                // the target culture: CultureInfo.CurrentCulture's setter ultimately
-                // writes through AsyncLocal<CultureInfo>, which walks the
-                // ExecutionContext's async-local chain even when the value is
-                // unchanged. The dominant Capture-then-Run-on-same-thread case (and
-                // every callback that does not touch culture, which is essentially
-                // all of them) leaves _culture/_uICulture identical to thread state,
-                // so the ref-equals check converts the writes into no-ops.
-                CultureInfo finalCulture = executionContext._culture;
-                CultureInfo finalUICulture = executionContext._uICulture;
-                if (!ReferenceEquals(thread.CurrentCulture, finalCulture))
-                    thread.CurrentCulture = finalCulture;
-                if (!ReferenceEquals(thread.CurrentUICulture, finalUICulture))
-                    thread.CurrentUICulture = finalUICulture;
+                // Skip the entire restore when CallbackWrapper observed no culture
+                // change in the user callback. In that case _culture/_uICulture still
+                // hold the values captured above, EC.Run has already reverted thread
+                // state to those same entry-time values, and the writes would be
+                // no-ops — but we'd still pay 2 Thread.Current(UI)Culture property
+                // reads (each routes through AsyncLocal<CultureInfo>'s async-local
+                // chain) plus the ref-equals comparisons. The flag is set in
+                // CallbackWrapper iff the post-callback recapture wrote a fresh
+                // CultureInfo into _culture / _uICulture.
+                if (executionContext._callbackTouchedCulture)
+                {
+                    CultureInfo finalCulture = executionContext._culture;
+                    CultureInfo finalUICulture = executionContext._uICulture;
+                    if (!ReferenceEquals(thread.CurrentCulture, finalCulture))
+                        thread.CurrentCulture = finalCulture;
+                    if (!ReferenceEquals(thread.CurrentUICulture, finalUICulture))
+                        thread.CurrentUICulture = finalUICulture;
+                }
             }
 
             ReturnToPool(executionContext);
@@ -221,6 +224,7 @@ namespace MS.Internal
             ctx._state = null;
             ctx._culture = null;
             ctx._uICulture = null;
+            ctx._callbackTouchedCulture = false;
             ctx._disposed = true;
 
             if (s_pooled == null)
@@ -280,9 +284,15 @@ namespace MS.Internal
             CultureInfo postCulture = thread.CurrentCulture;
             CultureInfo postUICulture = thread.CurrentUICulture;
             if (!ReferenceEquals(postCulture, savedCulture))
+            {
                 executionContext._culture = postCulture;
+                executionContext._callbackTouchedCulture = true;
+            }
             if (!ReferenceEquals(postUICulture, savedUICulture))
+            {
                 executionContext._uICulture = postUICulture;
+                executionContext._callbackTouchedCulture = true;
+            }
         }
 
         #endregion
@@ -346,6 +356,18 @@ namespace MS.Internal
         // ExecutionContext.Run's own restore.
         private CultureInfo _culture;
         private CultureInfo _uICulture;
+
+        // Set true by CallbackWrapper iff the post-callback recapture observed a
+        // culture change in the user callback and wrote a fresh CultureInfo into
+        // _culture / _uICulture. Run()'s finally block uses this to skip its restore
+        // work in the dominant "callback does not touch culture" path: when false,
+        // _culture / _uICulture still match the values captured at Run() entry, EC.Run
+        // has reverted thread state to those same values, and the restore writes
+        // would be no-ops — but we'd still pay 2 Thread.Current(UI)Culture property
+        // reads (each routed through AsyncLocal<CultureInfo>'s async-local chain) plus
+        // 2 ref-equals comparisons. Reset to false by ReturnToPool so the next
+        // Capture-Run cycle on this pooled instance starts clean.
+        private bool _callbackTouchedCulture;
 
         // static delegate to prevent repeated implicit allocations during Run
         private static ContextCallback CallbackWrapperDelegate;
