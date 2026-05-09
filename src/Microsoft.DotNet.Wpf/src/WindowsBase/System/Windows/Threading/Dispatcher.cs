@@ -2510,23 +2510,6 @@ namespace System.Windows.Threading
 
         internal void PromoteTimers(int currentTimeInTicks)
         {
-            // Fast path: no timer is currently due. _dueTimeFound is only set inside
-            // lock(_instanceLock) (UpdateWin32TimerFromDispatcherThread) and that lock
-            // release publishes the write; Volatile.Read pairs with that to see the
-            // latest value without acquiring the lock here. PromoteTimers runs from
-            // every DispatcherOperation.InvokeImpl, so killing the per-Op uncontended
-            // Monitor.Enter/Exit pair (~20-30 ns) when no timer is pending dominates
-            // the dispatcher fast-path cost on the *DispatcherOperationInvoke*
-            // benchmark and any real workload that doesn't run timers.
-            //
-            // Stale-read safety: if a timer becomes due on another thread between this
-            // read and a sibling op's read, we miss promoting it for ONE op cycle —
-            // identical to the existing race where _dueTimeInTicks - currentTimeInTicks
-            // crosses zero between one Op's PromoteTimers and the next. The Win32
-            // timer mechanism still fires on its own schedule.
-            if (!Volatile.Read(ref _dueTimeFound))
-                return;
-
             try
             {
                 List<DispatcherTimer> timers = null;
