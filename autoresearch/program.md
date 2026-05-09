@@ -1,32 +1,59 @@
 # WPF Performance Autoresearch — Permanent Prompt (Tier B inner loop)
 
-> **Operational note (2026-05-08, ALLOC-AXIS PIVOT):** Tier A multi-scenario
-> profile live (`profile.py --run-multi` over startup + take-open + playback).
-> 30 ranked entries; 10 with `bdn_filter` set + 14 distinct benchmark methods
-> across 5 classes (ExceptionWrapper, CultureContext, HwndWin32,
-> DispatcherInvokeAction, WindowLifecycle) + GeometryParser holdover.
-> AllocationTick attribution is wired (`alloc_pct_total` field per entry; ~100
-> KB sampling noise floor).
+> **Operational note (2026-05-09, OUT-OF-PROCESS TOOLCHAIN + POST-REPROFILE
+> + SATURATION GUARD):** Tier A reprofiled mid-v7 over startup + take-open
+> + playback (commit 65a0ba5d8 = v7 baseline). Current `profile.json` has 5
+> `bdn_filter` classes: `*ExceptionWrapper*`, `*CultureContext*`,
+> `*Dispatcher*`, `*HwndWin32*`, `*WindowLifecycle*` — all sitting on the
+> dispatcher pump, all alloc-axis targets at ~4.41% alloc_pct_total (except
+> HwndWin32 at 0% alloc / 2% CPU). AllocationTick attribution wired;
+> ~100 KB sampling noise floor.
 >
-> **Status after first ambitious-mode run (iters 7–13):** 1 KEEP
-> (`geometry-skipws-hoist-locals`, -29.7%), 5 REJECT-UNCLEAR, 1 REJECT
-> (time regression), 2 BENCH-FAIL on `*WindowLifecycle*`. Root cause for the
-> UNCLEAR cluster identified iter 13: **microbench was only swapping
-> PresentationCore.dll** in the publish dir; WindowsBase / System.Xaml /
-> PresentationFramework stayed as the system runtime pack version, so all
-> edits in `WindowsBase/`, `System.Xaml/`, or `Shared/` (compiled into
-> WindowsBase) measured against unmodified product code. Fixed: stage + swap
-> all three locally-buildable WPF assemblies.
+> **Toolchain (NEW)**: out-of-process `CsProjCoreToolchain` via DOTNET_ROOT
+> shadow. microbench.py builds a composite shadow root at
+> `/c/work/wpf-perf/.dotnet-shadow/` (NTFS junctions to system sdk/host/packs/
+> Microsoft.NETCore.App, physical copy of the WindowsDesktop.App pack), swaps
+> the per-iter local builds into the shadow's pack, and runs BDN with
+> DOTNET_ROOT pointed there. Each benchmark gets its own child process —
+> JIT/GC state no longer leaks across benches. Verified end-to-end: inner
+> child WindowsBase.Location matched our artifact-bin hash exactly. The
+> previous run used InProcessEmitToolchain because PrivateAssets="all" /
+> DisableTransitiveFrameworkReferences / Reference HintPath all failed to
+> stop FrameworkReference Microsoft.WindowsDesktop.App from propagating
+> through BDN's auto-generated inner csproj. Shadow sidesteps that by
+> intercepting at the .NET host level (DOTNET_ROOT) instead of fighting
+> MSBuild's csproj generation.
+>
+> **`*GeometryParser*` IS OFF.** It's no longer in `profile.json` (reprofile
+> dropped it — those workloads aren't representative of the current scenarios).
+> v7 already extracted -59% / 4 KEEPs from it (iters 45/47/49/50, ParseCorpus
+> 345 → ~140 µs); subsequent attempts saturated (3+ consecutive REJECTs on
+> incremental tweaks). DO NOT pick `*GeometryParser*` even though prior commits
+> reference it — it is exhausted for this run. Pick from the 4 active alloc
+> filters listed below.
+>
+> **Active alloc-axis targets (priority order):**
+>   - `*ExceptionWrapper*` — 4.41% alloc, hits `ExceptionWrapper.TryCatchWhen` /
+>     `InternalRealCall` per dispatcher operation. Likely wrapper kill or
+>     delegate-cache opportunity in WindowsBase.
+>   - `*CultureContext*` — 4.41% alloc, hits
+>     `CulturePreservingExecutionContext.CallbackWrapper` and
+>     `DispatcherOperation.Invoke`. Look for per-call CCM allocation that
+>     shouldn't recur when culture is unchanged.
+>   - `*Dispatcher*` — 4.41% alloc, hits `DispatcherOperation.InvokeImpl` and
+>     `Dispatcher.Invoke(Action)`. Possibly state-object boxing or per-op
+>     `DispatcherOperation` heap.
+>   - `*HwndWin32*` — 0% alloc, 2.05% CPU on `HwndSubclass.SubclassWndProc` and
+>     `HwndWrapper.WndProc`. CPU-axis, harder signal but tight inner loop —
+>     pick only if you have a specific micro-opt in mind.
 >
 > **The TIME axis is still noisy** (~1-3 ns/op on STA-batch benchmarks even
-> after B9's OperationsPerInvoke conversion), but most prior REJECT-UNCLEARs
-> were the harness gap masquerading as noise. With all 3 DLLs swapping, alloc
-> deltas now register correctly for `*CultureContext*`, `*ExceptionWrapper*`,
-> `*DispatcherInvokeAction*`, `*HwndWin32*` — go.
+> after OperationsPerInvoke conversion). With all 3 DLLs swapping, alloc deltas
+> register correctly. Prefer alloc-axis bets.
 >
 > **Pivot: prefer ALLOC-axis targets.** BDN reports
 > `BytesAllocatedPerOperation` deterministically (CV ≈ 0). The harness alloc
-> floor is now 16 B/op, so a wrapper-kill (CCM=48B, boxed enum=24B, SyncCtx=32B)
+> floor is 16 B/op, so a wrapper-kill (CCM=48B, boxed enum=24B, SyncCtx=32B)
 > registers as a real KEEP even when the time delta is in the noise. When you
 > pick a target from `profile.json`, **prefer the entry with the highest
 > `alloc_pct_total` whose `bdn_filter` covers benchmarks that show a non-zero
@@ -166,11 +193,18 @@ Rules for sub-agents:
 2. **Pick ONE hot path** from `profile.json`. Rules (in order):
    a. Must have a non-null `bdn_filter` (so it's testable by microbench.py).
    b. Must NOT be `*WindowLifecycle*` (currently BENCH-FAIL — see operational note).
-   c. Must NOT be on the cool list (2 consecutive REJECT-UNCLEAR → 5-iter cooldown).
-   d. Among eligible paths, **prefer the one with the highest
+   c. Must NOT be `*GeometryParser*` (off-profile, exhausted — see operational note).
+   d. Must NOT be on the cool list (2 consecutive REJECT-UNCLEAR → 5-iter cooldown).
+   e. **Saturation skip**: if a filter has 3+ KEEPs total in this run AND its
+      last 3 verdicts are non-KEEP (any mix of REJECT / REJECT-UNCLEAR), treat
+      it as cooled for 5 iters. Compute by greping `results.jsonl`:
+      ```
+      grep '"tier":"B"' results.jsonl | jq -r '"\(.filter)\t\(.verdict)"' | grep '<filter>' | tail -3
+      ```
+   f. Among eligible paths, **prefer the one with the highest
       `alloc_pct_total`** (ALLOC-axis priority — see Goal). Use `cpu_pct_total`
       only as a tiebreaker among entries with similar alloc.
-   e. If ALL non-null `bdn_filter` paths are on cooldown, pick the one with the
+   g. If ALL non-null `bdn_filter` paths are on cooldown, pick the one with the
       longest time since its last cooldown trigger (least-recently-rejected). Log
       that you are overriding cooldown and why.
    - If unsure which filters are available, run `dotnet
@@ -274,6 +308,10 @@ Rules for sub-agents:
 - **COOLDOWN RULE.** If a filter had 2 consecutive REJECT-UNCLEAR within the last
   5 tier-B iterations, skip it. Build the cool list in Step 1; picking a cooled
   filter wastes an iteration with near-zero information gain.
+- **SATURATION RULE.** If a filter has produced 3+ KEEPs in this run AND its
+  last 3 verdicts are non-KEEP (any flavor), skip it for 5 iters. This catches
+  benchmarks the run has already mined out — alternating REJECT/REJECT-UNCLEAR
+  on a saturated target evades the cooldown rule but still wastes iters.
 - **HALT SENTINEL.** If `/c/work/wpf-perf/autoresearch/HALT` exists, stop
   immediately (see Step 0). Never delete or modify the HALT file — that is the
   orchestrator's job.

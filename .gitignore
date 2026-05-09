@@ -363,3 +363,14 @@ __pycache__/
 
 # Autoresearch per-run state (not source)
 autoresearch/cooldown.json
+autoresearch/HALT
+
+# DOTNET_ROOT shadow for out-of-process BDN — composite junctions + a
+# physical copy of Microsoft.WindowsDesktop.App pack. Constructed on first
+# microbench.py run; ~95 MB on disk, regenerable from the system .NET install.
+.dotnet-shadow/
+
+# Validation/experimental sandboxes used while bringing up the shadow
+# toolchain. Not part of the autoresearch pipeline.
+microbench-exp/
+shadow-test/

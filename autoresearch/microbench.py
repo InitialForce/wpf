@@ -82,6 +82,19 @@ MICROBENCH_PUBLISH = MICROBENCH_PROJ / "bin" / "Release" / "net10.0-windows" / "
 MICROBENCH_EXE = MICROBENCH_PUBLISH / "Microbenchmarks.exe"
 MICROBENCH_RESULTS = MICROBENCH_PUBLISH / "BenchmarkDotNet.Artifacts" / "results"
 
+# DOTNET_ROOT shadow for out-of-process BDN. See AutoresearchConfig.cs comment
+# for the full diagnosis. The shadow is a composite directory containing
+# junctions back to the system .NET installation for sdk/host/packs/Microsoft.
+# NETCore.App, plus a physical deep copy of the Microsoft.WindowsDesktop.App
+# pack (so the per-iter DLL swap can overwrite WindowsBase / System.Xaml /
+# PresentationCore without affecting other .NET apps on the box). BDN's inner
+# build child processes resolve framework assemblies via DOTNET_ROOT, so they
+# load our patched DLLs from the shadow's WindowsDesktop.App pack.
+DOTNET_SHADOW = WPF_REPO / ".dotnet-shadow"
+DOTNET_SHADOW_WIN = "C:\\work\\wpf-perf\\.dotnet-shadow"
+DOTNET_SYS = Path("/c/Program Files/dotnet")
+DOTNET_SYS_WIN = "C:\\Program Files\\dotnet"
+
 STAGING = ROOT / "microbench-staging"
 RESULTS_TSV = ROOT / "results.tsv"
 RESULTS_JSONL = ROOT / "results.jsonl"
@@ -216,6 +229,153 @@ def build_assemblies() -> bool:
     return True
 
 
+def detect_wpf_pack_version() -> str | None:
+    """Return the highest installed Microsoft.WindowsDesktop.App version
+    (e.g. '10.0.7'). Picks the one we'll target the shadow at.
+    """
+    pack_root = DOTNET_SYS / "shared" / "Microsoft.WindowsDesktop.App"
+    if not pack_root.exists():
+        return None
+    versions = []
+    for d in pack_root.iterdir():
+        if d.is_dir() and d.name[0].isdigit():
+            try:
+                # Only consider 10.x.y series
+                parts = d.name.split(".")
+                if int(parts[0]) >= 10:
+                    versions.append((tuple(int(p) for p in parts), d.name))
+            except ValueError:
+                continue
+    if not versions:
+        return None
+    versions.sort()
+    return versions[-1][1]
+
+
+def setup_dotnet_shadow() -> bool:
+    """Idempotent — build the shadow root if missing/incomplete.
+
+    Layout:
+      .dotnet-shadow/
+        sdk/                                  → junction to system
+        host/                                 → junction to system
+        packs/                                → junction to system
+        sdk-manifests, templates, swidtag, metadata → junctions to system
+        shared/Microsoft.NETCore.App/         → junction to system
+        shared/Microsoft.WindowsDesktop.App/<ver>/   ← physical copy (mutable)
+        dotnet.exe, dnx.cmd                   → physical copies
+
+    The pack version is determined dynamically from what the system has
+    installed (highest 10.x.y). We re-create the shadow if the version
+    drifted (e.g. .NET update) or if structural files are missing.
+    """
+    pack_ver = detect_wpf_pack_version()
+    if pack_ver is None:
+        log("FATAL: could not detect installed Microsoft.WindowsDesktop.App version")
+        return False
+
+    pack_dir = DOTNET_SHADOW / "shared" / "Microsoft.WindowsDesktop.App" / pack_ver
+    sentinel = DOTNET_SHADOW / ".shadow-version"
+    expected_sentinel = pack_ver
+
+    # Fast path: sentinel matches → shadow is good as-is. Per-iter swap will
+    # overwrite WindowsBase/System.Xaml/PresentationCore so the previous run's
+    # patched DLLs do not leak into this run's measurement. (Both sides of the
+    # A/B in this iter explicitly stage + swap their own builds, so any prior
+    # contents are clobbered before measurement.)
+    if (sentinel.exists() and sentinel.read_text().strip() == expected_sentinel
+            and pack_dir.is_dir()
+            and (pack_dir / "WindowsBase.dll").exists()
+            and (DOTNET_SHADOW / "dotnet.exe").exists()):
+        return True
+
+    log(f"setting up DOTNET_ROOT shadow at {DOTNET_SHADOW} (pack={pack_ver}) …")
+    DOTNET_SHADOW.mkdir(exist_ok=True, parents=True)
+    (DOTNET_SHADOW / "shared").mkdir(exist_ok=True)
+
+    # Junctions for the unchanged subtrees. cmd.exe mklink /J is the only way
+    # to create directory junctions from this WSL setup (os.symlink would
+    # require SeCreateSymbolicLinkPrivilege; junctions don't).
+    junction_targets = [
+        ("sdk", "sdk"),
+        ("host", "host"),
+        ("packs", "packs"),
+        ("sdk-manifests", "sdk-manifests"),
+        ("templates", "templates"),
+        ("swidtag", "swidtag"),
+        ("metadata", "metadata"),
+        ("shared\\Microsoft.NETCore.App", "shared\\Microsoft.NETCore.App"),
+    ]
+    for sub, target in junction_targets:
+        src_path = DOTNET_SHADOW / sub.replace("\\", "/")
+        if src_path.is_symlink() or src_path.exists():
+            # Already there. Don't try to recreate (mklink fails on existing).
+            continue
+        # Ensure parent exists
+        src_path.parent.mkdir(exist_ok=True, parents=True)
+        rc, out = cmd(
+            ["cmd.exe", "/c", "mklink", "/J",
+             f"{DOTNET_SHADOW_WIN}\\{sub}",
+             f"{DOTNET_SYS_WIN}\\{target}"],
+            timeout=30,
+        )
+        if rc != 0:
+            log(f"  mklink /J failed for {sub}: {out.strip()}")
+            return False
+
+    # Physical copy of the WindowsDesktop.App pack — strip read-only attrs so
+    # per-iter swap can overwrite.
+    sys_pack = DOTNET_SYS / "shared" / "Microsoft.WindowsDesktop.App" / pack_ver
+    if not sys_pack.is_dir():
+        log(f"FATAL: system pack {sys_pack} not found")
+        return False
+    pack_dir.mkdir(exist_ok=True, parents=True)
+    for f in sys_pack.iterdir():
+        if f.is_file():
+            dst = pack_dir / f.name
+            shutil.copy2(f, dst)
+            try:
+                dst.chmod(0o644)
+            except Exception:
+                pass
+
+    # Physical copy of dotnet.exe + auxiliary files at the shadow root.
+    for name in ("dotnet.exe", "dnx.cmd", "LICENSE.txt", "ThirdPartyNotices.txt"):
+        src = DOTNET_SYS / name
+        if src.exists():
+            shutil.copy2(src, DOTNET_SHADOW / name)
+
+    sentinel.write_text(expected_sentinel)
+    log(f"  shadow ready at {DOTNET_SHADOW}")
+    return True
+
+
+def shadow_pack_dir() -> Path | None:
+    """Return the shadow's Microsoft.WindowsDesktop.App/<ver>/ dir."""
+    ver = detect_wpf_pack_version()
+    if ver is None:
+        return None
+    return DOTNET_SHADOW / "shared" / "Microsoft.WindowsDesktop.App" / ver
+
+
+def bdn_env() -> dict:
+    """Environment dict for BDN out-of-process runs.
+
+    DOTNET_ROOT / DOTNET_ROOT_X64 point hostfxr at the shadow.
+    DOTNET_MULTILEVEL_LOOKUP=0 prevents fallback to system C:\\Program Files\\dotnet.
+    DOTNET_ReadyToRun=0 disables ReadyToRun so the host doesn't reject our
+      pure-IL local builds for not matching the system pack's R2R metadata.
+    PATH prepend ensures any indirect `dotnet` invocations also use the shadow.
+    """
+    env = os.environ.copy()
+    env["DOTNET_ROOT"] = DOTNET_SHADOW_WIN
+    env["DOTNET_ROOT_X64"] = DOTNET_SHADOW_WIN
+    env["DOTNET_MULTILEVEL_LOOKUP"] = "0"
+    env["DOTNET_ReadyToRun"] = "0"
+    env["PATH"] = DOTNET_SHADOW_WIN + os.pathsep + env.get("PATH", "")
+    return env
+
+
 def stage_assemblies(side: str) -> dict[str, Path] | None:
     """Copy each just-built <Name>.dll into a side-specific staging path.
 
@@ -252,20 +412,35 @@ def publish_microbench() -> bool:
 
 
 def swap_assemblies_into_publish(staged: dict[str, Path]) -> bool:
-    """Overwrite each <Name>.dll in MICROBENCH_PUBLISH with the staged copy.
+    """Overwrite each <Name>.dll in BOTH the publish dir and the shadow pack.
 
-    Every assembly in `staged` must have a matching target in the publish dir
-    (i.e. the publish step must have produced a copy of every WPF assembly we
-    want to differential-test). A missing target is fatal — silently skipping
-    would leave the system runtime pack version in place and re-create the
-    very harness gap this function exists to close.
+    The publish-dir swap keeps the OUTER Microbenchmarks.exe consistent with
+    our build (it loads its WPF DLLs from the publish dir because the outer
+    project is published self-contained). The shadow swap is the one that
+    actually matters — BDN's inner child processes load from there via
+    DOTNET_ROOT (see setup_dotnet_shadow / bdn_env).
+
+    A missing publish-dir target is fatal — silently skipping would leave the
+    system runtime pack version in place. The shadow target must exist (it
+    was copied during setup_dotnet_shadow); a missing shadow target indicates
+    the shadow is broken and is also fatal.
     """
+    pack_dir = shadow_pack_dir()
+    if pack_dir is None or not pack_dir.is_dir():
+        log("  shadow pack dir missing — setup_dotnet_shadow not called?")
+        return False
+
     for name, src in staged.items():
-        target = MICROBENCH_PUBLISH / f"{name}.dll"
-        if not target.exists():
-            log(f"  target {target} missing — publish did not produce expected layout")
+        publish_target = MICROBENCH_PUBLISH / f"{name}.dll"
+        shadow_target = pack_dir / f"{name}.dll"
+        if not publish_target.exists():
+            log(f"  publish target {publish_target} missing — publish did not produce expected layout")
             return False
-        shutil.copy2(src, target)
+        if not shadow_target.exists():
+            log(f"  shadow target {shadow_target} missing — broken shadow setup")
+            return False
+        shutil.copy2(src, publish_target)
+        shutil.copy2(src, shadow_target)
     return True
 
 
@@ -275,12 +450,13 @@ def clear_bdn_artifacts() -> None:
 
 
 def run_bdn(filter_pattern: str) -> tuple[int, str]:
-    log(f"  running BDN with --filter '{filter_pattern}' …")
+    log(f"  running BDN with --filter '{filter_pattern}' (DOTNET_ROOT shadow) …")
     return cmd(
         ["cmd.exe", "/c", to_winpath(MICROBENCH_EXE),
          "--filter", filter_pattern,
          "--exporters", "json"],
         cwd=MICROBENCH_PUBLISH, timeout=BENCH_TIMEOUT_S,
+        env=bdn_env(),
     )
 
 
@@ -548,6 +724,10 @@ def main() -> int:
     if not working_tree_clean():
         log("FATAL: working tree not clean. Commit your change before running microbench.")
         return 5
+
+    if not setup_dotnet_shadow():
+        log("FATAL: failed to set up DOTNET_ROOT shadow. Out-of-process BDN cannot run.")
+        return 4
 
     head_sha = git_sha("HEAD")
     base_sha = git_sha("HEAD~1")
