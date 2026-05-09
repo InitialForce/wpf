@@ -155,9 +155,11 @@ namespace System.Windows.Media
 
             unsafe
             {
-                Point* scratchForLine = stackalloc Point[1];
-                scratchForLine[0] = point;
-                GenericPolyTo(scratchForLine,
+                // Pass the address of the by-value parameter directly. Locals/parameters
+                // of unmanaged value-type live on the stack (not GC-movable), so &point
+                // is valid without `fixed`. Skips the 1-element stackalloc + assignment
+                // the prior implementation used to adapt to GenericPolyTo's Point*.
+                GenericPolyTo(&point,
                               count: 1,
                               isStroked,
                               isSmoothJoin,
@@ -527,37 +529,82 @@ namespace System.Windows.Media
         {
             Invariant.Assert(cbDataSize >= 0);
 
-            // Skip past irrelevant chunks
+            // Skip past irrelevant chunks. On the AppendData hot path this is a no-op
+            // (currentChunk is the last chunk and bufferOffset == _currChunkOffset which
+            // is maintained inside chunk bounds). Required for OverwriteData / ReadData
+            // call shapes that start from currentChunk=0 and may target a later chunk.
             while (bufferOffset > _chunkList[currentChunk].Length)
             {
                 bufferOffset -= _chunkList[currentChunk].Length;
                 currentChunk++;
             }
 
-            // Arithmetic should be checked by the caller (AppendData or OverwriteData)
+            // Fast path: the entire copy fits within the current chunk. This is the
+            // dominant case for AppendData of small fixed-size structures (Point=16,
+            // MIL_SEGMENT_POLY=24, MIL_PATHFIGURE=40, MIL_SEGMENT_ARC=48 bytes) during
+            // geometry stream construction — typical chunks are ~1 KB+, so a 16-byte
+            // Point write almost never crosses a chunk boundary. Hitting this path
+            // skips the cross-chunk while-loop entry, the inner cbDataForThisChunk>0
+            // branch, the Math.Min, the post-iteration cbDataSize>0 + currentChunk++
+            // + Add-new-chunk handling, and 2 of 3 FrugalStructList indexer accesses.
+            //
+            // `fixed` + Buffer.MemoryCopy lowers to a JIT-recognized memcpy intrinsic
+            // (no per-call array-pinning P/Invoke transition like Marshal.Copy).
+            {
+                byte[] chunk = _chunkList[currentChunk];
+                if ((uint)cbDataSize <= (uint)(chunk.Length - bufferOffset))
+                {
+                    if (cbDataSize > 0)
+                    {
+                        Invariant.Assert(chunk != null);
+                        Invariant.Assert(chunk.Length > 0);
+
+                        fixed (byte* pbChunk = chunk)
+                        {
+                            if (reading)
+                            {
+                                Buffer.MemoryCopy(pbChunk + bufferOffset, pbData, cbDataSize, cbDataSize);
+                            }
+                            else
+                            {
+                                Buffer.MemoryCopy(pbData, pbChunk + bufferOffset, cbDataSize, cbDataSize);
+                            }
+                        }
+                        bufferOffset += cbDataSize;
+                    }
+                    return;
+                }
+            }
+
+            // Slow path: copy spans multiple chunks. Used for chunk-crossing writes
+            // and chunk grow/allocate. Arithmetic should be checked by the caller
+            // (AppendData or OverwriteData).
 
             while (cbDataSize > 0)
             {
-                int cbDataForThisChunk = Math.Min(cbDataSize,
-                    _chunkList[currentChunk].Length - bufferOffset);
+                byte[] chunk = _chunkList[currentChunk];
+                int cbDataForThisChunk = Math.Min(cbDataSize, chunk.Length - bufferOffset);
 
                 if (cbDataForThisChunk > 0)
                 {
                     // At this point, _buffer must be non-null and
                     // _buffer.Length must be >= newOffset
-                    Invariant.Assert((_chunkList[currentChunk] != null) 
-                        && (_chunkList[currentChunk].Length >= bufferOffset + cbDataForThisChunk));
+                    Invariant.Assert((chunk != null)
+                        && (chunk.Length >= bufferOffset + cbDataForThisChunk));
 
                     // Also, because pinning a 0-length buffer fails, we assert this too.
-                    Invariant.Assert(_chunkList[currentChunk].Length > 0);
+                    Invariant.Assert(chunk.Length > 0);
 
-                    if (reading)
+                    fixed (byte* pbChunk = chunk)
                     {
-                        Marshal.Copy(_chunkList[currentChunk], bufferOffset, (IntPtr)pbData, cbDataForThisChunk);
-                    }
-                    else
-                    {
-                        Marshal.Copy((IntPtr)pbData, _chunkList[currentChunk], bufferOffset, cbDataForThisChunk);
+                        if (reading)
+                        {
+                            Buffer.MemoryCopy(pbChunk + bufferOffset, pbData, cbDataForThisChunk, cbDataForThisChunk);
+                        }
+                        else
+                        {
+                            Buffer.MemoryCopy(pbData, pbChunk + bufferOffset, cbDataForThisChunk, cbDataForThisChunk);
+                        }
                     }
 
                     cbDataSize -= cbDataForThisChunk;
