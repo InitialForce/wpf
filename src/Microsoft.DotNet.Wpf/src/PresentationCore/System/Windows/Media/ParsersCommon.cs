@@ -709,21 +709,46 @@ namespace MS.Internal.Markup
                 case 'v': case 'V':
                     EnsureFigure();
 
-                    do
+                    // Hoist the inner switch on `cmd` (loop-invariant) out of the do/while
+                    // so the dominant 'L' (absolute lineto) case takes a single specialized
+                    // path with no per-iteration dispatch and no relative-add branch in
+                    // ReadPoint. The original combined switch loaded `cmd`, jumped through
+                    // a 6-case table, and re-did `cmd >= 'a'` inside ReadPoint on every
+                    // iteration even though all of those tests resolve identically across
+                    // the entire repetition. The slow else-branch preserves the original
+                    // switch verbatim for 'l'/'h'/'H'/'v'/'V'.
+                    if (cmd == 'L')
                     {
-                        switch (cmd)
+                        do
                         {
-                        case 'l': _lastPoint    = ReadPoint(cmd, ! AllowComma); break;
-                        case 'L': _lastPoint    = ReadPoint(cmd, ! AllowComma); break;
-                        case 'h': _lastPoint.X += ReadNumber(! AllowComma); break;
-                        case 'H': _lastPoint.X  = ReadNumber(! AllowComma); break; 
-                        case 'v': _lastPoint.Y += ReadNumber(! AllowComma); break;
-                        case 'V': _lastPoint.Y  = ReadNumber(! AllowComma); break;
-                        }
+                            // Inlined ReadPoint for absolute (uppercase) cmd — skips the
+                            // `cmd >= 'a'` test + relative add and the Point ctor's struct
+                            // copy seam by writing _lastPoint via two doubles + one ctor.
+                            double x = ReadNumber(! AllowComma);
+                            double y = ReadNumber(AllowComma);
+                            _lastPoint = new Point(x, y);
 
-                        context.LineTo(_lastPoint, IsStroked, ! IsSmoothJoin); 
+                            context.LineTo(_lastPoint, IsStroked, ! IsSmoothJoin);
+                        }
+                        while (IsNumber(AllowComma));
                     }
-                    while (IsNumber(AllowComma));
+                    else
+                    {
+                        do
+                        {
+                            switch (cmd)
+                            {
+                            case 'l': _lastPoint    = ReadPoint(cmd, ! AllowComma); break;
+                            case 'h': _lastPoint.X += ReadNumber(! AllowComma); break;
+                            case 'H': _lastPoint.X  = ReadNumber(! AllowComma); break;
+                            case 'v': _lastPoint.Y += ReadNumber(! AllowComma); break;
+                            case 'V': _lastPoint.Y  = ReadNumber(! AllowComma); break;
+                            }
+
+                            context.LineTo(_lastPoint, IsStroked, ! IsSmoothJoin);
+                        }
+                        while (IsNumber(AllowComma));
+                    }
 
                     last_cmd = 'L';
                     break;
@@ -731,39 +756,74 @@ namespace MS.Internal.Markup
                 case 'c': case 'C': // cubic Bezier
                 case 's': case 'S': // smooth cublic Bezier
                     EnsureFigure();
-                    
-                    do
+
+                    // Hoist the inner `(cmd == 's') || (cmd == 'S')` test (loop-invariant)
+                    // out of the do/while. The dominant 'C' case (absolute cubic Bezier)
+                    // takes a specialized straight-line path with three inlined ReadPoint
+                    // calls that skip the relative-add branch. Slow else-branch preserves
+                    // the original logic for 'c'/'s'/'S' (relative + smooth-cubic reflect).
+                    if (cmd == 'C')
                     {
-                        Point p;
-                        
-                        if ((cmd == 's') || (cmd == 'S'))
+                        do
                         {
-                            if (last_cmd == 'C')
+                            double x1 = ReadNumber(! AllowComma);
+                            double y1 = ReadNumber(AllowComma);
+                            Point p = new Point(x1, y1);
+
+                            double x2 = ReadNumber(AllowComma);
+                            double y2 = ReadNumber(AllowComma);
+                            _secondLastPoint = new Point(x2, y2);
+
+                            double x3 = ReadNumber(AllowComma);
+                            double y3 = ReadNumber(AllowComma);
+                            _lastPoint = new Point(x3, y3);
+
+                            context.BezierTo(p, _secondLastPoint, _lastPoint, IsStroked, ! IsSmoothJoin);
+                        }
+                        while (IsNumber(AllowComma));
+                    }
+                    else
+                    {
+                        do
+                        {
+                            Point p;
+
+                            if ((cmd == 's') || (cmd == 'S'))
                             {
-                                p = Reflect();
+                                if (last_cmd == 'C')
+                                {
+                                    p = Reflect();
+                                }
+                                else
+                                {
+                                    p = _lastPoint;
+                                }
+
+                                _secondLastPoint = ReadPoint(cmd, ! AllowComma);
                             }
                             else
                             {
-                                p = _lastPoint;
+                                p = ReadPoint(cmd, ! AllowComma);
+
+                                _secondLastPoint = ReadPoint(cmd, AllowComma);
                             }
 
-                            _secondLastPoint = ReadPoint(cmd, ! AllowComma);
-                        }
-                        else
-                        {
-                            p = ReadPoint(cmd, ! AllowComma);
+                            _lastPoint = ReadPoint(cmd, AllowComma);
 
-                            _secondLastPoint = ReadPoint(cmd, AllowComma);
-                        }
-                            
-                        _lastPoint = ReadPoint(cmd, AllowComma);
+                            context.BezierTo(p, _secondLastPoint, _lastPoint, IsStroked, ! IsSmoothJoin);
 
-                        context.BezierTo(p, _secondLastPoint, _lastPoint, IsStroked, ! IsSmoothJoin);
-                        
-                        last_cmd = 'C';
+                            // last_cmd must be set inside this loop: an 's'/'S' repetition
+                            // reads last_cmd on iter 2+ to decide between Reflect() (iter 1's
+                            // control point becomes the new control point) and _lastPoint
+                            // (no reflection). Hoisting this assignment out of the loop would
+                            // make iter 2 read the pre-loop last_cmd value and break smooth-
+                            // cubic reflection chaining for s/S sequences.
+                            last_cmd = 'C';
+                        }
+                        while (IsNumber(AllowComma));
                     }
-                    while (IsNumber(AllowComma));
-                    
+
+                    last_cmd = 'C';
                     break;
                     
                 case 'q': case 'Q': // quadratic Bezier
