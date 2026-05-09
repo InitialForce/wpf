@@ -69,6 +69,37 @@ namespace System.Windows.Threading
         /// </remarks>
         public static Dispatcher FromThread(Thread thread)
         {
+            // Per-thread fast path: when asked for the current thread's own dispatcher
+            // (the dominant case — every Win32 message on the UI thread hits
+            // FromThread(Thread.CurrentThread) via HwndSubclass.SubclassWndProc, and
+            // CurrentDispatcher / VerifyAccess-adjacent code does the same), the answer
+            // already lives in the [ThreadStatic] _tlsDispatcher slot, so we can return
+            // it without taking _globalLock or scanning the _dispatchers WeakReferenceList.
+            //
+            // Correctness:
+            //   * _tlsDispatcher is set in the instance ctor (line ~1731) on the owning
+            //     thread, and the field is [ThreadStatic], so on any non-owning thread it
+            //     is null and we fall through to the locked path.
+            //   * On the owning thread it points at the most recently created dispatcher
+            //     for that thread; requests for that same thread match and return it.
+            //     Requests for any *other* thread (or for any other dispatcher on the same
+            //     thread, in the rare multi-dispatcher-per-thread case) miss the
+            //     _dispatcherThread compare and fall through to the locked scan, which
+            //     finds them in _dispatchers exactly as before.
+            //   * The sentinel ctor (Dispatcher(bool isSentinel)) deliberately does not
+            //     write _tlsDispatcher, so sentinels are never returned by this fast path.
+            //   * After shutdown, _tlsDispatcher still points at the dispatcher; the
+            //     locked path also returns shut-down dispatchers and lets callers gate
+            //     on HasShutdownFinished, so behavior is unchanged.
+            if (thread != null)
+            {
+                Dispatcher tls = _tlsDispatcher;
+                if (tls != null && tls._dispatcherThread == thread)
+                {
+                    return tls;
+                }
+            }
+
             lock(_globalLock)
             {
                 Dispatcher dispatcher = null;
