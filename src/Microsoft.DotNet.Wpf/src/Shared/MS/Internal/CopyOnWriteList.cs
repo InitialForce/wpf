@@ -5,7 +5,6 @@
 
 using System.Collections.ObjectModel;
 using System.Runtime.CompilerServices;
-using System.Threading;
 
 namespace MS.Internal;
 
@@ -60,37 +59,17 @@ internal abstract class CopyOnWriteList<T> where T : class
     {
         get
         {
-            // Lock-free fast path: once the readonly wrapper has been published it
-            // wraps a List<T> instance that is now isolated from further mutation —
-            // DoCopyOnWriteCheck reassigns _liveList to a fresh copy before mutating,
-            // so the wrapper a racing reader is holding always views a stable
-            // snapshot. Mutators clear _readonlyWrapper to null under _syncRoot, so
-            // a reader that observes null falls back to the locked slow path which
-            // re-publishes a wrapper for the new _liveList. Volatile.Read pairs with
-            // the writer's lock-release barrier so weakly-ordered architectures
-            // observe the null clear in program order.
-            ReadOnlyCollection<T>? fast = Volatile.Read(ref _readonlyWrapper);
-            if (fast is not null)
+            ReadOnlyCollection<T> tempList;
+
+            lock (_syncRoot)
             {
-                return fast;
+                _readonlyWrapper ??= _liveList.AsReadOnly();
+
+                tempList = _readonlyWrapper;
             }
-            return ListSlow();
+
+            return tempList;
         }
-    }
-
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private ReadOnlyCollection<T> ListSlow()
-    {
-        ReadOnlyCollection<T> tempList;
-
-        lock (_syncRoot)
-        {
-            _readonlyWrapper ??= _liveList.AsReadOnly();
-
-            tempList = _readonlyWrapper;
-        }
-
-        return tempList;
     }
 
     /// <summary>
