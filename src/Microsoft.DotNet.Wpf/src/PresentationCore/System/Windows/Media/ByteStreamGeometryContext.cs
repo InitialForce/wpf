@@ -6,6 +6,7 @@
 
 using MS.Utility;
 using MS.Internal;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Windows.Media.Composition;
 
@@ -45,6 +46,7 @@ namespace System.Windows.Media
             // before pooling, so the typical post-Dispose state already has
             // a cleared SingleItemList; the call here is defensive.)
             _chunkList.Clear();
+            _currentChunk = null;
             _currOffset = 0;
             _currentPathGeometryData = default;
             _currentPathFigureData = default;
@@ -97,6 +99,11 @@ namespace System.Windows.Media
         protected void DetachChunkListForPool()
         {
             _chunkList.Clear();
+            // Drop the cached chunk reference so AppendData on the next pool cycle
+            // takes the lazy-init slow path until ResetForReuse + the first append
+            // re-populate it. Skipping this would pin the just-handed-off geometry
+            // byte[] alive through the pooled context.
+            _currentChunk = null;
         }
 
         #endregion Constructors
@@ -451,11 +458,54 @@ namespace System.Windows.Media
         ///   byte* pointing to at least cbDataSize bytes which will be copied to the stream.
         /// </param>
         /// <param name="cbDataSize"> int - the size, in bytes, of pbData. Must be >= 0. </param>
+        ///
+        /// Hot path: every BeginFigure / LineTo / BezierTo / ArcTo / segment-header /
+        /// figure-header write funnels through here. For the GeometryParser microbench
+        /// corpus (100 paths × ~20 segments × ~3 small AppendData per segment), AppendData
+        /// is called ~6,000+ times per benchmark op. The inline fast path below skips
+        /// the call into ReadWriteData entirely (including its ref-arg passing and its own
+        /// fits-in-chunk gate) and replaces the FrugalStructList&lt;byte[]&gt; indexer access
+        /// (`_listStore != null` + bounds + virtual `EntryAt`) with a single field load on
+        /// the cached `_currentChunk` reference.
         private unsafe void AppendData(byte* pbData,
                                       int cbDataSize)
         {
             Invariant.Assert(cbDataSize >= 0);
 
+            // Fast path: write fits in the current (last) chunk. Cached byte[] reference
+            // saves the FrugalStructList indexer + the cross-chunk `bufferOffset > Length`
+            // walk loop at the top of ReadWriteData (always 0 iterations on the AppendData
+            // shape, where currentChunk is already the last chunk). The unsigned compare
+            // folds the `cbDataSize >= 0` (asserted above) and `chunk.Length - off >= 0`
+            // domain into a single branch.
+            byte[] chunk = _currentChunk;
+            if (chunk != null)
+            {
+                int off = _currChunkOffset;
+                if ((uint)cbDataSize <= (uint)(chunk.Length - off))
+                {
+                    if (cbDataSize > 0)
+                    {
+                        fixed (byte* pbChunk = chunk)
+                        {
+                            Buffer.MemoryCopy(pbData, pbChunk + off, cbDataSize, cbDataSize);
+                        }
+                        _currChunkOffset = off + cbDataSize;
+                        _currOffset += cbDataSize;
+                    }
+                    return;
+                }
+            }
+
+            // Slow path: lazy first-chunk acquire (Count==0), or cbDataSize spills past the
+            // current chunk into a new one. Forwarded to a non-inlined helper so the JIT
+            // keeps AppendData itself small enough to inline at every call site.
+            AppendDataSlow(pbData, cbDataSize);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private unsafe void AppendDataSlow(byte* pbData, int cbDataSize)
+        {
             int newOffset;
 
             checked
@@ -467,9 +517,16 @@ namespace System.Windows.Media
             {
                 byte[] chunk = ByteStreamGeometryContext.AcquireChunkFromPool();
                 _chunkList.Add(chunk);
+                _currentChunk = chunk;
             }
 
-            ReadWriteData(reading: false, pbData, cbDataSize, _chunkList.Count-1, ref _currChunkOffset);
+            ReadWriteData(reading: false, pbData, cbDataSize, _chunkList.Count - 1, ref _currChunkOffset);
+
+            // ReadWriteData may have appended one or more new chunks during the grow path.
+            // Refresh the cache so subsequent AppendData fast-path comparisons read the
+            // new (last) chunk's length. Single field write; no extra indexer cost in the
+            // common "no grow happened" case where _chunkList[Count-1] is unchanged.
+            _currentChunk = _chunkList[_chunkList.Count - 1];
 
             _currOffset = newOffset;
         }
@@ -508,6 +565,13 @@ namespace System.Windows.Media
                     _chunkList = new FrugalStructList<byte[]>();
                     _chunkList.Add(buffer);
                 }
+                // Refresh the AppendData fast-path cache so it reflects the post-shrink
+                // byte[] (the original pool chunk has been returned to the pool above).
+                // ShrinkToFit is called from DisposeCore right before the context is
+                // pooled, so no further AppendData should land before DetachChunkListForPool
+                // nulls this out — but keeping the cache consistent across all _chunkList
+                // mutation points is the invariant we maintain.
+                _currentChunk = buffer;
             }
         }
     
@@ -866,6 +930,15 @@ namespace System.Windows.Media
         private bool _disposed;
         private int _currChunkOffset;
         private FrugalStructList<byte []> _chunkList;
+        // Cached reference to _chunkList[_chunkList.Count - 1] for the AppendData
+        // fast path. Kept in sync with _chunkList at every mutation point:
+        //   - ResetForReuse / DetachChunkListForPool: cleared to null (Clear() empties
+        //     _chunkList; the next AppendData takes the lazy-init slow path).
+        //   - AppendDataSlow lazy init + ReadWriteData chunk grow: refreshed to the
+        //     new last chunk after AppendDataSlow's ReadWriteData call returns.
+        //   - ShrinkToFit single-chunk replace + multi-chunk reset: refreshed to the
+        //     final shrunk byte[].
+        private byte[] _currentChunk;
         private int _currOffset;
         private MIL_PATHGEOMETRY _currentPathGeometryData;
         private MIL_PATHFIGURE _currentPathFigureData;
