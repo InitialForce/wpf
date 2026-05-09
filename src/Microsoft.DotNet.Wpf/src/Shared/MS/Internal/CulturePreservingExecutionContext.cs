@@ -79,54 +79,40 @@ namespace MS.Internal
         /// </remarks>
         public static CulturePreservingExecutionContext Capture()
         {
-            // ExecutionContext.Capture() already returns null when flow is suppressed
-            // (it short-circuits internally on Thread._executionContext.m_isFlowSuppressed),
-            // so the prior IsFlowSuppressed pre-check was redundant — every flow-suppressed
-            // capture would fall through to the `ec == null` guard below anyway. Dropping
-            // the pre-check avoids one runtime call per Capture cycle.
-            var ec = ExecutionContext.Capture();
-            if (ec == null)
+            // ExecutionContext.SuppressFlow had been called - we expect
+            // ExecutionContext.Capture() to return null, so match that
+            // behavior and return null.
+            if (ExecutionContext.IsFlowSuppressed())
             {
                 return null;
             }
 
-            // Snapshot the capture-time culture into _culture / _uICulture. Run() reads
-            // these (= the value EC.Run will set thread state to inside ExecutionContext.Run)
-            // and compares against its own entry-time culture reads to decide whether
-            // CallbackWrapper's pre-callback restore is provably a no-op. In the dominant
-            // dispatcher pattern (same thread, no culture change between DispatcherOperation
-            // ctor and DispatcherOperation.Invoke), they're equal and CallbackWrapper can
-            // skip 2 AsyncLocal-routed culture reads + 2 ref-equals every cycle. Run()
-            // overwrites these fields with run-entry culture before invoking EC.Run, so
-            // CallbackWrapper still sees the correct savedCulture/savedUICulture target.
-            Thread thread = Thread.CurrentThread;
-            CultureInfo captureCulture = thread.CurrentCulture;
-            CultureInfo captureUICulture = thread.CurrentUICulture;
+            var ec = ExecutionContext.Capture();
+            if (ec == null)
+            {
+                // If ExecutionContext.Capture() returns null for any other
+                // reason besides IsFlowSuppressed, then match that behavior
+                // and return null.
+                return null;
+            }
 
             // Reuse a thread-local pooled instance when available. The pool is
-            // refilled by Run()'s ReturnToPool epilogue, so the dominant Capture-Run-
+            // refilled by Run()'s finally block, so the dominant Capture-Run-
             // Capture-Run pattern on the dispatcher thread (and the bench) hits
             // the pool on every cycle after warm-up, killing the per-Run heap
             // allocation. Cross-thread Capture (producer thread) -> Run
             // (dispatcher thread) misses the pool harmlessly because the
             // pool is [ThreadStatic].
             var pooled = s_pooled;
-            CulturePreservingExecutionContext ctx;
             if (pooled != null)
             {
                 s_pooled = null;
-                ctx = pooled;
-                ctx._context = ec;
-                ctx._disposed = false;
-            }
-            else
-            {
-                ctx = new CulturePreservingExecutionContext(ec);
+                pooled._context = ec;
+                pooled._disposed = false;
+                return pooled;
             }
 
-            ctx._culture = captureCulture;
-            ctx._uICulture = captureUICulture;
-            return ctx;
+            return new CulturePreservingExecutionContext(ec);
         }
 
         /// <summary>
@@ -189,57 +175,38 @@ namespace MS.Internal
             executionContext._callback = callback;
             executionContext._state = state;
             Thread thread = Thread.CurrentThread;
-            CultureInfo runEntryCulture = thread.CurrentCulture;
-            CultureInfo runEntryUICulture = thread.CurrentUICulture;
+            CultureInfo capturedCulture = thread.CurrentCulture;
+            CultureInfo capturedUICulture = thread.CurrentUICulture;
+            executionContext._culture = capturedCulture;
+            executionContext._uICulture = capturedUICulture;
 
-            // Capture() stashed the capture-time culture into _culture / _uICulture; that
-            // is exactly the value EC.Run is about to set thread state to inside
-            // ExecutionContext.Run (since the EC's saved culture matches what was current
-            // when EC.Capture() ran). When capture-time culture equals run-entry culture,
-            // EC.Run's culture-set is a no-op AND CallbackWrapper's pre-callback restore
-            // is also provably a no-op — so CallbackWrapper can skip the 2 AsyncLocal-
-            // routed Thread.Current(UI)Culture reads + ref-equals it would otherwise do.
-            // (Same-thread dispatcher operations with no culture change between
-            // DispatcherOperation ctor and Invoke is the dominant case.)
-            bool skipPreRestoreCulture =
-                ReferenceEquals(executionContext._culture, runEntryCulture);
-            bool skipPreRestoreUICulture =
-                ReferenceEquals(executionContext._uICulture, runEntryUICulture);
-            executionContext._skipPreRestoreCulture = skipPreRestoreCulture;
-            executionContext._skipPreRestoreUICulture = skipPreRestoreUICulture;
-
-            // Overwrite the capture-time snapshot with run-entry culture so CallbackWrapper
-            // sees the correct savedCulture/savedUICulture target (the value to restore
-            // before the user callback) and the correct anchor for post-callback recapture.
-            executionContext._culture = runEntryCulture;
-            executionContext._uICulture = runEntryUICulture;
-
-            ExecutionContext.Run(
-                executionContext._context,
-                CulturePreservingExecutionContext.CallbackWrapperDelegate,
-                executionContext);
-
-            // Skip the entire restore when CallbackWrapper observed no culture change in
-            // the user callback. In that case _culture/_uICulture still hold the run-entry
-            // values, EC.Run has already reverted thread state to its own saved (capture-
-            // time) value, and our writes would be no-ops — but we'd still pay 2
-            // Thread.Current(UI)Culture reads + ref-equals. The flag is set in
-            // CallbackWrapper iff the post-callback recapture wrote a fresh CultureInfo
-            // into _culture / _uICulture.
-            //
-            // The previous try/finally wrapper is removed: on an exception path
-            // (callback or EC.Run throws), CallbackWrapper's post-callback recapture
-            // never runs, so _callbackTouchedCulture stays false and the finally body
-            // would have been a no-op anyway. Dropping the SEH frame setup saves the
-            // runtime helper cost on every Run cycle.
-            if (executionContext._callbackTouchedCulture)
+            try
             {
-                CultureInfo finalCulture = executionContext._culture;
-                CultureInfo finalUICulture = executionContext._uICulture;
-                if (!ReferenceEquals(thread.CurrentCulture, finalCulture))
-                    thread.CurrentCulture = finalCulture;
-                if (!ReferenceEquals(thread.CurrentUICulture, finalUICulture))
-                    thread.CurrentUICulture = finalUICulture;
+                ExecutionContext.Run(
+                    executionContext._context,
+                    CulturePreservingExecutionContext.CallbackWrapperDelegate,
+                    executionContext);
+            }
+            finally
+            {
+                // Skip the entire restore when CallbackWrapper observed no culture
+                // change in the user callback. In that case _culture/_uICulture still
+                // hold the values captured above, EC.Run has already reverted thread
+                // state to those same entry-time values, and the writes would be
+                // no-ops — but we'd still pay 2 Thread.Current(UI)Culture property
+                // reads (each routes through AsyncLocal<CultureInfo>'s async-local
+                // chain) plus the ref-equals comparisons. The flag is set in
+                // CallbackWrapper iff the post-callback recapture wrote a fresh
+                // CultureInfo into _culture / _uICulture.
+                if (executionContext._callbackTouchedCulture)
+                {
+                    CultureInfo finalCulture = executionContext._culture;
+                    CultureInfo finalUICulture = executionContext._uICulture;
+                    if (!ReferenceEquals(thread.CurrentCulture, finalCulture))
+                        thread.CurrentCulture = finalCulture;
+                    if (!ReferenceEquals(thread.CurrentUICulture, finalUICulture))
+                        thread.CurrentUICulture = finalUICulture;
+                }
             }
 
             ReturnToPool(executionContext);
@@ -258,8 +225,6 @@ namespace MS.Internal
             ctx._culture = null;
             ctx._uICulture = null;
             ctx._callbackTouchedCulture = false;
-            ctx._skipPreRestoreCulture = false;
-            ctx._skipPreRestoreUICulture = false;
             ctx._disposed = true;
 
             if (s_pooled == null)
@@ -309,22 +274,10 @@ namespace MS.Internal
             Thread thread = Thread.CurrentThread;
             CultureInfo savedCulture = executionContext._culture;
             CultureInfo savedUICulture = executionContext._uICulture;
-
-            // Skip the AsyncLocal-routed Thread.Current(UI)Culture reads + ref-equals
-            // when Run() proved (via the capture-time vs run-entry culture compare) that
-            // EC.Run set thread state to a value equal to savedCulture / savedUICulture.
-            // Short-circuit (&&): when the skip flag is true the read on the right is
-            // never performed.
-            if (!executionContext._skipPreRestoreCulture
-                && !ReferenceEquals(thread.CurrentCulture, savedCulture))
-            {
+            if (!ReferenceEquals(thread.CurrentCulture, savedCulture))
                 thread.CurrentCulture = savedCulture;
-            }
-            if (!executionContext._skipPreRestoreUICulture
-                && !ReferenceEquals(thread.CurrentUICulture, savedUICulture))
-            {
+            if (!ReferenceEquals(thread.CurrentUICulture, savedUICulture))
                 thread.CurrentUICulture = savedUICulture;
-            }
 
             callback.Invoke(state);
 
@@ -406,27 +359,15 @@ namespace MS.Internal
 
         // Set true by CallbackWrapper iff the post-callback recapture observed a
         // culture change in the user callback and wrote a fresh CultureInfo into
-        // _culture / _uICulture. Run()'s post-EC.Run if-block uses this to skip its
-        // restore work in the dominant "callback does not touch culture" path: when
-        // false, _culture / _uICulture still match the values captured at Run() entry,
-        // EC.Run has reverted thread state to those same values, and the restore writes
+        // _culture / _uICulture. Run()'s finally block uses this to skip its restore
+        // work in the dominant "callback does not touch culture" path: when false,
+        // _culture / _uICulture still match the values captured at Run() entry, EC.Run
+        // has reverted thread state to those same values, and the restore writes
         // would be no-ops — but we'd still pay 2 Thread.Current(UI)Culture property
         // reads (each routed through AsyncLocal<CultureInfo>'s async-local chain) plus
         // 2 ref-equals comparisons. Reset to false by ReturnToPool so the next
         // Capture-Run cycle on this pooled instance starts clean.
         private bool _callbackTouchedCulture;
-
-        // Set by Run() entry iff the capture-time culture (stashed in _culture by
-        // Capture() before Run()'s overwrite) equals run-entry culture. When true,
-        // EC.Run will set thread state to a value equal to the run-entry / saved
-        // culture, so CallbackWrapper's pre-callback restore is provably a no-op and
-        // can skip its AsyncLocal-routed Thread.CurrentCulture read + ref-equals
-        // entirely. Resets to false by ReturnToPool. _skipPreRestoreUICulture is the
-        // analogous flag for Thread.CurrentUICulture; tracked separately so each
-        // axis can independently skip its read in the (common) case where one axis
-        // changed but not the other.
-        private bool _skipPreRestoreCulture;
-        private bool _skipPreRestoreUICulture;
 
         // static delegate to prevent repeated implicit allocations during Run
         private static ContextCallback CallbackWrapperDelegate;
