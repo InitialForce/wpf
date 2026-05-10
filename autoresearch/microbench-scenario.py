@@ -74,6 +74,181 @@ import threading
 import time
 from pathlib import Path
 
+# ─── handle.exe path (Sysinternals) ──────────────────────────────────────────
+# Resolved once at import time. May be None if not installed; diagnostic
+# logging is degraded but everything else still works.
+
+def _find_handle_exe() -> str | None:
+    """Return the Windows path to handle.exe (Sysinternals), or None."""
+    # Common install locations (Windows paths, passed to cmd.exe).
+    candidates = [
+        r"C:\tools\handle.exe",
+        r"C:\tools\handle64.exe",
+        r"C:\Sysinternals\handle.exe",
+        r"C:\Sysinternals\handle64.exe",
+        r"C:\Users\oystein\AppData\Local\Microsoft\WindowsApps\handle.exe",
+    ]
+    for c in candidates:
+        p = Path(c.replace("\\", "/").replace("C:", "/c"))
+        if p.exists():
+            return c
+    # Fall back to PATH via 'where' (cmd.exe built-in).
+    try:
+        r = subprocess.run(
+            ["cmd.exe", "/c", "where handle.exe"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            line = r.stdout.strip().splitlines()[0].strip()
+            if line:
+                return line
+    except Exception:
+        pass
+    return None
+
+
+HANDLE_EXE: str | None = _find_handle_exe()
+
+# ─── File-lock diagnostics (handle.exe) ──────────────────────────────────────
+
+
+def _query_file_lock_holders(win_path: str) -> list[str]:
+    """Return human-readable lines describing processes holding win_path open.
+
+    Returns an empty list if handle.exe is not available or no handles found.
+    Requires HANDLE_EXE to be set (Sysinternals handle.exe in PATH or known path).
+    """
+    if HANDLE_EXE is None:
+        return []
+    try:
+        r = subprocess.run(
+            ["cmd.exe", "/c", HANDLE_EXE, "-nobanner", "-a", win_path],
+            capture_output=True, text=True, timeout=15,
+        )
+        lines = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+        return [ln for ln in lines if "No matching" not in ln]
+    except Exception as exc:
+        return [f"handle.exe query failed: {exc}"]
+
+
+def _log_lock_holders(win_path: str, prefix: str = "") -> None:
+    """Log any processes holding win_path, with a header if any are found."""
+    holders = _query_file_lock_holders(win_path)
+    if holders:
+        log(f"{prefix}Lock holders for {win_path}:")
+        for line in holders:
+            log(f"{prefix}  {line}")
+    elif HANDLE_EXE is None:
+        log(f"{prefix}handle.exe not available — cannot identify lock holder "
+            f"(install Sysinternals handle.exe for advanced diagnostics)")
+
+
+def _mc_build_win_path(rel: str) -> str:
+    """Return the Windows path for a file under MC_BUILD."""
+    # MC_BUILD is /c/work/... → C:\work\...
+    base = str(MC_BUILD).replace("/c/", "C:\\").replace("/", "\\")
+    return base + "\\" + rel.replace("/", "\\")
+
+
+# ─── Pre-flight checks ────────────────────────────────────────────────────────
+
+
+def _list_mc_gui_pids() -> list[int]:
+    """Return PIDs of running MotionCatalyst.exe (the user's interactive GUI)."""
+    try:
+        r = subprocess.run(
+            ["tasklist.exe", "/FI", "IMAGENAME eq MotionCatalyst.exe",
+             "/FO", "CSV", "/NH"],
+            capture_output=True, timeout=15,
+        )
+        out = r.stdout.decode("utf-8", errors="replace")
+        pids = []
+        for line in out.splitlines():
+            parts = [p.strip('"') for p in line.split(",")]
+            if len(parts) >= 2 and parts[0].lower() == "motioncatalyst.exe":
+                try:
+                    pids.append(int(parts[1]))
+                except ValueError:
+                    pass
+        return pids
+    except Exception:
+        return []
+
+
+def _list_mc_cli_pids() -> list[int]:
+    """Return PIDs of running MotionCatalyst-cli.exe processes."""
+    try:
+        r = subprocess.run(
+            ["tasklist.exe", "/FI", "IMAGENAME eq MotionCatalyst-cli.exe",
+             "/FO", "CSV", "/NH"],
+            capture_output=True, timeout=15,
+        )
+        out = r.stdout.decode("utf-8", errors="replace")
+        pids = []
+        for line in out.splitlines():
+            parts = [p.strip('"') for p in line.split(",")]
+            if len(parts) >= 2 and parts[0].lower() == "motioncatalyst-cli.exe":
+                try:
+                    pids.append(int(parts[1]))
+                except ValueError:
+                    pass
+        return pids
+    except Exception:
+        return []
+
+
+def preflight_check_mc_state() -> bool:
+    """Verify MC_BUILD is in a clean state before we start.
+
+    - Refuses to proceed (returns False) if MotionCatalyst.exe (user GUI) is
+      running — we must not touch its DLL while it holds a file mapping.
+    - Kills any stray MotionCatalyst-cli.exe processes from previous harness
+      runs (those are safe to kill; the user's GUI uses MotionCatalyst.exe).
+    - Logs any processes holding PresentationCore.dll via handle.exe.
+
+    Returns True if the state is clean and safe to proceed.
+    """
+    # 1. Refuse if user's interactive MotionCatalyst.exe is running.
+    gui_pids = _list_mc_gui_pids()
+    if gui_pids:
+        log(f"FATAL: MotionCatalyst.exe (user GUI) is running: pids={gui_pids}")
+        log("  Cannot swap PresentationCore.dll while the app holds a file mapping.")
+        log("  Ask the user to close MotionCatalyst before running the scenario bench.")
+        return False
+
+    # 2. Kill any leftover MotionCatalyst-cli.exe stragglers from prior runs.
+    cli_pids = _list_mc_cli_pids()
+    if cli_pids:
+        log(f"preflight: found stray MotionCatalyst-cli.exe pids={cli_pids}; killing ...")
+        for pid in cli_pids:
+            try:
+                subprocess.run(
+                    ["taskkill.exe", "/F", "/PID", str(pid)],
+                    capture_output=True, timeout=15,
+                )
+                log(f"  killed stray MC-cli pid={pid}")
+            except Exception as exc:
+                log(f"  failed to kill stray MC-cli pid={pid}: {exc}")
+        # Wait for process table to settle + file handles to release.
+        log("  waiting 3 s for stray MC-cli handles to release ...")
+        time.sleep(3.0)
+
+    # 3. Log any processes holding PresentationCore.dll now.
+    pc_win = _mc_build_win_path("PresentationCore.dll")
+    holders = _query_file_lock_holders(pc_win)
+    if holders:
+        log(f"preflight WARNING: PresentationCore.dll has open handles:")
+        for line in holders:
+            log(f"  {line}")
+        log("  Proceeding — transient scanner lock may release before Phase 4.")
+    elif HANDLE_EXE is not None:
+        log("preflight: PresentationCore.dll has no open handles (clean)")
+    else:
+        log("preflight: handle.exe not found — skipping lock-holder check")
+        log("  Install Sysinternals handle.exe for advanced diagnostics.")
+
+    return True
+
 # ─── Import shared helpers from microbench.py ────────────────────────────────
 # microbench.py lives in the same directory; we import its helpers directly.
 # This avoids copy-paste drift and ensures shadow setup, path allowlist, and
@@ -155,6 +330,36 @@ def log(msg: str) -> None:
 
 # ─── MC build dir DLL swap ────────────────────────────────────────────────────
 
+# Exponential back-off delays (seconds) for DLL swap retries.
+# 5 attempts: 1, 2, 4, 8, 16 s (total wait ≤ 31 s before giving up).
+_SWAP_BACKOFFS = [1, 2, 4, 8, 16]
+
+
+def _atomic_copy(src: Path, dst: Path) -> None:
+    """Copy src → dst using an atomic write-tmp-then-rename strategy.
+
+    On NTFS, os.replace() uses ReplaceFileW under the hood, which can
+    succeed even with read handles open on the target (unlike a plain
+    overwrite-open which fails with ERROR_SHARING_VIOLATION when a
+    scanner/loader has the file memory-mapped for verification).
+
+    Falls back to shutil.copy2 if os.replace fails so we degrade
+    gracefully on non-NTFS volumes.
+    """
+    # Stage to a .swap-tmp sidecar in the same directory (ensures same NTFS
+    # volume for the atomic rename).
+    tmp = dst.parent / (dst.name + ".swap-tmp")
+    shutil.copy2(src, tmp)
+    try:
+        os.replace(str(tmp), str(dst))
+    except OSError:
+        # os.replace failed (unusual — fall back to plain copy).
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        shutil.copy2(src, dst)
+
 
 def save_original_pc() -> Path | None:
     """Back up the current PresentationCore.dll in MC_BUILD.
@@ -169,29 +374,61 @@ def save_original_pc() -> Path | None:
     return backup
 
 
-def restore_original_pc(backup: Path | None) -> None:
+def restore_original_pc(backup: Path | None) -> bool:
     """Restore PresentationCore.dll in MC_BUILD from backup.
 
-    Retries up to 5 times with 2-second waits to handle the case where a
-    crashed MC-cli process still holds the file lock briefly after taskkill.
-    A failed restore is still reported so the caller can investigate.
+    Uses atomic-replace + exponential back-off (same strategy as the swap).
+    On total failure, writes a .RESTORE-FAILED sentinel next to the target
+    and logs a loud alert so the operator knows MC_BUILD has our candidate DLL.
+
+    Returns True on success, False if all retries were exhausted.
     """
     target = MC_BUILD / "PresentationCore.dll"
+    sentinel = MC_BUILD / "PresentationCore.dll.RESTORE-FAILED"
     if backup is None or not backup.exists():
-        return
+        return True
+
+    pc_win = _mc_build_win_path("PresentationCore.dll")
     last_exc: Exception | None = None
-    for attempt in range(5):
+    for attempt, delay in enumerate(_SWAP_BACKOFFS):
         try:
-            shutil.copy2(backup, target)
+            before_mtime = target.stat().st_mtime if target.exists() else None
+            before_size = target.stat().st_size if target.exists() else None
+            _atomic_copy(backup, target)
+            after_mtime = target.stat().st_mtime if target.exists() else None
+            after_size = target.stat().st_size if target.exists() else None
+            log(f"  restore OK (attempt {attempt + 1}/{len(_SWAP_BACKOFFS)})  "
+                f"mtime {before_mtime}->{after_mtime}  "
+                f"size {before_size}->{after_size}")
             backup.unlink(missing_ok=True)
-            return
+            sentinel.unlink(missing_ok=True)
+            return True
         except Exception as exc:
             last_exc = exc
-            if attempt < 4:
-                log(f"  restore attempt {attempt + 1}/5 failed ({exc}); retrying in 2s ...")
-                time.sleep(2.0)
-    log(f"  WARNING: could not restore MC PresentationCore.dll after 5 attempts: {last_exc}")
-    log(f"    Manual fix: cp {backup} {target}")
+            log(f"  restore attempt {attempt + 1}/{len(_SWAP_BACKOFFS)} failed: {exc}")
+            _log_lock_holders(pc_win, prefix="  ")
+            if attempt < len(_SWAP_BACKOFFS) - 1:
+                log(f"  retrying in {delay} s ...")
+                time.sleep(float(delay))
+
+    # All retries exhausted — write sentinel and exit with code 4.
+    log("=" * 72)
+    log("CRITICAL: MC PresentationCore.dll RESTORE FAILED after all retries.")
+    log(f"  MC_BUILD has the CANDIDATE DLL — manual restore required.")
+    log(f"  Restore command:  cp {backup} {target}")
+    log(f"  Sentinel written: {sentinel}")
+    log("=" * 72)
+    try:
+        sentinel.write_text(
+            f"RESTORE FAILED at {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
+            f"last_exc={last_exc}\n"
+            f"backup={backup}\n"
+            f"target={target}\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+    return False
 
 
 def swap_pc_into_mc_build(staged_dll: Path) -> bool:
@@ -200,22 +437,107 @@ def swap_pc_into_mc_build(staged_dll: Path) -> bool:
     MC is self-contained — it ships its own runtime and WPF DLLs in x64_Release/.
     DOTNET_ROOT env overrides have no effect; we must copy directly here.
 
+    Uses atomic-replace (os.replace → NTFS ReplaceFileW) with exponential
+    back-off retries to handle transient file-lock errors from Windows Defender,
+    Search Indexer, or a Phase-3 taskkill that hasn't fully released handles yet.
+
     Returns True on success.
     """
     target = MC_BUILD / "PresentationCore.dll"
+    pc_win = _mc_build_win_path("PresentationCore.dll")
     if not MC_BUILD.exists():
         log(f"  FATAL: MC_BUILD dir does not exist: {MC_BUILD}")
         return False
     if not staged_dll.exists():
         log(f"  FATAL: staged DLL not found: {staged_dll}")
         return False
+
+    before_mtime = target.stat().st_mtime if target.exists() else None
+    before_size = target.stat().st_size if target.exists() else None
+    last_exc: Exception | None = None
+
+    for attempt, delay in enumerate(_SWAP_BACKOFFS):
+        try:
+            _atomic_copy(staged_dll, target)
+            after_mtime = target.stat().st_mtime if target.exists() else None
+            after_size = target.stat().st_size if target.exists() else None
+            log(f"  swapped PresentationCore.dll into MC_BUILD "
+                f"({staged_dll.name} -> {target.name}, "
+                f"attempt {attempt + 1}/{len(_SWAP_BACKOFFS)})  "
+                f"mtime {before_mtime}->{after_mtime}  "
+                f"size {before_size}->{after_size}")
+            return True
+        except Exception as exc:
+            last_exc = exc
+            log(f"  DLL swap attempt {attempt + 1}/{len(_SWAP_BACKOFFS)} failed: {exc}")
+            _log_lock_holders(pc_win, prefix="  ")
+            if attempt < len(_SWAP_BACKOFFS) - 1:
+                log(f"  retrying in {delay} s ...")
+                time.sleep(float(delay))
+
+    # All retries exhausted — last-ditch: wait 30 s, then one final attempt.
+    log(f"  DLL swap: all {len(_SWAP_BACKOFFS)} attempts failed; "
+        f"cool-down 30 s then final retry ...")
+    _log_lock_holders(pc_win, prefix="  final-check: ")
+    time.sleep(30.0)
     try:
-        shutil.copy2(staged_dll, target)
-        log(f"  swapped PresentationCore.dll into MC_BUILD ({staged_dll.name} -> {target.name})")
+        _atomic_copy(staged_dll, target)
+        log(f"  DLL swap: cool-down retry succeeded ({staged_dll.name} -> {target.name})")
         return True
     except Exception as exc:
-        log(f"  FATAL: DLL swap failed: {exc}")
+        last_exc = exc
+        log(f"  FATAL: DLL swap failed after all retries + cool-down: {last_exc}")
+        _log_lock_holders(pc_win, prefix="  post-cooldown: ")
         return False
+
+
+def _dump_swap_failure_diagnostics(
+    staged_dll: Path,
+    stdout_lines: list[str],
+    retry_log: list[str],
+) -> None:
+    """Log a structured diagnostic dump when Phase 4 DLL swap fails completely.
+
+    Logs:
+      - PIDs holding the DLL (handle.exe)
+      - Last 20 lines of most recent scenario stdout
+      - File mtime/size before and after each operation
+      - The retry/backoff sequence that was attempted
+    """
+    target = MC_BUILD / "PresentationCore.dll"
+    pc_win = _mc_build_win_path("PresentationCore.dll")
+    log("=" * 72)
+    log("BENCH-FAIL DIAGNOSTIC DUMP (Phase 4 DLL swap)")
+    log(f"  target:     {target}")
+    log(f"  staged_dll: {staged_dll}")
+    if target.exists():
+        s = target.stat()
+        log(f"  target mtime={s.st_mtime:.0f}  size={s.st_size}")
+    else:
+        log("  target: does not exist")
+    if staged_dll.exists():
+        s = staged_dll.stat()
+        log(f"  staged mtime={s.st_mtime:.0f}  size={s.st_size}")
+    else:
+        log("  staged_dll: does not exist")
+    log("  Lock holders:")
+    holders = _query_file_lock_holders(pc_win)
+    if holders:
+        for line in holders:
+            log(f"    {line}")
+    elif HANDLE_EXE is None:
+        log("    (handle.exe not available)")
+    else:
+        log("    (none found)")
+    if retry_log:
+        log("  Retry sequence:")
+        for line in retry_log:
+            log(f"    {line}")
+    if stdout_lines:
+        log("  Last 20 scenario stdout lines:")
+        for line in stdout_lines[-20:]:
+            log(f"    {line}")
+    log("=" * 72)
 
 
 # ─── AllocParser integration ──────────────────────────────────────────────────
@@ -431,6 +753,7 @@ def run_k_runs(
     than K if some runs fail.
     """
     if not swap_pc_into_mc_build(staged_dll):
+        _dump_swap_failure_diagnostics(staged_dll, [], [])
         return []
 
     result_dir = STAGING / f"scenario-{scenario_slug}-{side}"
@@ -584,6 +907,12 @@ def main() -> int:
         log("FATAL: working tree not clean. Commit your change before running microbench-scenario.")
         return 5
 
+    # ── Pre-flight MC state check ──────────────────────────────────────────
+    # Refuse if user's interactive MotionCatalyst.exe is running; kill stray
+    # MC-cli stragglers from prior harness runs; log lock holders via handle.exe.
+    if not preflight_check_mc_state():
+        return 5
+
     if HALT_FILE.exists() and not args.ignore_halt:
         log(f"HALT sentinel present at {HALT_FILE} — not running scenario benchmark")
         log("  Use --ignore-halt to bypass (testing/smoke runs only)")
@@ -594,6 +923,12 @@ def main() -> int:
         log("  Build it: cd /c/work/wpf-perf/tools/alloc-parser && "
             "dotnet publish -c Release -r win-x64 --self-contained")
         return 4
+
+    if HANDLE_EXE:
+        log(f"diagnostics: handle.exe found at {HANDLE_EXE}")
+    else:
+        log("diagnostics: handle.exe NOT found — lock-holder logging disabled")
+        log("  Install Sysinternals handle.exe for advanced file-lock diagnostics.")
 
     head_sha = git_sha("HEAD")
     base_sha = git_sha("HEAD~1")
@@ -614,6 +949,10 @@ def main() -> int:
         return 6
 
     STAGING.mkdir(exist_ok=True, parents=True)
+
+    # Mutable flag cell: the finally block appends True here if restore fails.
+    # We check it after the try/finally to decide the exit code.
+    _restore_failed_flag: list[bool] = []
 
     # ── Sentinel lock ──────────────────────────────────────────────────────
     # Write SCENARIO_LOCK so concurrent ralph iters don't race to swap the
@@ -636,7 +975,7 @@ def main() -> int:
     if not setup_dotnet_shadow():
         log("FATAL: failed to set up DOTNET_ROOT shadow (needed for build infrastructure).")
         SCENARIO_LOCK.unlink(missing_ok=True)
-        restore_original_pc(pc_backup)
+        restore_original_pc(pc_backup)  # best-effort; ignore return value here
         return 4
 
     try:
@@ -710,9 +1049,24 @@ def main() -> int:
 
     finally:
         # Always restore MC's original PresentationCore.dll and release lock.
-        restore_original_pc(pc_backup)
+        restore_ok = restore_original_pc(pc_backup)
         SCENARIO_LOCK.unlink(missing_ok=True)
-        log("  restored MC PresentationCore.dll; SCENARIO_LOCK released")
+        if restore_ok:
+            log("  restored MC PresentationCore.dll; SCENARIO_LOCK released")
+        else:
+            log("  SCENARIO_LOCK released; RESTORE FAILED — see .RESTORE-FAILED sentinel")
+            # We set a flag so main() can return exit code 4 after the finally block.
+            # We cannot sys.exit() here because we'd bypass the results append below,
+            # but we signal via a nonlocal that the restore failed.
+            # (Python doesn't allow assignment to nonlocal in a try/finally without
+            # a closure; use a mutable list as a flag cell instead.)
+            _restore_failed_flag.append(True)
+
+    # ── Check restore status ───────────────────────────────────────────────
+    if _restore_failed_flag:
+        log("FATAL: MC PresentationCore.dll restore failed — exiting with code 4.")
+        log("  MC_BUILD may contain our candidate DLL. Check .RESTORE-FAILED sentinel.")
+        return 4
 
     # ── Decide ─────────────────────────────────────────────────────────────
     log("Phase 5: decide")
