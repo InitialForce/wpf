@@ -2581,10 +2581,16 @@ namespace System.Windows.Media.Animation
 
                 // consider caching this condition
                 // We check whether our active period exists before using it to compute intervals
-                if (!expirationTime.HasValue       // If activePeriod extends forever, 
-                    || expirationTime >= _beginTime)  // OR if activePeriod extends to or beyond _beginTime, 
+                if (!expirationTime.HasValue       // If activePeriod extends forever,
+                    || expirationTime >= _beginTime)  // OR if activePeriod extends to or beyond _beginTime,
                 {
                     // Check for CurrentTimeInvalidated
+                    // The activePeriod TIC was previously freshly allocated per tick (3 small arrays via
+                    // CreateClosedOpenInterval / CreateInfiniteClosedInterval), but it is only used for two
+                    // read-only Intersects calls (one here on the Intersects, and one inside
+                    // ComputeIntervalsWithParentIntersection on IntersectsInverseOf) and never escapes the
+                    // call stack. We rebuild it in place on a per-thread scratch buffer to eliminate the
+                    // per-tick array allocations on every animated clock.
                     TimeIntervalCollection activePeriod;
                     if (expirationTime.HasValue)
                     {
@@ -2594,12 +2600,14 @@ namespace System.Windows.Media.Animation
                         }
                         else
                         {
-                            activePeriod = TimeIntervalCollection.CreateClosedOpenInterval(_beginTime.Value, expirationTime.Value);
+                            s_scratchActivePeriod.RebuildAsClosedOpenInterval(_beginTime.Value, expirationTime.Value);
+                            activePeriod = s_scratchActivePeriod;
                         }
                     }
                     else  // expirationTime is infinity
                     {
-                        activePeriod = TimeIntervalCollection.CreateInfiniteClosedInterval(_beginTime.Value);
+                        s_scratchActivePeriod.RebuildAsInfiniteClosedInterval(_beginTime.Value);
+                        activePeriod = s_scratchActivePeriod;
                     }
 
                     // If we have an intersection between parent domain times and the interval over which we
@@ -2797,7 +2805,11 @@ namespace System.Windows.Media.Animation
         {
             Debug.Assert(endOfActivePeriod.HasValue);
 
-            TimeIntervalCollection fillPeriod = TimeIntervalCollection.CreateInfiniteClosedInterval(endOfActivePeriod.Value);
+            // Reuse the per-thread scratch buffer here too; this path is mutually exclusive with the
+            // activePeriod path in ComputeEvents (the caller takes the Intersects-true OR Intersects-false
+            // branch, not both), so a single scratch slot suffices for both fillPeriod and activePeriod.
+            s_scratchActivePeriod.RebuildAsInfiniteClosedInterval(endOfActivePeriod.Value);
+            TimeIntervalCollection fillPeriod = s_scratchActivePeriod;
 
             if (parentIntervalCollection.Intersects(fillPeriod))  // We enter or leave Fill period
             {
@@ -4468,6 +4480,17 @@ namespace System.Windows.Media.Animation
         internal int                _depth;
 
         private static Int64        s_TimeSpanTicksPerSecond = TimeSpan.FromSeconds(1).Ticks;
+
+        // Per-thread scratch TimeIntervalCollection used by ComputeEvents / ComputeIntervalsWithHoldEnd
+        // to avoid the per-tick allocation of three small arrays for activePeriod / fillPeriod. The
+        // struct's _nodeTime / _nodeIsPoint / _nodeIsInterval buffers are allocated on first use and
+        // reused across every Clock.ComputeEvents call on the dispatcher thread thereafter. Both
+        // consumers (parentIntervalCollection.Intersects(activePeriod) and
+        // parentIntervalCollection.IntersectsInverseOf(activePeriod)) read this struct without mutating
+        // its underlying arrays, and ComputeEvents never recurses into another Clock's ComputeEvents
+        // before its own consumer calls return, so a single shared scratch slot is safe.
+        [ThreadStatic]
+        private static TimeIntervalCollection s_scratchActivePeriod;
 
         #endregion // Linking data
 

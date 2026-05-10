@@ -342,6 +342,64 @@ namespace System.Windows.Media.Animation
             return new TimeIntervalCollection(from, true);
         }
 
+        // Rebuilds this TIC in place as the closed-open interval [from, to). Reuses the existing
+        // _nodeTime / _nodeIsPoint / _nodeIsInterval buffers (allocates only on first call when
+        // they are null). Mirrors the semantics of CreateClosedOpenInterval(from, to) exactly,
+        // including the from==to single-point degenerate case and the from>to swap.
+        internal void RebuildAsClosedOpenInterval(TimeSpan from, TimeSpan to)
+        {
+            _containsNullPoint = false;
+            _invertCollection = false;
+            _current = 0;
+
+            EnsureAllocatedCapacity(_minimumCapacity);
+
+            _nodeTime[0] = from;
+
+            if (from == to)
+            {
+                // Match TimeIntervalCollection(from,true,to,false) for from==to: single point at from.
+                _nodeIsPoint[0] = true;
+                _nodeIsInterval[0] = false;
+                _count = 1;
+            }
+            else if (from < to)
+            {
+                _nodeIsPoint[0] = true;        // includeFrom
+                _nodeIsInterval[0] = true;
+                _nodeTime[1] = to;
+                _nodeIsPoint[1] = false;       // !includeTo
+                _nodeIsInterval[1] = false;    // explicit reset (constructor relied on fresh-array default)
+                _count = 2;
+            }
+            else  // from > to: reversed, swap to [to, from) shape
+            {
+                _nodeTime[0] = to;
+                _nodeIsPoint[0] = false;       // !includeTo
+                _nodeIsInterval[0] = true;
+                _nodeTime[1] = from;
+                _nodeIsPoint[1] = true;        // includeFrom
+                _nodeIsInterval[1] = false;    // explicit reset
+                _count = 2;
+            }
+        }
+
+        // Rebuilds this TIC in place as the half-infinite closed interval [from, +infinity).
+        // Reuses existing buffers (allocates only on first call). Mirrors CreateInfiniteClosedInterval(from).
+        internal void RebuildAsInfiniteClosedInterval(TimeSpan from)
+        {
+            _containsNullPoint = false;
+            _invertCollection = false;
+            _current = 0;
+
+            EnsureAllocatedCapacity(_minimumCapacity);
+
+            _nodeTime[0] = from;
+            _nodeIsPoint[0] = true;            // includePoint
+            _nodeIsInterval[0] = true;
+            _count = 1;
+        }
+
         /// <summary>
         /// Creates an empty collection
         /// </summary>
