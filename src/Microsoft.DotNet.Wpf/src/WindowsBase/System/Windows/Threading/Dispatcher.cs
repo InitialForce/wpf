@@ -937,10 +937,6 @@ namespace System.Windows.Threading
                         // processing for it.  Note we will mark it aborted
                         // below.
                         _queue.RemoveItem(operation._item);
-                        // Drop the back-pointer once the item is pooled, so a later
-                        // Abort()/SetPriority() on this op cannot reach a reassigned
-                        // PriorityItem now owned by some other queued op.
-                        operation._item = null;
                     }
                 }
             }
@@ -1936,9 +1932,7 @@ namespace System.Windows.Threading
 
             lock(_instanceLock)
             {
-                // _item can be null after the op has been dequeued by ProcessQueue
-                // (we drop the back-pointer there to keep PriorityItem pooling safe).
-                if(_queue != null && operation._item != null && operation._item.IsQueued)
+                if(_queue != null && operation._item.IsQueued)
                 {
                     _queue.ChangeItemPriority(operation._item, priority);
                     notify = true;
@@ -1974,15 +1968,9 @@ namespace System.Windows.Threading
 
             lock(_instanceLock)
             {
-                // _item can be null after the op has been dequeued by ProcessQueue
-                // (we drop the back-pointer there to keep PriorityItem pooling safe).
-                if(_queue != null && operation._item != null && operation._item.IsQueued)
+                if(_queue != null && operation._item.IsQueued)
                 {
                     _queue.RemoveItem(operation._item);
-                    // Drop the back-pointer once the item is pooled, so a subsequent
-                    // Abort()/SetPriority() on this op cannot reach a reassigned
-                    // PriorityItem now owned by some other queued op.
-                    operation._item = null;
                     operation._status = DispatcherOperationStatus.Aborted;
                     notify = true;
 
@@ -2027,11 +2015,6 @@ namespace System.Windows.Threading
                     if(_foregroundPriorityRange.Contains(maxPriority) || backgroundProcessingOK)
                     {
                          op = _queue.Dequeue();
-                         // PriorityQueue.Dequeue returns the dequeued item to its reusable-item
-                         // pool (cleared payload + chain/sequential pointers). Drop the back-pointer
-                         // here so a later Abort()/SetPriority() on this op doesn't observe a
-                         // pooled-and-reassigned PriorityItem owned by some other queued op.
-                         op._item = null;
                          hooks = _hooks;
                     }
                 }

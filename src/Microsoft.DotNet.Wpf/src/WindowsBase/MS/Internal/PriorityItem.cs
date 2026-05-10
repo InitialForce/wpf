@@ -9,11 +9,8 @@ namespace System.Windows.Threading
         {
             _data = data;
         }
-
-        // _data is mutable so PriorityQueue can return cleared items to its
-        // reusable-item pool (set to default(T) on remove) and re-bind a fresh
-        // payload when popping from the pool on Enqueue.
-        public T Data { get { return _data; } internal set { _data = value; } }
+        
+        public T Data {get{return _data;}}
         public bool IsQueued { get { return _chain != null; } }
 
         // Note: not used
