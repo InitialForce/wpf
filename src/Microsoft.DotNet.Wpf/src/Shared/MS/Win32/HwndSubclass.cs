@@ -62,19 +62,6 @@ namespace MS.Win32
             _bond = Bond.Unattached;
             _hook = new WeakReference(hook);
 
-            // Eagerly bind the DispatcherOperationCallback once at construction
-            // so the per-Win32-message SubclassWndProc steady-state path skips
-            // the `if (_dispatcherOperationCallback == null) _dispatcherOperationCallback = new ...`
-            // null-check + field-load pair on every call. The delegate is allocated
-            // once per HwndSubclass instance regardless (cached on first call in
-            // the original code path), so eager init only moves the allocation
-            // from the first SubclassWndProc call to the ctor — same lifetime,
-            // strictly fewer steady-state field reads. Pairs with the bond local
-            // hoist below: both eliminate redundant field loads from the
-            // per-message dispatch path in the same spirit as iter-82's hoist of
-            // _isInCreateWindow out of the HwndWrapper.WndProc hook loop.
-            _dispatcherOperationCallback = new DispatcherOperationCallback(DispatcherCallbackOperation);
-
             // Allocate a GC handle so that we won't be collected, even if all
             // references to us get released.  This is because a component outside
             // of the managed code (ie. the window we are subclassing) still holds
@@ -274,28 +261,17 @@ namespace MS.Win32
             bool handled = false;
             WindowMessage message = (WindowMessage)msg;
 
-            // Hoist the _bond field-load into a local. The dominant per-Win32-
-            // message steady-state value is Bond.Attached (set once by the very
-            // first message during CreateWindowEx, never re-read on transitions),
-            // so the two branch checks below (Unattached then Detached) both read
-            // the same field via two distinct field loads — the JIT can't prove
-            // the field is invariant across calls and emits both loads. A single
-            // hoisted local kills the second load + memory dependency on every
-            // message dispatch. Same micro-pattern as iter-82's _isInCreateWindow
-            // hoist out of the HwndWrapper.WndProc hook loop.
-            Bond bond = _bond;
-
             // If we are unattached and we receive a message, then we must have
             // been used as the original window proc.  In this case, we insert
             // ourselves as if the original window proc had been DefWindowProc.
             // We pass in DefWndProcStub as a workaround for a bug in UxTheme on
             // Windows XP. For details see the comment on the DefWndProcWrapper method.
-            if(bond == Bond.Unattached)
+            if(_bond == Bond.Unattached)
             {
                 HookWindowProc(hwnd, new NativeMethods.WndProc(SubclassWndProc),
                     Marshal.GetFunctionPointerForDelegate(DefWndProcStub));
             }
-            else if(bond == Bond.Detached)
+            else if(_bond == Bond.Detached)
             {
                 throw new InvalidOperationException();
             }
@@ -322,19 +298,17 @@ namespace MS.Win32
                 Dispatcher dispatcher = Dispatcher.FromThread(Thread.CurrentThread);
                 if(dispatcher != null && !dispatcher.HasShutdownFinished)
                 {
-                    // _dispatcherOperationCallback is now eagerly initialized in the
-                    // HwndSubclass ctor — no lazy-init null-check needed here.
+                    if (_dispatcherOperationCallback == null)
+                        _dispatcherOperationCallback = new DispatcherOperationCallback(this.DispatcherCallbackOperation);
 
                     // _paramDispatcherCallbackOperation is a thread static member which should be reused to avoid
                     // creating a new data structure every time we call DispatcherCallbackOperation
-                    // Cache the param locally in case of reentrance and set _paramDispatcherCallbackOperation to null
-                    // so reentrancy calls will create a new param. The original code read the TLS field three times
-                    // (null-check, capture, restore) plus two writes — fuse into one read + one allocate-if-null +
-                    // two writes by capturing the TLS value first and only allocating on the cold first-call path.
+                    // Cache the param locally in case of reentrance and set _paramDispatcherCallbackOperation to null so reentrancy calls will create a new param
+                    if (_paramDispatcherCallbackOperation == null)
+                        _paramDispatcherCallbackOperation = new DispatcherOperationCallbackParameter();
+
                     DispatcherOperationCallbackParameter param = _paramDispatcherCallbackOperation;
                     _paramDispatcherCallbackOperation = null;
-                    if (param == null)
-                        param = new DispatcherOperationCallbackParameter();
                     param.hwnd = hwnd;
                     param.msg = msg;
                     param.wParam = wParam;
