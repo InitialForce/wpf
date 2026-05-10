@@ -5,7 +5,6 @@
 
 using System.Collections.ObjectModel;
 using System.Runtime.CompilerServices;
-using System.Threading;
 
 namespace MS.Internal;
 
@@ -60,36 +59,6 @@ internal abstract class CopyOnWriteList<T> where T : class
     {
         get
         {
-            // Lock-free fast path: once the readonly wrapper has been published
-            // by any prior call (or by a writer that re-published after copy-on-
-            // write), subsequent reads can return it without the SyncRoot lock.
-            // The wrapper is immutable and references the snapshot of _liveList
-            // at the moment of publication — that is precisely the COW contract.
-            //
-            // Memory ordering: Volatile.Read acts as an acquire-load, so on every
-            // platform .NET targets the read is not reordered past subsequent
-            // dependent reads, and writes performed by the writer prior to the
-            // store of _readonlyWrapper (i.e. the assignment of the wrapper) are
-            // visible. The writer side (DoCopyOnWriteCheck) first reassigns
-            // _liveList = new List<T>(_liveList) THEN nulls _readonlyWrapper, all
-            // under the SyncRoot lock; the lock release acts as a release barrier
-            // pairing with this acquire-load. If a concurrent reader observes the
-            // old (still non-null) wrapper, it returns a snapshot that captured
-            // _liveList prior to the writer's mutation — a perfectly valid COW
-            // snapshot. If it observes the post-null state, it falls into the
-            // slow path which under the lock will republish a fresh wrapper over
-            // the new _liveList.
-            //
-            // This is on the per-Win32-message hot path: HwndWrapper.WndProc
-            // iterates `foreach (HwndWrapperHook hook in _hooks)` which routes
-            // through WeakReferenceList<T>.GetEnumerator() ->
-            // new WeakReferenceListEnumerator<T>(List). Before this change every
-            // WndProc invocation paid a Monitor.Enter+Monitor.Exit pair on the
-            // SyncRoot just to fetch the (already-cached) readonly wrapper.
-            ReadOnlyCollection<T>? cached = Volatile.Read(ref _readonlyWrapper);
-            if (cached is not null)
-                return cached;
-
             ReadOnlyCollection<T> tempList;
 
             lock (_syncRoot)

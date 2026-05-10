@@ -69,32 +69,6 @@ namespace System.Windows.Threading
         /// </remarks>
         public static Dispatcher FromThread(Thread thread)
         {
-            // Lock-free same-thread fast path. _tlsDispatcher is [ThreadStatic],
-            // assigned to `this` in the Dispatcher ctor (line 1731) on the owning
-            // thread. When `thread == Thread.CurrentThread` AND _tlsDispatcher is
-            // populated, the answer is bit-identical to the locked slow-path scan
-            // of _dispatchers/_possibleDispatcher — the ctor placed `this` into
-            // both _dispatchers and _tlsDispatcher under the same thread, and
-            // _tlsDispatcher is single-writer (the ctor) / single-reader (this
-            // fast path) on its owning thread, race-free by [ThreadStatic]
-            // construction. The dominant HwndSubclass.SubclassWndProc per-Win32-
-            // message path hits FromThread(Thread.CurrentThread) every message
-            // dispatch on the UI thread, so killing the Monitor.Enter+Exit pair
-            // on _globalLock saves a per-message lock pair plus the
-            // _possibleDispatcher.Target re-check on the steady-state path.
-            //
-            // The slow path remains for: (a) cross-thread queries — the rare case
-            // of asking another thread's dispatcher; (b) bootstrap on a thread
-            // whose Dispatcher has not yet been constructed (_tlsDispatcher null)
-            // — falls through to the slow path which still seeds _dispatchers /
-            // _possibleDispatcher and runs the dead-WeakReference purge.
-            if (thread != null && thread == Thread.CurrentThread)
-            {
-                Dispatcher tls = _tlsDispatcher;
-                if (tls != null)
-                    return tls;
-            }
-
             lock(_globalLock)
             {
                 Dispatcher dispatcher = null;
