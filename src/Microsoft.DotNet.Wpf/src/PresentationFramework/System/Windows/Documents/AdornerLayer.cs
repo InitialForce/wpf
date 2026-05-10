@@ -455,48 +455,19 @@ namespace System.Windows.Documents
         protected override Size MeasureOverride(Size constraint)
         {
             // Not using an enumerator because the list can be modified during the loop when we call out.
-            // The snapshot buffer is pooled across layout passes; on the rare case of re-entry on
-            // the same AdornerLayer (the inner Measure callout reaches back into this method) we
-            // fall back to a fresh allocation so the outer iteration's snapshot is preserved.
-            int count = _zOrderMap.Count;
-            DictionaryEntry[] zOrderMapEntries;
-            bool ownsPool = !_zOrderEntriesInUse;
-            if (ownsPool)
-            {
-                if (_zOrderEntriesBuffer == null || _zOrderEntriesBuffer.Length < count)
-                    _zOrderEntriesBuffer = new DictionaryEntry[Math.Max(count, 8)];
-                zOrderMapEntries = _zOrderEntriesBuffer;
-                _zOrderEntriesInUse = true;
-            }
-            else
-            {
-                zOrderMapEntries = new DictionaryEntry[count];
-            }
+            DictionaryEntry[] zOrderMapEntries = new DictionaryEntry[_zOrderMap.Count];
+            _zOrderMap.CopyTo(zOrderMapEntries, 0);
 
-            try
+            for (int i = 0; i < zOrderMapEntries.Length; i++)
             {
-                _zOrderMap.CopyTo(zOrderMapEntries, 0);
+                ArrayList adornerInfos = (ArrayList)zOrderMapEntries[i].Value;
+                Debug.Assert(adornerInfos != null, "No adorners found for element in AdornerLayer._zOrderMap");
 
-                for (int i = 0; i < count; i++)
+                int j = 0;
+                while (j < adornerInfos.Count)
                 {
-                    ArrayList adornerInfos = (ArrayList)zOrderMapEntries[i].Value;
-                    Debug.Assert(adornerInfos != null, "No adorners found for element in AdornerLayer._zOrderMap");
-
-                    int j = 0;
-                    while (j < adornerInfos.Count)
-                    {
-                        AdornerInfo adornerInfo = (AdornerInfo)adornerInfos[j++];
-                        adornerInfo.Adorner.Measure(constraint);
-                    }
-                }
-            }
-            finally
-            {
-                if (ownsPool)
-                {
-                    // Drop refs so the pooled buffer doesn't keep entries alive.
-                    Array.Clear(zOrderMapEntries, 0, count);
-                    _zOrderEntriesInUse = false;
+                    AdornerInfo adornerInfo = (AdornerInfo)adornerInfos[j++];
+                    adornerInfo.Adorner.Measure(constraint);
                 }
             }
 
@@ -518,73 +489,46 @@ namespace System.Windows.Documents
         protected override Size ArrangeOverride(Size finalSize)
         {
             // Not using an enumerator because the list can be modified during the loop when we call out.
-            // Shares the pooled snapshot buffer with MeasureOverride (Measure runs first in a layout
-            // pass and clears the buffer before Arrange runs).  Re-entry falls back to a fresh alloc.
-            int count = _zOrderMap.Count;
-            DictionaryEntry[] zOrderMapEntries;
-            bool ownsPool = !_zOrderEntriesInUse;
-            if (ownsPool)
-            {
-                if (_zOrderEntriesBuffer == null || _zOrderEntriesBuffer.Length < count)
-                    _zOrderEntriesBuffer = new DictionaryEntry[Math.Max(count, 8)];
-                zOrderMapEntries = _zOrderEntriesBuffer;
-                _zOrderEntriesInUse = true;
-            }
-            else
-            {
-                zOrderMapEntries = new DictionaryEntry[count];
-            }
+            DictionaryEntry[] zOrderMapEntries = new DictionaryEntry[_zOrderMap.Count];
+            _zOrderMap.CopyTo(zOrderMapEntries, 0);
 
-            try
+            for (int i = 0; i < zOrderMapEntries.Length; i++)
             {
-                _zOrderMap.CopyTo(zOrderMapEntries, 0);
+                ArrayList adornerInfos = (ArrayList)zOrderMapEntries[i].Value;
 
-                for (int i = 0; i < count; i++)
+                Debug.Assert(adornerInfos != null, "No adorners found for element in AdornerLayer._zOrderMap");
+
+                int j = 0;
+                while (j < adornerInfos.Count)
                 {
-                    ArrayList adornerInfos = (ArrayList)zOrderMapEntries[i].Value;
+                    AdornerInfo adornerInfo = (AdornerInfo)adornerInfos[j++];
 
-                    Debug.Assert(adornerInfos != null, "No adorners found for element in AdornerLayer._zOrderMap");
-
-                    int j = 0;
-                    while (j < adornerInfos.Count)
+                    if (!adornerInfo.Adorner.IsArrangeValid)    // optimization
                     {
-                        AdornerInfo adornerInfo = (AdornerInfo)adornerInfos[j++];
+                        // We're dependent on Arrange to get the rendersize of the adorner, so Arrange before
+                        // doing our transform magic.
+                        adornerInfo.Adorner.Arrange(new Rect(new Point(), adornerInfo.Adorner.DesiredSize));
+                        GeneralTransform proposedTransform = adornerInfo.Adorner.GetDesiredTransform(adornerInfo.GetTransformForArrange());
+                        GeneralTransform adornerTransform = GetProposedTransform(adornerInfo.Adorner, proposedTransform);
 
-                        if (!adornerInfo.Adorner.IsArrangeValid)    // optimization
+                        int index = _children.IndexOf(adornerInfo.Adorner);
+
+                        if (index >= 0)
                         {
-                            // We're dependent on Arrange to get the rendersize of the adorner, so Arrange before
-                            // doing our transform magic.
-                            adornerInfo.Adorner.Arrange(new Rect(new Point(), adornerInfo.Adorner.DesiredSize));
-                            GeneralTransform proposedTransform = adornerInfo.Adorner.GetDesiredTransform(adornerInfo.GetTransformForArrange());
-                            GeneralTransform adornerTransform = GetProposedTransform(adornerInfo.Adorner, proposedTransform);
-
-                            int index = _children.IndexOf(adornerInfo.Adorner);
-
-                            if (index >= 0)
-                            {
-                                // Get the matrix transform out, skip all non affine transforms
-                                Transform transform = adornerTransform?.AffineTransform;
-
-                                ((Adorner)(_children[index])).AdornerTransform = transform;
-                            }
-                        }
-                        if (adornerInfo.Adorner.IsClipEnabled)
-                        {
-                            adornerInfo.Adorner.AdornerClip = adornerInfo.Clip;
-                        }
-                        else if (adornerInfo.Adorner.AdornerClip != null)
-                        {
-                            adornerInfo.Adorner.AdornerClip = null;
+                            // Get the matrix transform out, skip all non affine transforms
+                            Transform transform = adornerTransform?.AffineTransform;
+                            
+                            ((Adorner)(_children[index])).AdornerTransform = transform;
                         }
                     }
-                }
-            }
-            finally
-            {
-                if (ownsPool)
-                {
-                    Array.Clear(zOrderMapEntries, 0, count);
-                    _zOrderEntriesInUse = false;
+                    if (adornerInfo.Adorner.IsClipEnabled)
+                    {
+                        adornerInfo.Adorner.AdornerClip = adornerInfo.Clip;
+                    }
+                    else if (adornerInfo.Adorner.AdornerClip != null)
+                    {
+                        adornerInfo.Adorner.AdornerClip = null;
+                    }
                 }
             }
 
@@ -1206,14 +1150,6 @@ namespace System.Windows.Documents
         // not self-reentrant on the same AdornerLayer instance.
         private List<UIElement> _removeList;
         private UIElement[] _keysSnapshotBuffer;
-
-        // Pooled snapshot of _zOrderMap reused across MeasureOverride/ArrangeOverride.
-        // _zOrderEntriesInUse guards the pool against re-entry (an Adorner.Measure
-        // callout that reaches back into MeasureOverride on this same AdornerLayer);
-        // re-entrant calls fall back to a fresh allocation so the outer iteration's
-        // snapshot is preserved.
-        private DictionaryEntry[] _zOrderEntriesBuffer;
-        private bool _zOrderEntriesInUse;
 
         // Dirty-bit gate for OnLayoutUpdated.  Set on adorner add/remove and on any
         // per-element LayoutUpdated event; cleared at the top of UpdateAdorner so a
