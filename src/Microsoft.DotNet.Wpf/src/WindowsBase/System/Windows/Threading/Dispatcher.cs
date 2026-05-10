@@ -563,16 +563,7 @@ namespace System.Windows.Threading
         public void Invoke(Action callback, DispatcherPriority priority, CancellationToken cancellationToken, TimeSpan timeout)
         {
             ArgumentNullException.ThrowIfNull(callback);
-
-            // priority == Send is sufficient witness that priority is valid (in the
-            // foreground PriorityRange [Loaded, Send] and != Inactive); skip the
-            // full ValidatePriority call (3× PriorityRange.Contains + Inactive
-            // equality) on the dominant fast path. Off-fast-path invocations still
-            // run the original validation immediately below.
-            if (priority != DispatcherPriority.Send)
-            {
-                ValidatePriority(priority, "priority");
-            }
+            ValidatePriority(priority, "priority");
 
             if( timeout.TotalMilliseconds < 0 &&
                 timeout != TimeSpan.FromMilliseconds(-1))
@@ -714,16 +705,7 @@ namespace System.Windows.Threading
         public TResult Invoke<TResult>(Func<TResult> callback, DispatcherPriority priority, CancellationToken cancellationToken, TimeSpan timeout)
         {
             ArgumentNullException.ThrowIfNull(callback);
-
-            // priority == Send is sufficient witness that priority is valid (in the
-            // foreground PriorityRange [Loaded, Send] and != Inactive); skip the
-            // full ValidatePriority call (3× PriorityRange.Contains + Inactive
-            // equality) on the dominant fast path. Off-fast-path invocations still
-            // run the original validation immediately below.
-            if (priority != DispatcherPriority.Send)
-            {
-                ValidatePriority(priority, "priority");
-            }
+            ValidatePriority(priority, "priority");
 
             if( timeout.TotalMilliseconds < 0 &&
                 timeout != TimeSpan.FromMilliseconds(-1))
