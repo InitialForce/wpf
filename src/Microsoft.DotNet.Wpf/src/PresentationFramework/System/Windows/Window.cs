@@ -5538,10 +5538,18 @@ namespace System.Windows
                 //
                 // Determine whether this is a Topmost window without calling
                 // the Topmost property.  (This isn't allowed for xbap windows.)
-                bool isTopmost = (bool)GetValue(TopmostProperty);
-                if (isTopmost &&
+                //
+                // Short-circuit ordering: the cheap nCmd integer compares and the cached AppContext
+                // switch read are evaluated first, so the GetValue(TopmostProperty) DP lookup (which
+                // routes through DependencyObject.GetEffectiveValue with a hashtable miss + bool unbox)
+                // is skipped entirely on every Hide (nCmd==SW_HIDE) and on every Show that uses
+                // SW_SHOWMAXIMIZED / SW_SHOWMINIMIZED / SW_SHOWNORMAL, plus on every call when the
+                // compatibility switch is off (the default). The original ordering eagerly read
+                // TopmostProperty before any of the cheap branches even though those branches
+                // suppress the only consumer of isTopmost.
+                if ((nCmd == NativeMethods.SW_SHOW || nCmd == NativeMethods.SW_SHOWNA) &&
                     FrameworkCompatibilityPreferences.GetUseSetWindowPosForTopmostWindows() &&
-                    (nCmd == NativeMethods.SW_SHOW || nCmd == NativeMethods.SW_SHOWNA))
+                    (bool)GetValue(TopmostProperty))
                 {
                     int flags = (nCmd == NativeMethods.SW_SHOWNA) ? NativeMethods.SWP_NOACTIVATE : 0;
                     UnsafeNativeMethods.SetWindowPos(new HandleRef(this, Handle),
