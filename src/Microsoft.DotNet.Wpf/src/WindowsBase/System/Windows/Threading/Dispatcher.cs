@@ -69,46 +69,6 @@ namespace System.Windows.Threading
         /// </remarks>
         public static Dispatcher FromThread(Thread thread)
         {
-            // Lock-free same-thread fast path: when a thread asks for its
-            // own Dispatcher, the [ThreadStatic] _tlsDispatcher slot — which
-            // the Dispatcher constructor populates on its owning thread —
-            // is sufficient to answer without entering _globalLock.
-            //
-            // Memory model / correctness:
-            //   * _tlsDispatcher is per-thread, so reads from the owning
-            //     thread are race-free: only that thread ever writes its
-            //     own ThreadStatic slot (in the Dispatcher ctor, which
-            //     necessarily runs on the owning thread).
-            //   * The fast path requires thread == Thread.CurrentThread, so
-            //     a non-null cached value is always the dispatcher whose
-            //     Thread property equals the requested thread. We never
-            //     return a wrong-thread Dispatcher.
-            //   * If the current thread has no Dispatcher, _tlsDispatcher
-            //     is null and we fall through to the locked slow path —
-            //     identical behaviour to the original implementation.
-            //   * Cross-thread queries (thread != current thread) bypass
-            //     the fast path entirely, so the rare cross-thread caller
-            //     still sees the original locked semantics (lock + scan +
-            //     dead-reference purge + _possibleDispatcher write-back).
-            //
-            // Targeted callers: Dispatcher.CurrentDispatcher and the many
-            // VerifyAccess / DispatcherObject construction paths inside
-            // WPF that hit FromThread(Thread.CurrentThread) per render
-            // pass / per layout invalidation / per DependencyObject
-            // construction on the dispatcher thread. Killing the per-call
-            // Monitor.Enter/Exit pair plus the WeakReferenceList<Dispatcher>
-            // scan on the dominant call shape compounds across the
-            // hundreds-to-thousands of FromThread hits each Window.Show /
-            // Window.Hide / take-open scenario fires off.
-            if (thread != null && thread == Thread.CurrentThread)
-            {
-                Dispatcher tls = _tlsDispatcher;
-                if (tls != null)
-                {
-                    return tls;
-                }
-            }
-
             lock(_globalLock)
             {
                 Dispatcher dispatcher = null;
