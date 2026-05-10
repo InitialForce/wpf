@@ -237,7 +237,21 @@ namespace MS.Win32
             // The default result for messages we handle is 0.
             IntPtr result = IntPtr.Zero;
             WindowMessage message = (WindowMessage)msg;
-        
+
+            // Hoist _isInCreateWindow into a local so the dominant post-creation path
+            // (the field is set true only during the CreateWindowEx call inside the
+            // HwndWrapper ctor — line 113-130 — and is permanently false afterwards)
+            // can skip every CheckForCreateWindowFailure call frame on each WndProc
+            // invocation. Each call to that helper enters the prologue, reads the same
+            // _isInCreateWindow field, takes the early-return branch, and unwinds —
+            // pure overhead once the window has been created. The hook chain runs once
+            // per registered hook (1 hook on a typical message-only window, more on
+            // composite windows), so a hoist eliminates (hookCount + 1) wasted frames
+            // per WndProc on the steady-state production path. The semantics of the
+            // original calls are preserved: the helper still runs (now via the hoisted
+            // branch) when _isInCreateWindow is true.
+            bool isInCreateWindow = _isInCreateWindow;
+
             // Call all of the hooks
             if(_hooks is not null)
             {
@@ -245,7 +259,8 @@ namespace MS.Win32
                 {
                     result = hook(hwnd, msg, wParam, lParam, ref handled);
 
-                    CheckForCreateWindowFailure(result, handled);
+                    if (isInCreateWindow)
+                        CheckForCreateWindowFailure(result, handled);
 
                     if(handled)
                     {
@@ -256,7 +271,7 @@ namespace MS.Win32
 
             if (message == WindowMessage.WM_NCDESTROY)
             {
-                Dispose(/*disposing = */ true, 
+                Dispose(/*disposing = */ true,
                         /*isHwndBeingDestroyed = */ true);
                 GC.SuppressFinalize(this);
 
@@ -273,7 +288,8 @@ namespace MS.Win32
                 handled = true;
             }
 
-            CheckForCreateWindowFailure(result, true);
+            if (isInCreateWindow)
+                CheckForCreateWindowFailure(result, true);
 
             // return our result
             return result;
