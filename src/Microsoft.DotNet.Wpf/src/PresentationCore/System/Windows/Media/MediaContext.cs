@@ -1542,10 +1542,20 @@ namespace System.Windows.Media
             _registeredICompositionTargets.Remove(iv);
         }
 
-        private class InvokeOnRenderCallback
+        // Value-type wrapper around the (callback, arg) pair queued by BeginInvokeOnRender
+        // for the current layout-update cycle.  Was previously a class which forced a heap
+        // allocation per BeginInvokeOnRender call (every UIElement layout invalidation that
+        // routes through MediaContext.BeginInvokeOnRender — InvalidateMeasure /
+        // InvalidateArrange paths going through ContextLayoutManager → MediaContext.
+        // BeginInvokeOnRender posts a layout-pass work item per invalidated element).
+        // FrugalObjectList<T> stores T inline (T[] backing), so the struct lives in the
+        // list's storage with no per-add allocation.  DoWork() is a non-mutating read of
+        // the two fields, so reading via FrugalObjectList's by-value indexer is correct
+        // (a copy of the struct is fine — no state to preserve across the call).
+        private readonly struct InvokeOnRenderCallback
         {
-            private DispatcherOperationCallback _callback;
-            private object _arg;
+            private readonly DispatcherOperationCallback _callback;
+            private readonly object _arg;
 
             public InvokeOnRenderCallback(
                 DispatcherOperationCallback callback,
@@ -1561,6 +1571,16 @@ namespace System.Windows.Media
             }
         }
 
+        // Initial capacity for _invokeOnRenderCallbacks.  FrugalObjectList grows through
+        // SingleItemList -> ThreeItemList -> SixItemList -> ArrayItemList tiers as items
+        // are added; each tier transition allocates a new tier object plus copies the
+        // existing entries.  A typical layout pass posts more than 6 callbacks (every
+        // invalidated element registers one), so pre-sizing past the SixItemList tier
+        // skips three tier-upgrade allocations per layout cycle.  Capacity 16 fits the
+        // common case in one ArrayItemList<InvokeOnRenderCallback>(16); larger passes
+        // still grow as needed (ArrayItemList has its own grow strategy).
+        private const int InvokeOnRenderInitialCapacity = 16;
+
         internal void BeginInvokeOnRender(
             DispatcherOperationCallback callback,
             object arg)
@@ -1574,7 +1594,7 @@ namespace System.Windows.Media
 
             if (_invokeOnRenderCallbacks == null)
             {
-                _invokeOnRenderCallbacks = new FrugalObjectList<InvokeOnRenderCallback>();
+                _invokeOnRenderCallbacks = new FrugalObjectList<InvokeOnRenderCallback>(InvokeOnRenderInitialCapacity);
             }
 
             _invokeOnRenderCallbacks.Add(new InvokeOnRenderCallback(callback, arg));
