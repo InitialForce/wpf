@@ -367,14 +367,20 @@ namespace System.Windows.Media.Animation
                 // we are ticking.
                 EventTrace.EasyTraceEvent(EventTrace.Keyword.KeywordAnimation | EventTrace.Keyword.KeywordPerf, EventTrace.Event.WClientTimeManagerTickBegin, (_startTime + _globalTime).Ticks / TimeSpan.TicksPerMillisecond);
 
-                // Run new property querying logic on the timing tree
+                // Run new property querying logic on the timing tree.
+                // The _currentTickInterval TIC was previously freshly allocated per render tick (3 small
+                // arrays via the private TimeIntervalCollection ctor's EnsureAllocatedCapacity), but it is
+                // a per-TimeManager field that is exclusively read by the tick processing on the
+                // dispatcher thread (animation_clock.ComputeTreeState walks the tree synchronously inside
+                // this same call). Rebuild it in place to reuse the existing buffers across ticks and
+                // eliminate the per-tick array allocations on the active-animation path.
                 if (_lastTimeState == TimeState.Stopped && _timeState == TimeState.Stopped)  // We were stopped the whole time
                 {
-                    _currentTickInterval = TimeIntervalCollection.CreateNullPoint();
+                    _currentTickInterval.RebuildAsNullPoint();
                 }
                 else  // We were not stopped at some time, so process the tick interval
                 {
-                    _currentTickInterval = TimeIntervalCollection.CreateOpenClosedInterval(_lastTickTime, _globalTime);
+                    _currentTickInterval.RebuildAsOpenClosedInterval(_lastTickTime, _globalTime);
 
                     // If at either tick we were stopped, add the null point to represent that
                     if (_lastTimeState == TimeState.Stopped || _timeState == TimeState.Stopped)
