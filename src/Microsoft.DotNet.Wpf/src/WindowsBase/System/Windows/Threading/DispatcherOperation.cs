@@ -491,13 +491,24 @@ namespace System.Windows.Threading
             {
                 // We are executing under the "foreign" execution context, but the
                 // SynchronizationContext must be for the correct dispatcher and
-                // priority. Resolve via Dispatcher.GetOperationSyncCtx so the
-                // .NET Core default config (reuseInstance=false, flowPriority=true)
-                // returns a per-priority cached DispatcherSynchronizationContext
-                // instead of allocating a fresh one per queued op. The helper also
-                // reads the per-instance cached compat fields, sparing two
-                // BaseCompatibilityPreferences.Get*() static calls per dispatch.
-                SynchronizationContext.SetSynchronizationContext(_dispatcher.GetOperationSyncCtx(_priority));
+                // priority.
+                DispatcherSynchronizationContext newSynchronizationContext;
+                if(BaseCompatibilityPreferences.GetReuseDispatcherSynchronizationContextInstance())
+                {
+                    newSynchronizationContext = Dispatcher._defaultDispatcherSynchronizationContext;
+                }
+                else
+                {
+                    if(BaseCompatibilityPreferences.GetFlowDispatcherSynchronizationContextPriority())
+                    {
+                        newSynchronizationContext = new DispatcherSynchronizationContext(_dispatcher, _priority);
+                    }
+                    else
+                    {
+                        newSynchronizationContext = new DispatcherSynchronizationContext(_dispatcher, DispatcherPriority.Normal);
+                    }
+                }
+                SynchronizationContext.SetSynchronizationContext(newSynchronizationContext);
 
 
                 // Win32 considers timers to be low priority.  Avalon does not, since different timers
