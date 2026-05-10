@@ -504,4 +504,86 @@ python3 microbench-scenario.py --scenario take-open --bench-name '<tag>'
 cat /c/work/wpf-perf/autoresearch/cooldown.json 2>/dev/null
 # Or the human-readable view:
 python3 /c/work/wpf-perf/tools/cool-list.py
+
+# Render-pass amplification diagnostic (reads existing analysis.json — no new run)
+python3 /c/work/wpf-perf/autoresearch/profile-amplification-check.py --scenario take-open
 ```
+
+## Render-pass amplification diagnostic
+
+`autoresearch/profile-amplification-check.py` (commit `70e0bd6fd`) detects
+**forever-animation render amplification**: the ratio of WPF-attributed alloc
+during the scenario to the alloc that would occur in a fully-quiescent run.
+It reads the existing `analysis.json` from the most recent profile capture; it
+does NOT trigger a new scenario run. Reflects the *current* steady state.
+
+**Thresholds:**
+- ratio > 3 → WARN
+- ratio > 10 → CRITICAL
+
+**When to consult it:**
+
+The Tier C scenario verdict (KEEP/REJECT) is the primary signal. But if a
+scenario verdict is KEEP AND the amplification ratio is > 3 AND the change
+targeted a per-render-tick allocator (anything that fires every animation tick:
+`MediaContext.PostRender`, `Clock.ComputeEvents`, `TimeManager.Tick`, etc.),
+include the amplification ratio in your next-iter pointer. Example: "Tier C
+KEEP; amplification was 7.2 → 4.1 post-fix. Still above 3 — warm-lead #2
+(MediaContext.PostRender) is the next obvious tick-path target."
+
+You may also run it as a pre-flight sanity check if you are unsure whether a
+proposed tick-path change is attacking an already-amplified workload or a
+genuinely quiescent one.
+
+**Invocation:**
+```
+python3 /c/work/wpf-perf/autoresearch/profile-amplification-check.py --scenario take-open
+# Also valid: --scenario startup, --scenario playback
+```
+
+## Strategic context — Fix 3 / empty-AdornerLayer fast-path (closed, diminishing returns)
+
+Commit `9ddfa26bc` added an empty-AdornerLayer fast-path in
+`AdornerLayer.OnLayoutUpdated`: when `_adornerLayer == null || adornerCount == 0`
+the method returns immediately without entering the update walk.
+
+This complements the dirty-bit guard in commit `5e7df8833` (Fix 2), which skips
+`UpdateAdorner` when no adorner state has changed. Together the two commits
+**structurally close the empty-AdornerLayer cascade**: a container with no
+adorners costs essentially zero layout-updated work regardless of how many
+descendant layout passes fire.
+
+**Consequence for future iters:** Mining `AdornerLayer.OnLayoutUpdated` or
+`AdornerLayer.UpdateAdorner` further is pursuing diminishing returns — the
+cascade is already blocked at two independent layers. Prefer warm-lead
+candidates that have NOT been hit yet:
+
+- Warm-lead #2 `MediaContext.PostRender` is **untried** as of this writing.
+  See the "Warm-lead next-tier candidates" section above.
+- Warm-lead #3 was the iter-074 KEEP (`Clock.ComputeEvents` / `TimeManager.Tick`
+  pooling). That surface still has sub-paths worth exploring but the core
+  per-tick alloc has been cut; new angles must show a novel signal.
+- Warm-lead #1 (`AdornerLayer.MeasureOverride` DictionaryEntry snapshot pool)
+  was REJECTed in iter-073 — do not retry without a meaningfully different
+  approach.
+
+## Known issues — app-layer pathologies
+
+`autoresearch/wpf-app-known-issues.md` (commit `7a396a9b8`) is the canonical
+list of observed pathology + WPF root-cause pairs, formatted as:
+
+```
+## <Symptom>
+- Root cause: <WPF source location + mechanism>
+- Status: fixed / open / partial
+- Commits: <sha list>
+```
+
+**Read it** when you suspect a known pathology is still contributing to alloc
+(to avoid rediscovering something already fixed or ruled out).
+
+**Extend it** when you discover a new pathology + root-cause pair — even for
+REJECT outcomes where you confirmed a mechanism but the fix didn't land. Use
+the same format. The file is in `autoresearch/` so you may READ it but must NOT
+WRITE to it directly in-loop; add a note in your commit body flagging the new
+entry so the orchestrator can add it out-of-band.
