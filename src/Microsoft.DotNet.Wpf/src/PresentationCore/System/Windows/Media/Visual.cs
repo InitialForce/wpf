@@ -4435,91 +4435,14 @@ namespace System.Windows.Media
 
             if (isSimple)
             {
-                // [ThreadStatic] LRU cache of recently-returned Frozen MatrixTransform
-                // instances keyed by Matrix value. Frozen MTs are immutable and thread-
-                // safe to share between callers, so when the same accumulated Matrix
-                // recurs across consecutive TransformToAncestor / TransformToDescendant
-                // / TransformToVisual calls (which routinely hits the same per-element
-                // chain on each render-tick during scenarios with continuous
-                // animation), the cache returns the previously-allocated MT instead
-                // of allocating a new one. The avoided per-call alloc chain is
-                // ~140 B: 24 B MT class header + ~52 B EffectiveValueEntry[1] +
-                // ~64 B boxed Matrix in the DP store. With 7.5M MT/scenario seen
-                // in take-open profiling, even a moderate hit rate compounds into
-                // the hundreds-of-MB range for whole-scenario WPF-attributed alloc.
-                MatrixTransform cached = LookupSimpleTransformCache(ref simpleTransform);
-                if (cached != null)
-                {
-                    return cached;
-                }
-
                 MatrixTransform matrixTransform = new MatrixTransform(simpleTransform);
                 matrixTransform.Freeze();
-                StoreSimpleTransformCache(simpleTransform, matrixTransform);
                 return matrixTransform;
             }
             else
             {
                 return generalTransform;
             }
-        }
-
-        // Per-thread ring cache of (Matrix, Frozen MatrixTransform) pairs returned by
-        // the simple-transform fast path of InternalTransformToAncestor. Capacity 16
-        // is large enough to absorb the dominant per-render-tick query pattern (each
-        // visible adorned element queries TransformToAncestor in a tight loop, and
-        // adjacent calls with the same (this, ancestor) pair produce identical
-        // accumulated matrices).  Linear scan over 16 Matrix structs is cheap
-        // relative to the saved MT+EffectiveValueEntry[1]+boxed-Matrix alloc.
-        private const int SimpleTransformCacheSize = 16;
-
-        [ThreadStatic]
-        private static SimpleTransformCacheEntry[] s_simpleTransformCache;
-
-        // Insertion index for the ring buffer (writes overwrite the oldest entry).
-        [ThreadStatic]
-        private static int s_simpleTransformCacheNext;
-
-        private struct SimpleTransformCacheEntry
-        {
-            public Matrix Matrix;
-            public MatrixTransform Transform;
-        }
-
-        private static MatrixTransform LookupSimpleTransformCache(ref Matrix matrix)
-        {
-            SimpleTransformCacheEntry[] cache = s_simpleTransformCache;
-            if (cache == null)
-            {
-                return null;
-            }
-
-            for (int i = 0; i < cache.Length; i++)
-            {
-                MatrixTransform mt = cache[i].Transform;
-                if (mt != null && cache[i].Matrix == matrix)
-                {
-                    return mt;
-                }
-            }
-            return null;
-        }
-
-        private static void StoreSimpleTransformCache(Matrix matrix, MatrixTransform matrixTransform)
-        {
-            SimpleTransformCacheEntry[] cache = s_simpleTransformCache;
-            if (cache == null)
-            {
-                cache = new SimpleTransformCacheEntry[SimpleTransformCacheSize];
-                s_simpleTransformCache = cache;
-            }
-
-            int slot = s_simpleTransformCacheNext;
-            cache[slot].Matrix = matrix;
-            cache[slot].Transform = matrixTransform;
-
-            // Advance ring head; mask so the modulo doesn't need a divide.
-            s_simpleTransformCacheNext = (slot + 1) & (SimpleTransformCacheSize - 1);
         }
 
         /// <summary>
