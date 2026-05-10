@@ -68,6 +68,22 @@
 > ABI-verified: locally-built PF = Version=10.0.0.0 / PublicKeyToken=31bf3856ad364e35
 > matching the shadow pack). *WindowLifecycle* is available for picking.
 >
+> **Operational update (2026-05-10, POST-STRUCTURAL-WASTE-FIX SESSION):**
+> The AdornerLayer chain landed this session — four KEEPs across two commits:
+>   - `Visual.TryTransformToAncestorAsMatrix` struct-return fast path
+>     (eliminates `MatrixTransform`+`Matrix` alloc per `TransformToAncestor` call)
+>   - Dirty-bit gate around `AdornerLayer.UpdateAdorner` walk
+>   - Pooled `removeList` + `keys[]` snapshot buffers in `AdornerLayer.UpdateAdorner`
+>   - Pooled `branchNodeStack` via `[ThreadStatic]` in `UIElementHelper.InvalidateAutomationAncestors`
+>
+>   **Combined measured scenario impact: −89.6% take-open WPF-attributed
+>   allocation (n=11/10, CIs disjoint, validated 2026-05-09).**
+>
+>   `profile.json` has been regenerated against the post-fix binary. The top
+>   per-call-cost paths (dispatcher pump wrappers, CultureContext, ExceptionWrapper)
+>   remain, but NEW structural-waste candidates are now exposed. See the
+>   "Warm-lead next-tier candidates" section below.
+>
 > **You are still authorized to swing big.** Component rewrites, multi-file
 > refactors, sub-agent help — all on the table. The only hard constraints are
 > the path allowlist (mechanically enforced) and a single atomic commit per
@@ -83,9 +99,12 @@ exit; "never stop" applies to the LOOP, not your session.
 |---|---|---|---|
 | **A — Profile** | every 3 KEEPs | re-rank `profile.json` | orchestrator |
 | **B — Microbench** | EVERY ITER (you) | KEEP / REJECT one code change | inner Claude (you) |
-| **C — Scenario** | every 3 KEEPs | sanity-check accumulated wins | orchestrator |
+| **C — Scenario-alloc** | when structural changes wouldn't move Tier B | KEEP / REJECT whole-scenario WPF allocation | inner Claude (you) — see below |
 
-You only run Tier B. Don't try to invoke Tier A or C.
+**Tier B is the default.** Run Tier C only when your proposed change is
+structural (eliminates call volume, not per-call cost) and the Tier B
+microbench filter would NOT capture it because the benchmark already
+returns ~0 B/op on the changed path. See the "Tier C harness" section.
 
 ## Goal
 
@@ -95,19 +114,30 @@ class→struct conversion, a Span<char>-based parser rewrite, a queue redesign,
 whatever fits. Compounding wins is the strategy; the size of each compound is
 yours to choose.
 
-**Strategic priority: significant wins on EITHER axis.** With the
-out-of-process shadow toolchain (live since 2026-05-09), each benchmark runs
-in its own child process — no JIT/GC state leaks between benches. Time-axis
-noise is now at the BDN-default level (CIs typically 0.5–2 ns wide), so
-**5 ns/op time wins are real and measurable**, not coin flips. Iter 062
-proved this: ExceptionWrapper TryCatchWhenAction landed an 8.92 → 2.95 ns
-KEEP (-67%, CIs disjoint) where the InProcess harness would have buried it
-under cross-thread STA noise.
+**Strategic priority: structural-waste / call-volume mining is now the
+dominant theme.** Per-call-cost micro-mining of the dispatcher/exception-
+wrapper path has hit floor — most ranks 6-15 in the fresh profile are
+inclusive stack frames whose own allocs are trivial. The 2026-05-09
+session proved the new model: four structural-waste KEEPs in one session
+delivered −89.6% whole-scenario allocation (n=11/10, CIs disjoint):
+  - Dirty-bit gates that eliminate work entirely (AdornerLayer.UpdateAdorner)
+  - Pooled per-call buffers (removeList, keys[], branchNodeStack)
+  - Struct-return fast paths that avoid heap objects per-call
+    (TryTransformToAncestorAsMatrix)
+
+**Alloc-axis and time-axis wins remain valid**, but the highest-impact
+opportunities now are structural: identify redundant calls, defensive
+copies, per-call object creation that can be eliminated or pooled.
+With the out-of-process shadow toolchain (live since 2026-05-09), each
+benchmark runs in its own child process — no JIT/GC state leaks between
+benches. **5 ns/op time wins are real and measurable** (iter-062 proved:
+ExceptionWrapper TryCatchWhenAction 8.92 → 2.95 ns, CIs disjoint).
 
 Prefer changes likely to register on EITHER:
-  * **Alloc axis** — wrapper kills (CCM=48B, boxed enum=24B, SyncCtx=32B),
-    struct-instead-of-class, removing event-arg boxing, delegate caching,
-    pooling. Floor is 16 B/op; alloc is deterministic (CV ≈ 0).
+  * **Alloc axis** — structural elimination (dirty bits, call guards),
+    pooling (ThreadStatic, ArrayPool), struct-return fast paths, wrapper
+    kills (CCM=48B, boxed enum=24B, SyncCtx=32B), delegate caching.
+    Floor is 16 B/op; alloc is deterministic (CV ≈ 0).
   * **Time axis** — eliminating uncontended Monitor pairs, killing virtual
     calls, hoisting field reads, inlining type-test hot paths,
     [AggressiveInlining] on small wrappers (the iter-062 win pattern).
@@ -133,6 +163,66 @@ revert manually. Don't second-guess the verdict — it's statistical, not
 heuristic. **Because the revert targets HEAD only, your iter MUST land as ONE
 atomic commit** (one or many files; one commit). Sub-agents commit nothing
 themselves; they hand work back to you and you make the single commit.
+
+## Tier C harness — scenario-alloc axis (`microbench-scenario.py`)
+
+`autoresearch/microbench-scenario.py` measures **whole-scenario WPF-attributed
+allocation** from a live EventPipe trace. Use it when your change is structural
+(dirty-bit gate, call-count reduction, pooling that eliminates buffer creation)
+and the Tier B microbench would not show the win because the relevant benchmark
+is already near-zero, or because the work only happens in a full GUI scenario
+(e.g. layout pass, animation tick, take-open lifecycle).
+
+**When to pick Tier C over Tier B:**
+- Your change eliminates calls entirely (e.g. a dirty-bit guard skips whole
+  code paths), so Tier B's per-call benchmark would show 0 B/op both before
+  and after (nothing to measure).
+- The hot path is a WPF layout/render/animation method only exercised during
+  real scenario playback (startup, take-open, take-close, playback loop).
+- You confirmed the change does NOT affect an existing Tier B benchmark's
+  alloc column — meaning Tier B gives no signal.
+
+**When NOT to pick Tier C:**
+- There is an existing Tier B benchmark that covers the changed path AND it
+  shows non-zero alloc. Use Tier B — it is faster (~10 min vs ~30 min) and
+  has lower noise.
+- Your change is a per-call micro-opt (inlining, struct conversion, delegate
+  caching). Tier B measures these correctly; Tier C's sampling granularity
+  is too coarse to catch sub-kilobyte-per-iter improvements.
+
+**How to invoke (Bash tool: timeout=3600000, foreground):**
+```
+cd /c/work/wpf-perf/autoresearch
+python3 microbench-scenario.py --scenario take-open --bench-name '<tag>'
+```
+Valid `--scenario` values: `startup`, `take-open`, `playback`.
+The `take-open` scenario covers the dominant alloc path (AdornerLayer,
+layout, render init) and is the recommended default.
+
+**Exit codes** (same semantics as microbench.py):
+| Exit | Meaning | Your action |
+|---|---|---|
+| 0 | KEEP — commit stays on HEAD | Summarize win, EXIT |
+| 1 | REJECT (significant regression) — auto-reverted | Note why, EXIT |
+| 2 | REJECT-UNCLEAR (sub-noise) — auto-reverted | Note in summary, EXIT |
+| 3 | BUILD-FAIL — code didn't compile, reverted | Fix next iter, EXIT |
+| 4 | BENCH-FAIL — scenario/trace crashed, reverted | Note harness issue, EXIT |
+| 5 | Working tree dirty | Commit first, retry |
+| 6 | Path allowlist violation — auto-revert | Rethink, EXIT |
+
+**Timing:** ~30 min/iter (vs ~10 min for Tier B). Budget accordingly.
+Each run produces a ~243 MB nettrace in a temp dir (auto-cleaned).
+
+**Flakiness:** Post-hardening smoke rate ≈ 0% crash rate across 10 runs
+(validated 2026-05-09 at ~107 s/run). The scenario is stable; a BENCH-FAIL
+is likely a real build or environment problem, not transient noise.
+
+**Decision threshold:** same as Tier B — CIs must not overlap at 99.9% AND
+delta must be ≥ ~50 KB/scenario (the alloc floor at scenario granularity;
+far larger than the 16 B/op Tier B floor). Sub-noise changes still yield
+REJECT-UNCLEAR. Because scenario alloc captures the *entire* WPF-attributed
+heap traffic (not per-benchmark-invocation), a meaningful structural win
+typically shows up as ≥ 1 MB delta on take-open.
 
 ## Where you may edit
 
@@ -163,6 +253,38 @@ You **MUST NOT** edit:
 
 If you find a benchmark insufficient, write a NOTE in your commit body — the
 orchestrator will author additions in a separate non-iter pass.
+
+## Warm-lead next-tier candidates (from fresh post-fix profile, 2026-05-10)
+
+These are strong structural-waste targets newly exposed after the AdornerLayer
+fix chain. They are **warm leads from fresh-profile analysis**, not mandates —
+rank them alongside the rest of `profile.json` and pick whichever has the
+best expected impact. Your own profile analysis may surface better targets.
+
+1. **`AdornerLayer.MeasureOverride`** — 585 MB combined alloc across scenarios.
+   File: `src/Microsoft.DotNet.Wpf/src/PresentationFramework/System/Windows/Documents/AdornerLayer.cs`
+   Every layout pass allocates `DictionaryEntry[] zOrderMapEntries = new DictionaryEntry[_zOrderMap.Count]`
+   to snapshot the SortedList for sorted iteration. Same pooling/snapshot
+   pattern as the `removeList` / `keys[]` fix in `UpdateAdorner` (commit
+   `3b381f85d`). Measurable via Tier C `--scenario take-open` (layout-heavy)
+   or via `*WindowLifecycle*` Tier B if a benchmark exercises MeasureOverride.
+
+2. **`MediaContext.PostRender`** — DispatcherOperation churn per render tick (~1 kHz).
+   File: `src/Microsoft.DotNet.Wpf/src/PresentationCore/System/Windows/Media/MediaContext.cs`
+   A `DispatcherOperation` is posted every render tick. A `_currentRenderOp != null`
+   guard already exists but the op expires to null between ticks. Reusing a
+   long-lived op (or nulling it via completion callback and re-queuing instead of
+   allocating a new one) would cut steady-state op churn. Tier C `--scenario playback`
+   best captures this (render loop runs continuously during playback).
+
+3. **`Animation.Clock.ComputeEvents`** — 49.7 MB across all 3 scenarios.
+   File: `src/Microsoft.DotNet.Wpf/src/PresentationCore/System/Windows/Media/Animation/Clock.cs`
+   Fires every animation tick for every clock node, allocates `TimeIntervalCollection`
+   segments even for quiescent clocks (clocks that haven't changed state).
+   A dirty-flag guard (similar to the `AdornerLayer.UpdateAdorner` dirty-bit,
+   commit `5e7df8833`) could skip segment computation for clocks that haven't
+   changed since the last tick. Tier C `--scenario playback` is the right harness
+   (animation runs during playback).
 
 ## Sub-agents (authorized, unbounded)
 
@@ -257,17 +379,29 @@ Rules for sub-agents:
    Include the full hypothesis + plan in the commit body (lines 2+). For
    ambitious changes, list the files modified and why each was needed.
 
-6. **Run microbench.py** in the foreground:
+6. **Run the appropriate harness** in the foreground:
+
+   **Tier B (default — per-call microbench, ~10 min):**
    ```
    cd /c/work/wpf-perf/autoresearch
    python3 microbench.py --filter '<bdn-filter>' --bench-name '<short-tag>'
    ```
-   - `<bdn-filter>` is a BDN `--filter` glob, e.g. `'*GeometryParser*'`
+   - `<bdn-filter>` is a BDN `--filter` glob, e.g. `'*WindowLifecycle*'`
    - `<short-tag>` ends up in results.jsonl for grep-ability
    - Bash tool: `timeout=900000`, `run_in_background=false` (microbench
      does 2 PresentationCore builds + 1 publish + 2 BDN runs ≈ 6–8 min)
    - Do NOT poll with `pgrep -f microbench.py` — the poller's own argv
      matches the pattern and the wait never exits.
+
+   **Tier C (structural / call-volume changes, ~30 min):**
+   ```
+   cd /c/work/wpf-perf/autoresearch
+   python3 microbench-scenario.py --scenario take-open --bench-name '<short-tag>'
+   ```
+   - Use only when Tier B's benchmark for this path already reads ~0 B/op
+     (so Tier B would give no signal). See "Tier C harness" section above.
+   - Bash tool: `timeout=3600000`, `run_in_background=false`
+   - Same exit-code semantics as Tier B (0=KEEP 1=REJECT 2=REJECT-UNCLEAR 3/4=BUILD/BENCH-FAIL etc.)
 
 7. **Read the verdict** from microbench.py's last lines and from
    `tail -1 /c/work/wpf-perf/autoresearch/results.jsonl`. Possible outcomes:
@@ -323,8 +457,9 @@ Rules for sub-agents:
 - **NEVER edit `microbench/`** — benchmarks are immutable to you.
 - **NEVER edit `autoresearch/`** — neither program.md nor scripts nor logs.
 - **NEVER push to a remote.** Local-only.
-- **NEVER touch the user's MC instance** — microbench doesn't spawn MC; only
-  Tier C (which you don't run) does.
+- **NEVER touch the user's MC instance** — microbench.py and
+  microbench-scenario.py do NOT spawn MC; they use a pre-recorded trace.
+  The user's running MC instance must never be touched.
 - **PATH ALLOWLIST.** Only the WPF source dirs listed above. Sub-agents must
   obey too — pass them the allowlist explicitly in their prompts.
 - **COOLDOWN RULE.** If a filter had 2 consecutive REJECT-UNCLEAR within the last
@@ -355,9 +490,15 @@ git -C /c/work/wpf-perf log --oneline -10
 # Available benchmarks
 dotnet /c/work/wpf-perf/microbench/bin/Release/net10.0-windows/win-x64/publish/Microbenchmarks.dll --list flat
 
-# Run microbench (Bash tool: timeout=900000, foreground)
+# Run Tier B microbench (Bash tool: timeout=900000, foreground)
 cd /c/work/wpf-perf/autoresearch
 python3 microbench.py --filter '*<HotPathName>*' --bench-name '<tag>'
+
+# Run Tier C scenario-alloc (Bash tool: timeout=3600000, foreground)
+# Use only when Tier B gives no signal (structural / call-volume change)
+cd /c/work/wpf-perf/autoresearch
+python3 microbench-scenario.py --scenario take-open --bench-name '<tag>'
+# Other valid scenarios: startup, playback
 
 # Inspect cool list (human diagnostic)
 cat /c/work/wpf-perf/autoresearch/cooldown.json 2>/dev/null
