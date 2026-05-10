@@ -384,6 +384,21 @@ namespace System.Windows.Media.Animation
             }
         }
 
+        // Resets this TIC to the empty state without releasing the lazily-allocated
+        // _nodeTime / _nodeIsPoint / _nodeIsInterval buffers. Used by callers that
+        // pool a TIC across calls (see s_scratchProjectionTemp). Unlike Clear(), this
+        // method NEVER deallocates: the arrays grow monotonically across reuses, and
+        // stale slots beyond _count are never read because all consumers bound index
+        // access by _count via CurrentIsAtLastNode = (_current + 1 == _count).
+        // After the call: _count == 0 && !_containsNullPoint, so IsEmpty == true.
+        internal void ResetForReuse()
+        {
+            _count = 0;
+            _current = 0;
+            _containsNullPoint = false;
+            _invertCollection = false;
+        }
+
         // Rebuilds this TIC in place as the half-infinite closed interval [from, +infinity).
         // Reuses existing buffers (allocates only on first call). Mirrors CreateInfiniteClosedInterval(from).
         internal void RebuildAsInfiniteClosedInterval(TimeSpan from)
@@ -1244,9 +1259,19 @@ namespace System.Windows.Media.Animation
 
                 if (period.HasTimeSpan)  // We have a finite TimeSpan period and non-zero activation duration
                 {
-                    TimeIntervalCollection tempCollection = new TimeIntervalCollection();
+                    // tempCollection used to be a fresh `new TimeIntervalCollection()` whose three
+                    // node arrays were allocated by EnsureAllocatedCapacity inside ProjectionNormalize
+                    // on every call. ProjectOntoPeriodicFunction has a single call site (ClockGroup.
+                    // ComputeCurrentIntervals) and ProjectionNormalize / ProjectionFold / ProjectionWarp
+                    // are private with no other callers, so the buffer is strictly local and is
+                    // discarded when the call returns. Pool it on a [ThreadStatic] scratch slot whose
+                    // _nodeTime / _nodeIsPoint / _nodeIsInterval arrays grow monotonically across
+                    // calls; ResetForReuse zeroes _count / _current / _containsNullPoint /
+                    // _invertCollection so the scratch satisfies the IsEmpty precondition required
+                    // by ProjectionNormalize.
+                    s_scratchProjectionTemp.ResetForReuse();
 
-                    ProjectionNormalize(ref tempCollection, beginTime, endTime, includeFillPeriod, appliedSpeedRatio);
+                    ProjectionNormalize(ref s_scratchProjectionTemp, beginTime, endTime, includeFillPeriod, appliedSpeedRatio);
 
                     long periodInTicks = period.TimeSpan.Ticks;
                     Nullable<TimeSpan> activeDuration;
@@ -1264,7 +1289,7 @@ namespace System.Windows.Media.Animation
                     }
 
                     projection.EnsureAllocatedCapacity(_minimumCapacity);
-                    tempCollection.ProjectionFold(ref projection, activeDuration, periodInTicks, isAutoReversed, includeMaxPoint);
+                    s_scratchProjectionTemp.ProjectionFold(ref projection, activeDuration, periodInTicks, isAutoReversed, includeMaxPoint);
 
                     if (accelRatio + decelRatio > 0)
                     {
@@ -2349,6 +2374,21 @@ namespace System.Windows.Media.Animation
         private bool _invertCollection;   // A flag used for operating on the inverse of a TIC
 
         private const int _minimumCapacity = 4;  // This should be at least 2 for dynamic growth to work correctly (by 2 each time)
+
+        // Per-thread scratch TIC reused as the local "tempCollection" inside
+        // ProjectOntoPeriodicFunction. The original `new TimeIntervalCollection()` was
+        // a fresh empty struct that triggered three small array allocations inside
+        // ProjectionNormalize on every call (≈ 96 B per ClockGroup per animation tick).
+        // The scratch retains its lazily-allocated _nodeTime / _nodeIsPoint /
+        // _nodeIsInterval buffers across calls and is reset to the empty state via
+        // ResetForReuse() at each call entry. ProjectOntoPeriodicFunction is the sole
+        // caller of ProjectionNormalize / ProjectionFold / ProjectionWarp on this slot
+        // (all three are private and have no other call sites), the projection pipeline
+        // does not raise events or invoke callbacks that could re-enter, and the dispatcher
+        // thread serializes Clock.ComputeTreeState walks — so a single shared per-thread
+        // scratch is safe against reentrancy.
+        [ThreadStatic]
+        private static TimeIntervalCollection s_scratchProjectionTemp;
 
         #endregion // Data
     }
