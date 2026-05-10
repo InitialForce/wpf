@@ -2510,6 +2510,27 @@ namespace System.Windows.Threading
 
         internal void PromoteTimers(int currentTimeInTicks)
         {
+            // Fast path: when no DispatcherTimer is currently registered AND no
+            // Win32 timer is pending, both PromoteTimers' lock-protected check
+            // (no due timer to find) and the finally-block UpdateWin32Timer
+            // call (no list to walk, no win32 state to compute) are pure
+            // no-ops. Skipping the entire chain eliminates 2 uncontended
+            // Monitor.Enter+Exit pairs per DispatcherOperation.InvokeImpl call
+            // on apps that drive UI work through BeginInvoke / Invoke /
+            // async-await without DispatcherTimer (the common case, and the
+            // shape of the *DispatcherOperationInvoke* / *DispatcherInvokeAction*
+            // microbenchmarks). List<T>.Count reads its atomic _size int;
+            // _isWin32TimerSet is a bool only written on the dispatcher thread
+            // via SetWin32Timer / KillWin32Timer (under _instanceLock). A stale
+            // "no timers" reading here at worst delays nothing because
+            // AddTimer/RemoveTimer queue UpdateWin32TimerFromDispatcherThread
+            // independently via BeginInvoke, so the dispatcher reconciles
+            // win32-timer state on a subsequent cycle.
+            if (_timers.Count == 0 && !_isWin32TimerSet)
+            {
+                return;
+            }
+
             try
             {
                 List<DispatcherTimer> timers = null;
