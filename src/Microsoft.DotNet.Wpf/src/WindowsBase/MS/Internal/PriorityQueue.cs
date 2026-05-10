@@ -10,7 +10,8 @@ namespace System.Windows.Threading
             // Build the collection of priority chains.
             _priorityChains = new SortedList<int, PriorityChain<T>>(); // NOTE: should be Priority
             _cacheReusableChains = new Stack<PriorityChain<T>>(10);
-                
+            _cacheReusableItems = new Stack<PriorityItem<T>>(_cacheReusableItemsCap);
+
             _head = _tail = null;
             _count = 0;
         }
@@ -42,8 +43,21 @@ namespace System.Windows.Threading
             PriorityChain<T> chain = GetChain(priority);
 
             // Wrap the item in a PriorityItem so we can put it in our
-            // linked list.
-            PriorityItem<T> priorityItem = new PriorityItem<T>(data);
+            // linked list. Reuse a previously-removed item from the pool if
+            // available (matches the existing _cacheReusableChains pattern).
+            // Pool reuse is safe because the Dispatcher clears the back-pointer
+            // (operation._item) on removal before any reuse can happen, so a
+            // stale Abort()/SetPriority() can't observe the reused item.
+            PriorityItem<T> priorityItem;
+            if (_cacheReusableItems.Count > 0)
+            {
+                priorityItem = _cacheReusableItems.Pop();
+                priorityItem.Data = data;
+            }
+            else
+            {
+                priorityItem = new PriorityItem<T>(data);
+            }
 
             // Step 1: Append this to the end of the "sequential" linked list.
             InsertItemInSequentialChain(priorityItem, _tail);
@@ -66,9 +80,12 @@ namespace System.Windows.Threading
                 PriorityItem<T> item = chain.Head;
                 Debug.Assert(item != null, "PriorityQueue.Dequeue: a priority item should exist.");
 
+                // Capture data before RemoveItem because RemoveItem now clears
+                // item._data as part of returning the item to the reusable pool.
+                T data = item.Data;
                 RemoveItem(item);
 
-                return item.Data;
+                return data;
             }
             else
             {
@@ -110,6 +127,19 @@ namespace System.Windows.Threading
             RemoveItemFromSequentialChain(item);
 
             // Note: we do not clean up empty chains on purpose to reduce churn.
+
+            // Step 3: Return the now-detached item to the reusable-item pool so
+            // the next Enqueue can avoid allocating a fresh PriorityItem. Clear
+            // the data ref before pooling so the pooled item does not pin the
+            // payload (matching how RemoveItemFromPriorityChain clears Chain
+            // and RemoveItemFromSequentialChain clears the sequential pointers).
+            // Bound the cache to keep memory usage trivial; chain pool already
+            // uses the same idiom (cap=10) at GetChain / RemoveItemFromPriorityChain.
+            if (_cacheReusableItems.Count < _cacheReusableItemsCap)
+            {
+                item.Data = default(T);
+                _cacheReusableItems.Push(item);
+            }
         }
 
         public void ChangeItemPriority(PriorityItem<T> item, DispatcherPriority priority) // NOTE: should be Priority
@@ -387,7 +417,15 @@ namespace System.Windows.Threading
         // Priority chains...
         private SortedList<int, PriorityChain<T>> _priorityChains; // NOTE: should be Priority
         private Stack<PriorityChain<T>> _cacheReusableChains;
-        
+
+        // Reusable PriorityItem pool — every Dispatcher.BeginInvoke previously
+        // allocated a fresh PriorityItem (~64 B). RemoveItem returns the item
+        // to this pool with cleared payload and sequential/priority pointers
+        // (cleared by RemoveItemFromPriorityChain + RemoveItemFromSequentialChain),
+        // and Enqueue pops from it before falling back to allocation.
+        private Stack<PriorityItem<T>> _cacheReusableItems;
+        private const int _cacheReusableItemsCap = 32;
+
         // Sequential chain...
         private PriorityItem<T> _head;
         private PriorityItem<T> _tail;
