@@ -400,63 +400,6 @@ namespace System.Windows.Media.Animation
             _count = 1;
         }
 
-        // Rebuilds this TIC in place as the open-closed interval (from, to]. Reuses the existing
-        // _nodeTime / _nodeIsPoint / _nodeIsInterval buffers (allocates only on first call when
-        // they are null). Mirrors the semantics of CreateOpenClosedInterval(from, to) exactly,
-        // including the from==to single-point degenerate case (includeTo==true makes it a point
-        // at from) and the from>to swap.
-        internal void RebuildAsOpenClosedInterval(TimeSpan from, TimeSpan to)
-        {
-            _containsNullPoint = false;
-            _invertCollection = false;
-            _current = 0;
-
-            EnsureAllocatedCapacity(_minimumCapacity);
-
-            _nodeTime[0] = from;
-
-            if (from == to)
-            {
-                // Match TimeIntervalCollection(from,false,to,true) for from==to: single point at from
-                // (includeTo==true is enough to make the degenerate interval a single-point TIC).
-                _nodeIsPoint[0] = true;
-                _nodeIsInterval[0] = false;
-                _count = 1;
-            }
-            else if (from < to)
-            {
-                _nodeIsPoint[0] = false;       // !includeFrom
-                _nodeIsInterval[0] = true;
-                _nodeTime[1] = to;
-                _nodeIsPoint[1] = true;        // includeTo
-                _nodeIsInterval[1] = false;    // explicit reset (constructor relied on fresh-array default)
-                _count = 2;
-            }
-            else  // from > to: reversed, swap to (to, from] shape
-            {
-                _nodeTime[0] = to;
-                _nodeIsPoint[0] = true;        // includeTo
-                _nodeIsInterval[0] = true;
-                _nodeTime[1] = from;
-                _nodeIsPoint[1] = false;       // !includeFrom
-                _nodeIsInterval[1] = false;    // explicit reset
-                _count = 2;
-            }
-        }
-
-        // Rebuilds this TIC in place as the null-point-only collection (no real points,
-        // _containsNullPoint == true). Mirrors CreateNullPoint() exactly. Does NOT touch the
-        // backing arrays — the boolean ctor never allocated them and the algorithms gate on
-        // _count, so leaving any prior buffers in place is safe and saves the next OpenClosed
-        // rebuild from re-allocating.
-        internal void RebuildAsNullPoint()
-        {
-            _containsNullPoint = true;
-            _invertCollection = false;
-            _count = 0;
-            _current = 0;
-        }
-
         /// <summary>
         /// Creates an empty collection
         /// </summary>
