@@ -588,6 +588,18 @@ namespace System.Windows.Documents
             adornerInfo.SimpleTransform = default;
         }
 
+        // TODO: regression tests for OnLayoutUpdated fast path (no DRT harness available in fork):
+        //   1. EmptyAdornerLayer_OnLayoutUpdated_DoesNotCallUpdateAdorner
+        //      Create an AdornerLayer, call OnLayoutUpdated — verify UpdateAdorner was NOT called
+        //      (mock or subclass override) and _layoutDirty ends up false.
+        //   2. AdornerLayer_AddAdornerAfterIdle_TriggersUpdateAdorner
+        //      Create empty layer, fire OnLayoutUpdated (empty fast-path, _layoutDirty→false),
+        //      Add() an adorner, fire OnLayoutUpdated again — verify UpdateAdorner IS called.
+        //   3. AdornerLayer_AddRemoveDuringLayoutUpdated_NoStaleDirtyFlag
+        //      Simulate Add() inside a LayoutUpdated handler that fires concurrently with the
+        //      layer's own handler; confirm that by the time the next pass fires, the adorner
+        //      is walked (ElementMap.Count > 0 path) and _layoutDirty is not stranded false.
+
         /// <summary>
         /// OnLayoutUpdated event handler
         /// </summary>
@@ -595,11 +607,22 @@ namespace System.Windows.Documents
         /// <param name="args"></param>
         internal void OnLayoutUpdated(object sender, EventArgs args)
         {
-            if (ElementMap.Count == 0 || !_layoutDirty)
+            // Empty AdornerLayer fast path: skip the per-pass walk entirely when
+            // no user adorners are attached. Without this, the default AdornerLayer
+            // on every WPF window subscribes to LayoutUpdated unconditionally and
+            // calls UpdateAdorner→TransformToAncestor→InvalidateMeasure on every
+            // pass, which schedules a new render via NeedsRecalc→PostRender,
+            // amplifying any forever-animation by ~17× (e.g. a perpetual busy
+            // spinner produces ~570 renders/sec instead of ~32). Clearing
+            // _layoutDirty before exit prevents stale-flag leak when the first
+            // adorner is later attached (oracle-panel correction, gemini 9/10).
+            if (ElementMap.Count == 0)
+            {
+                _layoutDirty = false;
                 return;
+            }
 
-            // Clear before walking; if a per-element LayoutUpdated fires re-entrantly
-            // during the walk it will re-arm the flag for the next pass.
+            if (!_layoutDirty) return;       // existing dirty-bit guard from 5e7df8833 — keep
             _layoutDirty = false;
             UpdateAdorner(null);
         }
