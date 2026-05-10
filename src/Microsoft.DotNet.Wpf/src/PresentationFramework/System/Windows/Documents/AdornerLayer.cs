@@ -454,15 +454,6 @@ namespace System.Windows.Documents
         /// </param>
         protected override Size MeasureOverride(Size constraint)
         {
-            // Common-case fast path: AdornerLayers attached to AdornerDecorators that
-            // never receive adorners (e.g. the layer auto-created on every Window's
-            // root visual) have an empty _zOrderMap on every layout pass. Skip both
-            // the DictionaryEntry[] snapshot and the zero-trip iteration entirely.
-            if (_zOrderMap.Count == 0)
-            {
-                return new Size();
-            }
-
             // Not using an enumerator because the list can be modified during the loop when we call out.
             DictionaryEntry[] zOrderMapEntries = new DictionaryEntry[_zOrderMap.Count];
             _zOrderMap.CopyTo(zOrderMapEntries, 0);
@@ -497,15 +488,6 @@ namespace System.Windows.Documents
         /// <param name="finalSize">The location reserved for this element by the parent</param>
         protected override Size ArrangeOverride(Size finalSize)
         {
-            // Common-case fast path: see comment in MeasureOverride. The vast majority
-            // of AdornerLayer instances in a typical scene have no adorners attached,
-            // so skipping the snapshot allocation and zero-trip iteration is a clean
-            // structural-waste win.
-            if (_zOrderMap.Count == 0)
-            {
-                return finalSize;
-            }
-
             // Not using an enumerator because the list can be modified during the loop when we call out.
             DictionaryEntry[] zOrderMapEntries = new DictionaryEntry[_zOrderMap.Count];
             _zOrderMap.CopyTo(zOrderMapEntries, 0);
