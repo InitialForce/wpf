@@ -2023,20 +2023,39 @@ namespace System.Windows
         /// </param>
         internal void InputHitTest(Point pt, out IInputElement enabledHit, out IInputElement rawHit, out HitTestResult rawHitResult)
         {
-            PointHitTestParameters hitTestParameters = new PointHitTestParameters(pt);
+            // Acquire pooled hit-test infrastructure ([ThreadStatic] single-slot
+            // pool keyed by the UI thread). The result instance and its bound
+            // HitTestResultCallback are paired in the pool — the callback's
+            // delegate target IS the result instance, so reuse keeps them
+            // consistent. The filter callback is stateless (no `this` capture
+            // in its body) and is cached in a static delegate field. The
+            // PointHitTestParameters wrapper is mutated via SetHitPoint on
+            // each acquire. Combined, this eliminates 4 heap allocations per
+            // InputHitTest call (PointHitTestParameters, InputHitTestResult,
+            // and two delegates).
+            PointHitTestParameters hitTestParameters = _pooledHitTestParameters;
+            if (hitTestParameters is null)
+            {
+                hitTestParameters = new PointHitTestParameters(pt);
+                _pooledHitTestParameters = hitTestParameters;
+            }
+            else
+            {
+                hitTestParameters.SetHitPoint(pt);
+            }
 
-            // We store the result of the hit testing here.  Note that the
-            // HitTestResultCallback is an instance method on this class
-            // so that it can store the element we hit.
-            InputHitTestResult result = new InputHitTestResult();
+            InputHitTestResult result = InputHitTestResult.Acquire(out HitTestResultCallback resultCallback);
             VisualTreeHelper.HitTest(this,
-                                     new HitTestFilterCallback(InputHitTestFilterCallback),
-                                     new HitTestResultCallback(result.InputHitTestResultCallback),
+                                     s_inputHitTestFilterCallback,
+                                     resultCallback,
                                      hitTestParameters);
 
             DependencyObject candidate = result.Result;
+            HitTestResult capturedHitTestResult = result.HitTestResult;
+            result.Release(resultCallback);
+
             rawHit = candidate as IInputElement;
-            rawHitResult = result.HitTestResult;
+            rawHitResult = capturedHitTestResult;
             enabledHit = null;
             while (candidate != null)
             {
@@ -2106,7 +2125,22 @@ namespace System.Windows
             }
         }
 
-        private HitTestFilterBehavior InputHitTestFilterCallback(DependencyObject currentNode)
+        // Stateless filter callback shared across all InputHitTest invocations
+        // on all UIElement instances. Body uses only the `currentNode` argument
+        // and static UIElementHelper helpers — no `this` capture, no instance
+        // state — so a single delegate suffices. Allocated once at class init.
+        private static readonly HitTestFilterCallback s_inputHitTestFilterCallback
+            = new HitTestFilterCallback(InputHitTestFilterCallback);
+
+        // Per-thread reusable PointHitTestParameters wrapper. SetHitPoint
+        // mutates the inner Point before each VisualTreeHelper.HitTest call,
+        // letting all InputHitTest invocations on this thread share one
+        // wrapper object. The UI thread does ~all hit-testing, so a
+        // [ThreadStatic] single-slot pool is sufficient.
+        [ThreadStatic]
+        private static PointHitTestParameters _pooledHitTestParameters;
+
+        private static HitTestFilterBehavior InputHitTestFilterCallback(DependencyObject currentNode)
         {
             HitTestFilterBehavior behavior = HitTestFilterBehavior.Continue;
 
@@ -2142,6 +2176,43 @@ namespace System.Windows
 
         private class InputHitTestResult
         {
+            // [ThreadStatic] single-slot pool. The HitTestResultCallback
+            // delegate captures `this` (its target IS the instance), so the
+            // pool stores the (instance, callback) pair together to preserve
+            // the binding across acquire/release cycles. On nested-call
+            // reentrancy the slot is empty and Acquire allocates fresh —
+            // same fallback as other single-slot pools in the codebase.
+            [ThreadStatic]
+            private static InputHitTestResult _pooled;
+            [ThreadStatic]
+            private static HitTestResultCallback _pooledCallback;
+
+            public static InputHitTestResult Acquire(out HitTestResultCallback callback)
+            {
+                InputHitTestResult instance = _pooled;
+                if (instance is null)
+                {
+                    instance = new InputHitTestResult();
+                    callback = new HitTestResultCallback(instance.InputHitTestResultCallback);
+                    return instance;
+                }
+                _pooled = null;
+                callback = _pooledCallback;
+                _pooledCallback = null;
+                instance._result = null;
+                return instance;
+            }
+
+            public void Release(HitTestResultCallback callback)
+            {
+                _result = null;
+                if (_pooled is null)
+                {
+                    _pooled = this;
+                    _pooledCallback = callback;
+                }
+            }
+
             public HitTestResultBehavior InputHitTestResultCallback(HitTestResult result)
             {
                 _result = result;
