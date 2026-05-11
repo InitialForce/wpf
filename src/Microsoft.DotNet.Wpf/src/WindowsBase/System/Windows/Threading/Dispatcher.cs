@@ -2075,8 +2075,27 @@ namespace System.Windows.Threading
             try
             {
                 // Change the CLR SynchronizationContext to be compatable with our Dispatcher.
+                // Reuse the per-Dispatcher cached default-priority DispatcherSynchronizationContext
+                // (created once at ctor, line 1743) instead of allocating a fresh
+                // `new DispatcherSynchronizationContext(this)` every frame push. The two are
+                // semantically identical — both wrap `this` with DispatcherPriority.Normal and
+                // are DSC instances whose state (`_dispatcher`, `_priority`) is set in the ctor
+                // and never mutated afterwards. SetSynchronizationContext + the finally restore
+                // are unaffected: the cached DSC is used identically to a fresh one for the
+                // duration of the frame, then the old SyncCtx is restored on exit. Nested
+                // PushFrame calls already worked correctly when both outer and inner allocated
+                // fresh DSCs, and they continue to work when both share the cached instance
+                // (the inner frame's `oldSyncContext` captures the cached DSC the outer set,
+                // and on inner-frame exit SetSynchronizationContext is called with the same
+                // cached DSC — a no-op write, balanced by the outer-frame finally restoring
+                // the pre-pump SyncCtx). Eliminates one DSC heap allocation (~32 B) per
+                // Dispatcher.PushFrame call — the modal pump path inside Window.ShowDialog
+                // is the dominant per-iter target on the WindowLifecycle WindowShowDialog
+                // benchmark, and every Application.Run / Dispatcher.Run startup also benefits
+                // (one-time saving at thread/dispatcher start, but the structural cleanup
+                // applies to every PushFrame caller).
                 oldSyncContext = SynchronizationContext.Current;
-                newSyncContext = new DispatcherSynchronizationContext(this);
+                newSyncContext = _defaultDispatcherSynchronizationContext;
                 SynchronizationContext.SetSynchronizationContext(newSyncContext);
 
                 try
