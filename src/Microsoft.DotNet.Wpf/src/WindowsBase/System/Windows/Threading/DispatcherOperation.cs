@@ -5,7 +5,6 @@ using System.Threading;
 using System.ComponentModel;
 using System.Threading.Tasks;
 using System.Runtime.CompilerServices;
-using System.Runtime.ExceptionServices;
 using MS.Internal;
 
 namespace System.Windows.Threading
@@ -221,61 +220,17 @@ namespace System.Windows.Threading
                 if(_status == DispatcherOperationStatus.Completed ||
                    _status == DispatcherOperationStatus.Aborted)
                 {
-                    // We know the operation has completed, so it is safe to
-                    // surface any captured exception. On the fire-and-forget
-                    // path (the dominant cross-thread Invoke(Action,...)
-                    // scenario), op.Task has never been observed, so the
-                    // DispatcherOperationTaskSource has NOT materialized the
-                    // TaskCompletionSource + inner Task + DispatcherOperationTaskMapping
-                    // triplet. Forcing Task.GetAwaiter().GetResult() here would
-                    // allocate that triplet just to call GetResult and discard
-                    // it. Instead, when no Task has been observed, replicate
-                    // GetAwaiter().GetResult()'s throw-or-return semantics
-                    // directly from the operation's own _exception / _status
-                    // fields (which were set inside op.Invoke()'s lock-release
-                    // before the wait event signaled, so the cross-thread
-                    // visibility chain is unchanged).
-                    if(_taskSource.HasTask)
-                    {
-                        Task.GetAwaiter().GetResult();
-                    }
-                    else
-                    {
-                        RethrowFromCompletion();
-                    }
+                    // We know the operation has completed, so it safe to ask
+                    // the task for the Awaiter, and the awaiter for the result.
+                    // We don't actually care about the result, but this gives the
+                    // Task the chance to throw any captured exceptions.
+                    Task.GetAwaiter().GetResult();
                 }
             }
-
+            
             return _status;
         }
-
-        // Mirrors what Task.GetAwaiter().GetResult() would do for the
-        // Task that DispatcherOperationTaskSource would surface in the
-        // eager path, without allocating that Task. Called from Wait /
-        // Result when the underlying TaskCompletionSource has not been
-        // materialized (the fire-and-forget path).
-        //
-        // Mapping (see DispatcherOperation.InvokeCompletions / Invoke):
-        //   _status == Aborted ⇒ TCS.SetCanceled ⇒ Task.GetAwaiter() throws TaskCanceledException
-        //   _status == Completed && _exception != null ⇒ TCS.SetException(_exception) ⇒
-        //       Task.GetAwaiter() throws the captured exception (single-exception
-        //       unwrap from AggregateException, preserving original stack via
-        //       ExceptionDispatchInfo).
-        //   _status == Completed && _exception == null ⇒ TCS.SetResult(_result) ⇒
-        //       Task.GetAwaiter() returns normally.
-        private void RethrowFromCompletion()
-        {
-            if(_status == DispatcherOperationStatus.Aborted)
-            {
-                throw new TaskCanceledException();
-            }
-            else if(_exception != null)
-            {
-                ExceptionDispatchInfo.Capture(_exception).Throw();
-            }
-            // Else: Completed with no exception ⇒ no throw, matches Task.GetAwaiter().GetResult().
-        }
-
+        
         /// <summary>
         ///     Aborts this operation.
         /// </summary>
@@ -372,23 +327,15 @@ namespace System.Windows.Threading
                     if(_status == DispatcherOperationStatus.Completed ||
                        _status == DispatcherOperationStatus.Aborted)
                     {
-                        // We know the operation has completed; surface any captured
-                        // exception via the Task path when a Task has been observed,
-                        // otherwise replicate the throw-or-return semantics directly
-                        // from _exception / _status without allocating the
-                        // TaskCompletionSource + Task + Mapping triplet. See
-                        // RethrowFromCompletion for the eager↔lazy equivalence.
-                        if(_taskSource.HasTask)
-                        {
-                            Task.GetAwaiter().GetResult();
-                        }
-                        else
-                        {
-                            RethrowFromCompletion();
-                        }
+                        // We know the operation has completed, and the
+                        // _taskSource has been completed,  so it safe to ask
+                        // the task for the Awaiter, and the awaiter for the result.
+                        // We don't actually care about the result, but this gives the
+                        // Task the chance to throw any captured exceptions.
+                        Task.GetAwaiter().GetResult();
                     }
                 }
-
+                
                 return _result;
             }
         }
