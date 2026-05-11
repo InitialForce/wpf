@@ -492,6 +492,15 @@ namespace System.Windows.Threading
                 // We are executing under the "foreign" execution context, but the
                 // SynchronizationContext must be for the correct dispatcher and
                 // priority.
+                //
+                // Under the .NET Core defaults (reuseInstance=false, flowPriority=true) this
+                // path used to allocate a fresh `new DispatcherSynchronizationContext(_dispatcher, _priority)`
+                // on every queued op — one ~32 B heap allocation per dispatcher pump iteration.
+                // Route through the per-Dispatcher per-priority DSC cache instead. The cache is
+                // pre-populated with the Normal and Send slots in the Dispatcher ctor (the two
+                // most common priorities for queued ops) and lazily fills the remaining slots on
+                // first use. Cross-thread DSC instances stay distinct because EC flow still goes
+                // through DispatcherSynchronizationContext.CreateCopy(), which is unchanged.
                 DispatcherSynchronizationContext newSynchronizationContext;
                 if(BaseCompatibilityPreferences.GetReuseDispatcherSynchronizationContextInstance())
                 {
@@ -501,10 +510,13 @@ namespace System.Windows.Threading
                 {
                     if(BaseCompatibilityPreferences.GetFlowDispatcherSynchronizationContextPriority())
                     {
-                        newSynchronizationContext = new DispatcherSynchronizationContext(_dispatcher, _priority);
+                        newSynchronizationContext = _dispatcher.GetOrCreatePrioritySyncContext(_priority);
                     }
                     else
                     {
+                        // Rare opt-out (reuseInstance=false && flow=false): preserve the per-call
+                        // Normal-priority alloc semantics so callers that key off DSC reference
+                        // identity in this config continue to see a unique instance per op.
                         newSynchronizationContext = new DispatcherSynchronizationContext(_dispatcher, DispatcherPriority.Normal);
                     }
                 }
