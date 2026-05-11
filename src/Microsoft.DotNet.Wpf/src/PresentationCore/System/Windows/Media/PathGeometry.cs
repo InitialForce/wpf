@@ -954,7 +954,7 @@ namespace System.Windows.Media
                 return Geometry.GetEmptyPathGeometryData();                
             }
 
-            ByteStreamGeometryContext ctx = new ByteStreamGeometryContext();
+            ByteStreamGeometryContext ctx = ByteStreamGeometryContext.AcquireFromPool();
 
             PathFigureCollection figures = Figures;
 
@@ -967,6 +967,7 @@ namespace System.Windows.Media
 
             ctx.Close();
             data.SerializedData = ctx.GetData();
+            ctx.ReleaseToPool();
 
             return data;
         }

@@ -307,7 +307,7 @@ namespace System.Windows.Media
 
             Point[] points = GetPointList();
 
-            ByteStreamGeometryContext ctx = new ByteStreamGeometryContext();
+            ByteStreamGeometryContext ctx = ByteStreamGeometryContext.AcquireFromPool();
 
             ctx.BeginFigure(points[0], isFilled: true, isClosed: true);
 
@@ -319,6 +319,7 @@ namespace System.Windows.Media
 
             ctx.Close();
             data.SerializedData = ctx.GetData();
+            ctx.ReleaseToPool();
 
             return data;
         }

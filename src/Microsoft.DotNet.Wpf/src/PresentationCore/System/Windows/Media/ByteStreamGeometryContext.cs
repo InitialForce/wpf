@@ -99,6 +99,56 @@ namespace System.Windows.Media
             _chunkList.Clear();
         }
 
+        /// <summary>
+        /// [ThreadStatic] pool slot for callers that build geometry data
+        /// without owning a StreamGeometry — e.g. EllipseGeometry,
+        /// LineGeometry, RectangleGeometry, PathGeometry.GetAsPathGeometry().
+        /// These were the dominant source of ~70 MB SingleItemList&lt;byte[]&gt;
+        /// allocations across take-open + playback scenarios (2026-05-11
+        /// deep-dive). Sharing the [ThreadStatic] slot across all four
+        /// callers is safe because GetAsPathGeometry is synchronous within
+        /// one render/bounds/hit-test query and the slot is acquired and
+        /// released in the same call frame.
+        /// </summary>
+        [ThreadStatic]
+        private static ByteStreamGeometryContext _pooledOwnerlessContext;
+
+        /// <summary>
+        /// Acquire a pooled ByteStreamGeometryContext for callers that build
+        /// geometry data without a StreamGeometry owner. Returns a fresh
+        /// instance when the [ThreadStatic] pool slot is empty (cold start
+        /// or nested reentrancy). Callers must invoke ReleaseToPool() after
+        /// extracting the data via GetData().
+        /// </summary>
+        internal static ByteStreamGeometryContext AcquireFromPool()
+        {
+            ByteStreamGeometryContext ctx = _pooledOwnerlessContext;
+            if (ctx is null)
+            {
+                return new ByteStreamGeometryContext();
+            }
+            _pooledOwnerlessContext = null;
+            ctx.ResetForReuse();
+            return ctx;
+        }
+
+        /// <summary>
+        /// Return this context to the [ThreadStatic] pool. Drops the byte[]
+        /// reference held by _chunkList[0] — now owned by the caller via
+        /// GetData() — while preserving the underlying SingleItemList store
+        /// across the pool cycle. If the pool slot is occupied (rare
+        /// nested-use case), this instance is left to the GC and the
+        /// existing pooled instance keeps the slot.
+        /// </summary>
+        internal void ReleaseToPool()
+        {
+            DetachChunkListForPool();
+            if (_pooledOwnerlessContext is null)
+            {
+                _pooledOwnerlessContext = this;
+            }
+        }
+
         #endregion Constructors
         
         #region Public Methods
