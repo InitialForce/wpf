@@ -7298,6 +7298,17 @@ namespace System.Windows
         private int                 _styleExDoNotUse;
         private HwndStyleManager    _manager;
 
+        // Per-Window pool slot for a previously-disposed HwndStyleManager
+        // instance. Holds the most recently freed manager so the next
+        // StartManaging call on this Window can reuse it instead of
+        // allocating a fresh one — see HwndStyleManager.StartManaging /
+        // HwndStyleManager.Dispose for the borrow/return protocol.
+        // Single-element pool is sufficient because Window is single-thread-
+        // affine (STA) and HwndStyleManager activations on a given Window
+        // are serial (the refcounted nested-StartManaging case reuses the
+        // already-active Manager, not the pool slot). No locking required.
+        private HwndStyleManager    _freedStyleManager;
+
         // reference to Resize Grip control; this is used to find out whether
         // the mouse of over the resizegrip control
         private Control                 _resizeGripControl;
@@ -7660,32 +7671,59 @@ namespace System.Windows
         {
             internal static HwndStyleManager StartManaging(Window w, int Style, int StyleEx )
             {
-                if (w.Manager == null)
+                HwndStyleManager m = w.Manager;
+                if (m == null)
                 {
-                    return new HwndStyleManager(w, Style, StyleEx);
+                    // Reuse the per-Window pooled HwndStyleManager instance retained
+                    // from the previous StartManaging/Dispose cycle on this Window,
+                    // killing one ~24-32 B HwndStyleManager heap allocation per
+                    // Show/Hide cycle (SafeStyleSetter fires from Window.ShowHelper
+                    // after every ShowWindow on a created HWND, and the other
+                    // StartManaging call sites — CorrectStyleForBorderlessWindowCase,
+                    // SizeToContent invalidation, ResizeMode change, etc. — also
+                    // benefit on their respective hot paths). Window is single-thread-
+                    // affine (STA), so the per-Window slot _freedStyleManager is
+                    // race-free without locking.
+                    m = w._freedStyleManager;
+                    if (m != null)
+                    {
+                        w._freedStyleManager = null;
+                    }
+                    else
+                    {
+                        m = new HwndStyleManager(w);
+                    }
+
+                    // Activate: publish Manager BEFORE any _Style / _StyleEx writes,
+                    // because the setters of those properties dereference
+                    // Manager.Dirty (= true) — matches the original ctor's ordering
+                    // ("_window.Manager = this" preceded the "_window._Style = Style"
+                    // assignment). The subsequent "Dirty = false" override is also
+                    // preserved (the just-fetched style cannot be out-of-sync with
+                    // the HWND we read it from).
+                    w.Manager = m;
+                    if (!w.IsSourceWindowNull)
+                    {
+                        w._Style = Style;
+                        w._StyleEx = StyleEx;
+                        m.Dirty = false;
+                    }
+                    m._refCount = 1;
+                    return m;
                 }
                 else
                 {
-                    w.Manager._refCount++;
-                    return w.Manager;
+                    m._refCount++;
+                    return m;
                 }
             }
 
-            private HwndStyleManager(Window w, int Style, int StyleEx  )
+            // Minimal ctor: only binds _window. All transient state
+            // (_refCount, _fDirty) is initialized in StartManaging so the
+            // instance can be parked into _freedStyleManager and reused.
+            private HwndStyleManager(Window w)
             {
                 _window = w;
-                _window.Manager = this;
-
-                if (!w.IsSourceWindowNull)
-                {
-                    _window._Style    =  Style;
-                    _window._StyleEx  = StyleEx;
-
-                    // Dirty ==> _style and hwnd are out of sync. Since we just got
-                    // the style from hwnd, it obviously is not Dirty.
-                    Dirty = false;
-                }
-                _refCount = 1;
             }
 
             void IDisposable.Dispose()
@@ -7713,6 +7751,18 @@ namespace System.Windows
                     if (_window.Manager == this)
                     {
                         _window.Manager = null;
+                        // Park the now-inactive instance into the per-Window pool
+                        // so the next StartManaging on this Window reuses it
+                        // without allocating. _window is set once in the ctor and
+                        // never mutated, so no per-pool-return field clear is
+                        // needed; _refCount and Dirty are re-initialized by the
+                        // next StartManaging activation. The re-entrancy guard
+                        // (_window.Manager == this) preserved: if Flush above
+                        // already caused a nested StartManaging+Dispose that
+                        // re-parked the instance, that path will have nulled
+                        // Manager, so this branch is skipped — preventing a
+                        // double-pool.
+                        _window._freedStyleManager = this;
                     }
                 }
             }
