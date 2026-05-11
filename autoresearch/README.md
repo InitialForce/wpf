@@ -96,3 +96,50 @@ agent does not get to declare victory — only `eval.py` does.
 
 Use the per-rep error bars to spot iterations where measurement noise
 swamped the claimed improvement.
+
+## Manual profile runs (outside the ralph loop)
+
+For point-in-time captures against MC (e.g. after a hand-authored WPF fix,
+or to validate a big-win), use `run-profile-2026-05-11.py`:
+
+```bash
+cd /c/work/wpf-perf
+python3 -u autoresearch/run-profile-2026-05-11.py
+```
+
+This swaps the candidate WPF DLLs from `artifacts/bin/.../net10.0/` into
+MC's `BUILD/x64_Release/`, runs `profile.py --run-multi` (startup +
+take-open + playback scenarios), and restores stock DLLs in `finally` even
+on crash.  Output lands in `autoresearch/profile-output/{scenario}/`.
+
+### Prereq: MC must be built with `SnoopEnabled=true`
+
+The perf scenarios drive MC via brokered MCP UI automation, which only
+ships in the binary when SnoopWPF is enabled.  The MC csproj defaults
+`SnoopEnabled=false` for Release config (to keep public builds free of the
+private-feed dependency), so a stock `build.cmd build -c Release` produces
+a `MotionCatalyst-cli.exe` that the perf scenarios can't drive — they will
+hang in `mc_connect` or fail at the first `wpf_click`.
+
+Rebuild MC explicitly with the flag set:
+
+```bash
+# Option A — env var (recognised by the existing csproj logic)
+SNOOP_ENABLED=true build.cmd build -c Release
+
+# Option B — direct dotnet build with property
+cmd.exe /c "dotnet build src\motioncatalyst\Applications\MotionCatalyst\MotionCatalyst-cli.csproj -c Release -p:SnoopEnabled=true"
+```
+
+Verify after build: `ls BUILD/x64_Release/ | grep -i snoop` should list six
+`SnoopWPF.*.dll` files.  If they're missing, the brokered-MCP path is
+disabled and the scenarios will not drive the UI.
+
+### Capturing stack-attributed allocations
+
+`nettrace-probe.exe` (rolled up to type only) and `TypeStackProbe.exe` (top
+N callstacks per type, attributable via `GCAllocationTick_V4` events) live
+under `tools/probe/` and `tools/type-stack-probe/` respectively.  The
+existing per-scenario `.nettrace` files capture stacks
+(`DotNETRuntime:0x1FFBCCBFF:5` keyword bits include the Stack bit) so
+stack attribution requires only the probe tool, not a recapture.

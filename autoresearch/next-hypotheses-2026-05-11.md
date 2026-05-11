@@ -1,5 +1,31 @@
 # Next-Optimization Hypotheses — post-big-wins baseline (2026-05-11)
 
+> **STATUS: SUPERSEDED — see `post-harness-baseline.md` and ISS-04/ISS-05 in
+> `wpf-app-known-issues.md`.**
+>
+> This document was written before T4 + the harness ActivityTracker fix landed.
+> Its predictions partially held and partially didn't:
+> - **T4 (Hashtable)**: predicted ~507 MB combined; actual T4 landing eliminated
+>   ~318 MB (DictionaryEntry types) on take-open + playback and indirectly
+>   collapsed playback `totalAllocBytes` from 245 MB to 27 MB.  Source was a
+>   single `AdornerLayer.MeasureOverride` / `ArrangeOverride` call site, not
+>   the suspected `ResourceDictionary` / `WeakHashtable` / DP table candidates.
+> - **T5/T7 (AsyncLocal+Activity)**: predicted ~37 MB combined.  Stack
+>   attribution revealed 100% of the wedge was caused by our own
+>   `WpfPerfHarness` `EventSource` triggering `ActivityTracker.OnStart/OnStop`
+>   per dispatch op.  Fixed MC-side (ISS-05), not in WPF.
+> - **T6 (DispatcherOperation residual)**: persists at ~8 MB take-open / 5 MB
+>   playback after the big-wins.  Real, but small enough that pooling
+>   risk/reward is poor relative to T1/T2/T4.  Skipped.
+>
+> Combined alloc since pre-bigwins (2026-05-09):
+>   take-open  6.60 GB → 250 MB (-96.2%)
+>   playback   3.51 GB →  27 MB (-99.2%)
+>
+> The original hypothesis text follows for historical reference.
+
+---
+
 **Baseline source**: `autoresearch/profile-output/{startup,take-open}/analysis.json`
 + `autoresearch/profile-output/playback-post-bigwins/analysis.json` (32 Hz session).
 **Reference**: `compare-bigwins.py` apples-to-apples — combined alloc 10.42 GB -> 1.17 GB (-88.8%).

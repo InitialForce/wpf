@@ -183,3 +183,96 @@ chain of `EffectiveValueEntry[]` regrowths.  If the same DP values would be
 set every frame, construct once, `Freeze()`, reuse — same pattern as ISS-02.
 
 ---
+
+## ISS-04: `AdornerLayer` allocated a fresh `DictionaryEntry[]` every layout pass
+
+**Status**: `MITIGATED-WPF`.  No app-side action required.
+
+**Discovered**: 2026-05-11, post-big-wins residual analysis
+(`autoresearch/t4-stack-attribution.md`).  After ISS-01–03 landed,
+`System.Collections.DictionaryEntry[]` (~178 MB) and
+`System.Collections.DictionaryEntry` (~140 MB) jumped to the top of the
+take-open allocator profile — 51% of the trace's `totalAllocBytes`.
+
+**WPF-side root cause**: `AdornerLayer.MeasureOverride` and `ArrangeOverride`
+both ran:
+
+```csharp
+DictionaryEntry[] zOrderMapEntries = new DictionaryEntry[_zOrderMap.Count];
+_zOrderMap.CopyTo(zOrderMapEntries, 0);
+```
+
+on every layout pass to take a defensive snapshot of the `SortedList` keyed
+z-order map before iterating (the iteration calls out to adorners that
+could mutate the list).  In MotionCatalyst this fires ~1675 times during
+take-open and allocates a fresh `DictionaryEntry[]` plus its boxed entry
+structs each time — single call site, 100% of the wedge per
+GC `AllocationTick` stack attribution.
+
+**Mitigation** (landed): commit `e56671084` snapshots the value list
+directly into a pooled `object[]` field, matching the existing
+`_keysSnapshotBuffer` pool used by `UpdateAdorner`:
+
+```csharp
+IList valueList = _zOrderMap.GetValueList();
+int count = valueList.Count;
+if (_zOrderValuesSnapshotBuffer == null || _zOrderValuesSnapshotBuffer.Length < count)
+    _zOrderValuesSnapshotBuffer = new object[Math.Max(count, 8)];
+valueList.CopyTo(_zOrderValuesSnapshotBuffer, 0);
+```
+
+`SortedList.GetValueList()` returns a cached `IList` (one-time alloc) over
+the internal values array and `CopyTo` does a direct `Array.Copy` — zero
+`DictionaryEntry` boxing.  Measure and Arrange share the buffer because
+they never overlap in a single layout pass.
+
+**Result**: take-open `DictionaryEntry`+`DictionaryEntry[]` 318.8 MB → 0 MB,
+`totalAllocBytes` 615.6 MB → 249.5 MB (-59%).  Playback collapsed 245.8 MB
+→ 26.7 MB (-89%) as a side-effect of eliminating the per-pass churn that
+had been dominating the AllocationTick sampling.
+
+**Detection signal**: `DictionaryEntry[]` ≥ 50 MB in the per-scenario
+`analysis.json` top-allocators indicates this pathology has regressed.
+Healthy ratio is < 1 MB.
+
+---
+
+## ISS-05: Perf harness's own `EventSource` triggered ActivityTracker churn
+
+**Status**: `MITIGATED-MC` (perf-harness change in InitialForce/ScDesktop,
+branch `wpf-perf-harness`, commit `c9662b2bbf3`).  Not a WPF runtime issue.
+
+**Discovered**: 2026-05-11, post-T4 stack attribution
+(`autoresearch/post-t4-baseline-and-attribution.md`).  After T4 collapsed
+the `DictionaryEntry` wedge, the next ~23 MB residual sat on:
+- `FourElementAsyncLocalValueMap` (10.5 MB take-open)
+- `ActivityInfo` (6.0 MB)
+- `System.Threading.ExecutionContext` (6.3 MB)
+
+100% of these stacks rooted in
+`WpfPerfHarness.OnDispatcherOperationStarted → EventSource.WriteEvent →
+WriteEventWithRelatedActivityIdCore → ActivityTracker.OnStart/OnStop`.
+
+**Root cause**: the harness's `PerfHarnessEventSource` decorated its
+dispatch-op `Start`/`Stop` events with `EventOpcode.Start`/`EventOpcode.Stop`.
+That triggers the implicit `ActivityTracker` chain on every event, which
+in turn allocates the `AsyncLocalValueMap` + `ActivityInfo` +
+`ExecutionContext` trio through AsyncLocal propagation — pure measurement
+overhead.
+
+**Mitigation** (landed in MC): add
+`ActivityOptions = EventActivityOptions.Disable` to all six
+`Start`/`Stop` events.  The events themselves are still emitted with the
+opcode semantics intact for PerfView / dotnet-trace consumers; we don't
+rely on AsyncLocal-propagated activity IDs because every event carries
+its own explicit elapsed-time payload.
+
+**Result**: all three artifact types absent from the top-30 of every
+scenario in the post-harness baseline (`autoresearch/post-harness-baseline.md`).
+
+**Lesson for future WPF perf instrumentation**: when adding `EventSource`
+events to a hot-path callback, default to `EventActivityOptions.Disable`
+unless you specifically want the AsyncLocal-propagated activity ID for
+correlation.  The default behavior allocates per-event.
+
+---
