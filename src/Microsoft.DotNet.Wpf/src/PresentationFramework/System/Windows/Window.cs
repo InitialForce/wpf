@@ -2562,7 +2562,10 @@ namespace System.Windows
                 HwndSource source = new HwndSource(param);
 
                 _swh = new SourceWindowHelper(source);
-                source.SizeToContentChanged += new EventHandler(OnSourceSizeToContentChanged);
+                // Subscribe using the per-Window cached delegate so the matching unsubscribe in
+                // ClearSourceWindow can reuse the same instance instead of allocating a fresh
+                // `new EventHandler(...)` for -= delegate equality.
+                source.SizeToContentChanged += _sourceSizeToContentChangedHandler ??= OnSourceSizeToContentChanged;
 
                 // since we created the window with the style, mark
                 // sm as not dirty so that we don't unneccessarialy update
@@ -2595,8 +2598,11 @@ namespace System.Windows
             // where we calculating the non-client area size using the stale
             // style bits from the hwnd.
 
-            // Add Disposed event handler
-            _swh.AddDisposedHandler ( new EventHandler(OnSourceWindowDisposed) );
+            // Add Disposed event handler — use the per-Window cached delegate so the matching
+            // RemoveDisposedHandler in ClearSourceWindow can pass the same instance instead of
+            // allocating a fresh `new EventHandler(...)` (or method-group conversion) for
+            // delegate-equality matching at remove time.
+            _swh.AddDisposedHandler(_sourceWindowDisposedHandler ??= OnSourceWindowDisposed);
 
             _hwndCreatedButNotShown = !duringShow;
 
@@ -6961,7 +6967,20 @@ namespace System.Windows
             {
                 try
                 {
-                    _swh.RemoveDisposedHandler(OnSourceWindowDisposed);
+                    // Reuse the per-Window cached delegate from the matching AddDisposedHandler
+                    // subscribe; this would otherwise allocate via method-group conversion
+                    // (`new EventHandler(OnSourceWindowDisposed)`) on every Window dispose.
+                    // _sourceWindowDisposedHandler is non-null here whenever CreateSourceWindow
+                    // ran (the subscribe site lazy-initializes it via ??=); on the disposal
+                    // paths where CreateSourceWindow never ran the field stays null and the
+                    // RemoveDisposedHandler call is a tolerable no-op against the subscriber
+                    // list (delegate equality with null finds nothing — the subscriber list
+                    // is empty by construction on that path anyway).
+                    EventHandler disposed = _sourceWindowDisposedHandler;
+                    if (disposed != null)
+                    {
+                        _swh.RemoveDisposedHandler(disposed);
+                    }
                 }
                 finally
                 {
@@ -6970,7 +6989,14 @@ namespace System.Windows
 
                     if (source != null)
                     {
-                        source.SizeToContentChanged -= new EventHandler(OnSourceSizeToContentChanged);
+                        // Reuse the cached delegate captured at subscribe time, mirroring the
+                        // RemoveDisposedHandler call above so the unsubscribe site costs zero
+                        // new delegate allocation. Same null-guard rationale.
+                        EventHandler stc = _sourceSizeToContentChangedHandler;
+                        if (stc != null)
+                        {
+                            source.SizeToContentChanged -= stc;
+                        }
                     }
                 }
             }
@@ -7391,6 +7417,21 @@ namespace System.Windows
         private WindowState                 _previousWindowState = WindowState.Normal;
         private HwndWrapper         _hiddenWindow;
         private EventHandlerList    _events;
+
+        // Cached per-Window EventHandler delegates for the HwndSource lifecycle
+        // events that Window subscribes to (SizeToContentChanged on the HwndSource
+        // and Disposed on the SourceWindowHelper). Lazy-allocated on the FIRST
+        // CreateSourceWindow subscribe — the original code was allocating a fresh
+        // `new EventHandler(Method)` at both the += subscribe site AND the -=
+        // unsubscribe site, paying TWO ~48 B delegate allocations per Window
+        // lifetime where one suffices (delegate equality is satisfied by the same
+        // instance). For a fresh Window per ShowDialog (the WindowShowDialog
+        // benchmark's pattern), this saves the second of each pair: 2 × ~48 B =
+        // ~96 B per ShowDialog. The cost is two reference fields (16 B on x64)
+        // baked into every Window instance, so net per-ShowDialog saving on a
+        // fresh-Window-per-iter workload is ~80 B.
+        private EventHandler        _sourceSizeToContentChangedHandler;
+        private EventHandler        _sourceWindowDisposedHandler;
 
         // These should never be used directly, access only through property accessors
 
