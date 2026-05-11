@@ -341,46 +341,15 @@ namespace System.Windows
             // EnableThreadWindow(true) is called when dialog is going away. Once dialog is closed and
             // thread windows have been enabled, then there no need to keep the list around.
             // Please see BUG 929740 before making any changes to how _threadWindowHandles works.
-            //
-            // Pool the List<IntPtr> via a [ThreadStatic] single slot so the
-            // grown capacity (one allocation per thread, not per ShowDialog)
-            // survives across calls. EnableThreadWindows(true) clears the
-            // list and returns it to the slot — see EnableThreadWindows.
-            List<IntPtr> pooledHandleList = s_freedThreadWindowHandles;
-            if (pooledHandleList != null)
-            {
-                s_freedThreadWindowHandles = null;
-                _threadWindowHandles = pooledHandleList;
-            }
-            else
-            {
-                _threadWindowHandles = new List<IntPtr>();
-            }
+            _threadWindowHandles = new List<IntPtr>();
             //Get visible and enabled windows in the thread
             // If the callback function returns true for all windows in the thread, the return value is true.
             // If the callback function returns false on any enumerated window, or if there are no windows
             // found in the thread, the return value is false.
             // No need for use to actually check the return value.
-            //
-            // Use the cached static EnumThreadWindowsCallback delegate +
-            // [ThreadStatic] target slot so the callback delegate is no
-            // longer allocated fresh per ShowDialog. EnumThreadWindows is
-            // synchronous — the slot is set immediately before, cleared in
-            // the finally block immediately after, so it is live only for
-            // the duration of this single OS call (no nested-ShowDialog
-            // hazard: nested calls hit this same code path serially and
-            // each sets/clears its own slot inside its own try/finally).
-            s_tlsEnumThreadWindowsTarget = _threadWindowHandles;
-            try
-            {
-                UnsafeNativeMethods.EnumThreadWindows(SafeNativeMethods.GetCurrentThreadId(),
-                                                      s_threadWindowsCallback,
-                                                      NativeMethods.NullHandleRef);
-            }
-            finally
-            {
-                s_tlsEnumThreadWindowsTarget = null;
-            }
+            UnsafeNativeMethods.EnumThreadWindows(SafeNativeMethods.GetCurrentThreadId(),
+                                                  new NativeMethods.EnumThreadWindowsCallback(ThreadWindowsCallback),
+                                                  NativeMethods.NullHandleRef);
 
             // Disable those windows
             EnableThreadWindows(false);
@@ -3620,22 +3589,14 @@ namespace System.Windows
         }
 
         /// <summary>
-        /// The callback function for EnumThreadWindows.
-        ///
-        /// Static so a single cached delegate (s_threadWindowsCallback)
-        /// suffices for every Window — the target List&lt;IntPtr&gt; is
-        /// looked up from the [ThreadStatic] s_tlsEnumThreadWindowsTarget
-        /// slot set by the caller (ShowDialog) immediately before
-        /// EnumThreadWindows. EnumThreadWindows is synchronous, so the
-        /// slot is guaranteed valid for the entire callback lifetime.
+        /// The callback function for EnumThreadWindows
         /// </summary>
         /// <param name="hWnd"></param>
         /// <param name="lparam"></param>
         /// <returns></returns>
-        private static bool ThreadWindowsCallbackStatic(IntPtr hWnd, IntPtr lparam)
+        private bool ThreadWindowsCallback(IntPtr hWnd, IntPtr lparam)
         {
-            List<IntPtr> target = s_tlsEnumThreadWindowsTarget;
-            Debug.Assert(target != null, "s_tlsEnumThreadWindowsTarget must be set before EnumThreadWindows");
+            Debug.Assert(_threadWindowHandles != null, "_threadWindowHandles must not be null at this point");
 
             // the dialog's hwnd has not been created yet when calling into this function.
             // so its hwnd won't be in the list.
@@ -3646,7 +3607,7 @@ namespace System.Windows
             if (SafeNativeMethods.IsWindowVisible(new HandleRef(null, hWnd)) &&
                 SafeNativeMethods.IsWindowEnabled(new HandleRef(null, hWnd)))
             {
-                target.Add(hWnd);
+                _threadWindowHandles.Add(hWnd);
             }
 
             return true;
@@ -3677,25 +3638,7 @@ namespace System.Windows
             // _threadWindowHandles.
             if (state)
             {
-                // Clear the contents (drops the per-iter IntPtr entries so
-                // no stale handles leak into the next ShowDialog) and park
-                // the now-empty (but grown-capacity) list back into the
-                // [ThreadStatic] pool slot for the next ShowDialog on this
-                // thread. The slot already-occupied case discards this
-                // instance — benign and only happens under nested
-                // ShowDialog. _threadWindowHandles is then nulled exactly
-                // as before, preserving the existing invariant for the
-                // entry-side Debug.Assert.
-                List<IntPtr> list = _threadWindowHandles;
                 _threadWindowHandles = null;
-                if (list != null)
-                {
-                    list.Clear();
-                    if (s_freedThreadWindowHandles == null)
-                    {
-                        s_freedThreadWindowHandles = list;
-                    }
-                }
             }
         }
 
@@ -4488,26 +4431,8 @@ namespace System.Windows
             //window (setting DialogResult fires the WM_CLOSE event), the _dispatcherFrame is still null.
             //Bug 874463 addressed this.
             // un block the push frame call
-            //
-            // Park the now-stopped frame in the [ThreadStatic] pool so the
-            // next modal ShowDialog on this thread skips the new
-            // DispatcherFrame() allocation. The Continue=false setter
-            // still pays the BeginInvoke (its job is to wake the pump that
-            // is currently running this DoDialogHide), but the frame
-            // object itself is no longer discarded. _dispatcherFrame is
-            // nulled exactly as before, preserving the existing
-            // Debug.Assert(_dispatcherFrame == null) invariant at the push
-            // site.
-            DispatcherFrame frameToPark = _dispatcherFrame;
-            if (frameToPark != null)
-            {
-                frameToPark.Continue = false;
-                _dispatcherFrame = null;
-                if (s_freedDispatcherFrame == null)
-                {
-                    s_freedDispatcherFrame = frameToPark;
-                }
-            }
+            _dispatcherFrame?.Continue = false;
+            _dispatcherFrame = null;
 
             // Fix for Close Dialog Window should not return null
             //
@@ -5653,25 +5578,7 @@ namespace System.Windows
                     // tell users we're going modal
                     ComponentDispatcher.PushModal();
 
-                    // Prefer a previously-parked DispatcherFrame from the
-                    // [ThreadStatic] pool over a fresh allocation. Pooled
-                    // frames are reset via the internal ResetForPushFrame
-                    // helper (direct _continue=true field-set) to avoid
-                    // the public Continue setter's BeginInvoke side-effect
-                    // — the pump that the BeginInvoke targets has not yet
-                    // started, so reaching for it would queue a no-op
-                    // operation that defeats the savings.
-                    DispatcherFrame pooledFrame = s_freedDispatcherFrame;
-                    if (pooledFrame != null)
-                    {
-                        s_freedDispatcherFrame = null;
-                        pooledFrame.ResetForPushFrame();
-                        _dispatcherFrame = pooledFrame;
-                    }
-                    else
-                    {
-                        _dispatcherFrame = new DispatcherFrame();
-                    }
+                    _dispatcherFrame = new DispatcherFrame();
                     Dispatcher.PushFrame(_dispatcherFrame);
                 }
                 finally
@@ -7377,40 +7284,6 @@ namespace System.Windows
         private IntPtr                      _dialogOwnerHandle = IntPtr.Zero;
         private IntPtr                      _dialogPreviousActiveHandle;
         private DispatcherFrame             _dispatcherFrame;
-
-        // [ThreadStatic] single-slot pools for the per-ShowDialog throwaway
-        // objects: the visible-thread-windows handle list, the modal-pump
-        // DispatcherFrame, and the EnumThreadWindows callback target slot.
-        //
-        // Window is STA-affine, so a thread-local single-slot pool serves
-        // every Window on a given UI thread (the modal-pump DispatcherFrame
-        // is implicitly thread-bound via DispatcherObject; the handle list
-        // is plain managed state with no thread affinity but is borrowed by
-        // ShowDialog only on the dispatcher thread). Nested ShowDialog is
-        // safe: the outer call takes the slot, the nested call finds the
-        // slot empty and allocates fresh, returning its own instance to the
-        // slot at its own end (it may evict the outer's parked instance if
-        // the outer returned earlier — this is a benign 1-evict that costs
-        // at most one wasted reuse on the next ShowDialog).
-        [ThreadStatic] private static List<IntPtr>      s_freedThreadWindowHandles;
-        [ThreadStatic] private static DispatcherFrame   s_freedDispatcherFrame;
-
-        // Slot used by the static EnumThreadWindows callback to find the
-        // List<IntPtr> it should append into. Set immediately before
-        // EnumThreadWindows and cleared immediately after — the OS callback
-        // is synchronous, so the slot is live only for the duration of the
-        // single EnumThreadWindows invocation. Pattern mirrors the iter=085
-        // [ThreadStatic] parameter-passing technique used by HwndSubclass.
-        [ThreadStatic] private static List<IntPtr>      s_tlsEnumThreadWindowsTarget;
-
-        // Cached static delegate for EnumThreadWindows. Was previously
-        // allocated per ShowDialog as `new EnumThreadWindowsCallback(ThreadWindowsCallback)`.
-        // Now a single shared instance — the callback reads `this` (the
-        // target Window) implicitly via the s_tlsEnumThreadWindowsTarget
-        // slot since the OS lparam is currently NullHandleRef and we don't
-        // want to change the wire signature.
-        private static readonly NativeMethods.EnumThreadWindowsCallback s_threadWindowsCallback
-            = ThreadWindowsCallbackStatic;
 
         private WindowStartupLocation       _windowStartupLocation = WindowStartupLocation.Manual;
 
