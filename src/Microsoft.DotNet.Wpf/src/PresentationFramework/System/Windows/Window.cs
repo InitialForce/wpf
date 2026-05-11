@@ -7973,62 +7973,13 @@ namespace System.Windows
             {
                 var nullHandle = new HandleRef(null, IntPtr.Zero);
                 var hdc = UnsafeNativeMethods.GetDC(nullHandle);
-
-                // Use a single cached static delegate (s_monitorEnumProc) routed through a
-                // [ThreadStatic] target slot (s_tlsMonitorEnumTarget) instead of allocating a
-                // fresh `new NativeMethods.MonitorEnumProc(MonitorEnumProc)` delegate every call.
-                // The static delegate is built once at type-init; the TLS target slot is set
-                // immediately before EnumDisplayMonitors and restored in the finally block
-                // immediately after. The OS dispatches every callback synchronously inline on
-                // the caller thread within EnumDisplayMonitors, so the slot is live for the
-                // duration of one synchronous OS call only. The save-and-restore pattern
-                // (prev/finally) handles the (rare) nested-CreateSourceWindow case correctly:
-                // an inner CreateSourceWindow overwrites the slot, does its own EnumDisplayMonitors,
-                // restores; the outer's slot value is recovered when the inner unwinds.
-                WindowStartupTopLeftPointHelper prev = s_tlsMonitorEnumTarget;
-                s_tlsMonitorEnumTarget = this;
-                try
-                {
-                    UnsafeNativeMethods.EnumDisplayMonitors(
-                        hdc,
-                        IntPtr.Zero,
-                        s_monitorEnumProc,
-                        IntPtr.Zero);
-                }
-                finally
-                {
-                    s_tlsMonitorEnumTarget = prev;
-                }
-
+                UnsafeNativeMethods.EnumDisplayMonitors(
+                    hdc,
+                    IntPtr.Zero,
+                    MonitorEnumProc,
+                    IntPtr.Zero);
                 UnsafeNativeMethods.ReleaseDC(nullHandle, new HandleRef(null, hdc));
             }
-
-            // Static stub for EnumDisplayMonitors. Reads the per-thread target helper from the
-            // [ThreadStatic] slot set by IdentifyScreenTopLeft and delegates to its instance method.
-            private static bool MonitorEnumProcStatic(IntPtr hMonitor, IntPtr hdcMonitor, ref NativeMethods.RECT lprcMonitor, IntPtr dwData)
-            {
-                WindowStartupTopLeftPointHelper target = s_tlsMonitorEnumTarget;
-                Debug.Assert(target != null, "s_tlsMonitorEnumTarget must be set during EnumDisplayMonitors");
-                return target.MonitorEnumProc(hMonitor, hdcMonitor, ref lprcMonitor, dwData);
-            }
-
-            // Static delegate cache for EnumDisplayMonitors. Allocated once at type-init and
-            // reused by every IdentifyScreenTopLeft call on every thread instead of allocating
-            // a fresh `new NativeMethods.MonitorEnumProc(MonitorEnumProc)` per call (which is
-            // what method-group conversion of the instance method produced previously — one
-            // ~48 B EventHandler-shaped heap allocation per Window CreateSourceWindow when
-            // the IsHelperNeeded gate is true, which is the default on PerMonitor-DPI-aware
-            // .NET 5+ WPF processes).
-            private static readonly NativeMethods.MonitorEnumProc s_monitorEnumProc =
-                new NativeMethods.MonitorEnumProc(MonitorEnumProcStatic);
-
-            // Per-thread target helper for the static EnumDisplayMonitors callback. Set
-            // immediately before EnumDisplayMonitors by IdentifyScreenTopLeft (save-and-restore
-            // pattern); read by MonitorEnumProcStatic on every callback invocation. The OS
-            // dispatches the callbacks synchronously inline on the caller thread, so the slot
-            // is live only for the duration of a single synchronous EnumDisplayMonitors call.
-            [ThreadStatic]
-            private static WindowStartupTopLeftPointHelper s_tlsMonitorEnumTarget;
 
             /// <summary>
             /// Helper for <see cref="IdentifyScreenTopLeft"/>
