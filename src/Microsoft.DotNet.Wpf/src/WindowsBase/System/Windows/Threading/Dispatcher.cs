@@ -946,6 +946,14 @@ namespace System.Windows.Threading
                         // processing for it.  Note we will mark it aborted
                         // below.
                         _queue.RemoveItem(operation._item);
+                        // RemoveItem returned the node to PriorityQueue<T>'s per-queue
+                        // free list. Drop our own back-reference here, still inside
+                        // _instanceLock, so that a future Enqueue's pool-pop on the
+                        // same UI thread can't alias this op's _item slot — which
+                        // would make subsequent Abort() / SetPriority() on this op
+                        // observe _item.IsQueued == true for a DIFFERENT op's queue
+                        // node and corrupt that op's queue state.
+                        operation._item = null;
                     }
                 }
             }
@@ -1955,7 +1963,11 @@ namespace System.Windows.Threading
 
             lock(_instanceLock)
             {
-                if(_queue != null && operation._item.IsQueued)
+                // _item-null guard: after ProcessQueue dequeues an op it nulls the op's
+                // _item back-reference (to keep the PriorityItem pool from aliasing it),
+                // and the post-dequeue op is no longer in the queue so a SetPriority
+                // call on it should be a no-op rather than NRE on _item.IsQueued.
+                if(_queue != null && operation._item != null && operation._item.IsQueued)
                 {
                     _queue.ChangeItemPriority(operation._item, priority);
                     notify = true;
@@ -1991,9 +2003,13 @@ namespace System.Windows.Threading
 
             lock(_instanceLock)
             {
-                if(_queue != null && operation._item.IsQueued)
+                if(_queue != null && operation._item != null && operation._item.IsQueued)
                 {
                     _queue.RemoveItem(operation._item);
+                    // Drop our own back-reference so a future Enqueue's pool-pop
+                    // can't alias this op's _item slot (see InvokeAsyncImpl's
+                    // failed-enqueue branch and ProcessQueue for the matching stamps).
+                    operation._item = null;
                     operation._status = DispatcherOperationStatus.Aborted;
                     notify = true;
 
@@ -2038,6 +2054,16 @@ namespace System.Windows.Threading
                     if(_foregroundPriorityRange.Contains(maxPriority) || backgroundProcessingOK)
                     {
                          op = _queue.Dequeue();
+                         // Dequeue routed through PriorityQueue.RemoveItem which has
+                         // already pushed op's PriorityItem back to the per-queue free
+                         // list. Null our own back-reference here, still inside
+                         // _instanceLock, so that the NEXT Enqueue on this UI thread
+                         // (which may pop the same node from the pool) cannot leave
+                         // this op holding a stale _item alias that points at a queue
+                         // node now owned by a different DispatcherOperation —
+                         // Abort/SetPriority on this op would otherwise corrupt the
+                         // other op's queue state via the aliased node.
+                         op._item = null;
                          hooks = _hooks;
                     }
                 }
