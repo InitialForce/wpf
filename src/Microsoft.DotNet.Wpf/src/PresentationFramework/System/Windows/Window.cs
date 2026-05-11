@@ -347,9 +347,29 @@ namespace System.Windows
             // If the callback function returns false on any enumerated window, or if there are no windows
             // found in the thread, the return value is false.
             // No need for use to actually check the return value.
-            UnsafeNativeMethods.EnumThreadWindows(SafeNativeMethods.GetCurrentThreadId(),
-                                                  new NativeMethods.EnumThreadWindowsCallback(ThreadWindowsCallback),
-                                                  NativeMethods.NullHandleRef);
+            //
+            // Use a single cached static delegate (s_threadWindowsCallback) routed through a
+            // [ThreadStatic] target slot (s_tlsEnumThreadWindowsTarget) instead of allocating a fresh
+            // `new NativeMethods.EnumThreadWindowsCallback(ThreadWindowsCallback)` delegate per call.
+            // The static delegate is built once at type-init; the TLS target slot is set immediately
+            // before EnumThreadWindows and restored in the finally block immediately after. The OS
+            // dispatches every callback synchronously inline within EnumThreadWindows on the caller
+            // thread, so the slot is live for the duration of one synchronous OS call only. The save-
+            // and-restore pattern (prev/finally) handles the nested-ShowDialog case correctly: a
+            // nested ShowDialog overwrites the slot, does its own EnumThreadWindows, restores. The
+            // outer's slot value is recovered when nested unwinds.
+            Window prevEnumTarget = s_tlsEnumThreadWindowsTarget;
+            s_tlsEnumThreadWindowsTarget = this;
+            try
+            {
+                UnsafeNativeMethods.EnumThreadWindows(SafeNativeMethods.GetCurrentThreadId(),
+                                                      s_threadWindowsCallback,
+                                                      NativeMethods.NullHandleRef);
+            }
+            finally
+            {
+                s_tlsEnumThreadWindowsTarget = prevEnumTarget;
+            }
 
             // Disable those windows
             EnableThreadWindows(false);
@@ -3586,6 +3606,17 @@ namespace System.Windows
             {
                 DialogResult = false;
             }
+        }
+
+        /// <summary>
+        /// The callback function for EnumThreadWindows. Reads the per-thread target Window from
+        /// the [ThreadStatic] slot set by ShowDialog and delegates to its instance method.
+        /// </summary>
+        private static bool ThreadWindowsCallbackStatic(IntPtr hWnd, IntPtr lparam)
+        {
+            Window target = s_tlsEnumThreadWindowsTarget;
+            Debug.Assert(target != null, "s_tlsEnumThreadWindowsTarget must be set during EnumThreadWindows");
+            return target.ThreadWindowsCallback(hWnd, lparam);
         }
 
         /// <summary>
@@ -7230,6 +7261,20 @@ namespace System.Windows
         private IntPtr              _ownerHandle = IntPtr.Zero;   // no need to dispose this
         private WindowCollection    _ownedWindows;
         private List<IntPtr>        _threadWindowHandles;
+
+        // Single AppDomain-wide cached delegate routed to ThreadWindowsCallbackStatic. Allocated
+        // once at type-init; reused by every ShowDialog call on every thread instead of allocating
+        // a fresh `new NativeMethods.EnumThreadWindowsCallback(...)` per call.
+        private static readonly NativeMethods.EnumThreadWindowsCallback s_threadWindowsCallback =
+            new NativeMethods.EnumThreadWindowsCallback(ThreadWindowsCallbackStatic);
+
+        // Per-thread target Window for the static EnumThreadWindows callback. Set immediately
+        // before EnumThreadWindows by ShowDialog (save-and-restore pattern); read by
+        // ThreadWindowsCallbackStatic on every callback invocation. The OS dispatches the
+        // callbacks synchronously inline on the caller thread, so the slot is live only for
+        // the duration of a single synchronous EnumThreadWindows call.
+        [ThreadStatic]
+        private static Window s_tlsEnumThreadWindowsTarget;
 
         private bool                _updateHwndSize     = true;
         private bool                _updateHwndLocation = true;
