@@ -616,7 +616,15 @@ namespace System.Windows.Threading
             }
 
             // Slow-Path: go through the queue.
-            DispatcherOperation operation = new DispatcherOperation(this, priority, callback);
+            // internalSyncInvoke:true — the op is constructed locally here, waited
+            // on synchronously, and goes out of scope when this method returns
+            // (Invoke returns void; neither the op nor its Task is exposed to user
+            // code). This lets the op's TaskSource skip the per-op
+            // `new DispatcherOperationTaskMapping(this)` heap allocation that the
+            // default Initialize path would otherwise attach as Task.AsyncState
+            // (~24 B/op). See DispatcherOperation's internal-sync ctor for the
+            // safety argument.
+            DispatcherOperation operation = new DispatcherOperation(this, priority, callback, internalSyncInvoke: true);
             InvokeImpl(operation, cancellationToken, timeout);
         }
 

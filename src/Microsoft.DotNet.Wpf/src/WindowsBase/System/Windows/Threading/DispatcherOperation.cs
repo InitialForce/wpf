@@ -28,6 +28,45 @@ namespace System.Windows.Threading
             int numArgs,
             DispatcherOperationTaskSource taskSource,
             bool useAsyncSemantics)
+            : this(dispatcher, method, priority, args, numArgs, taskSource, useAsyncSemantics, skipTaskAsyncStateMapping: false)
+        {
+        }
+
+        // Inner ctor — the `skipTaskAsyncStateMapping` switch lets the synchronous
+        // Dispatcher.Invoke(Action,...) slow path opt out of the per-op
+        // `new DispatcherOperationTaskMapping(this)` allocation (~24 B/op) that
+        // every DispatcherOperation otherwise pays inside `_taskSource.Initialize(this)`.
+        //
+        // The Mapping object exists solely as the Task.AsyncState discriminator for
+        // the public TaskExtensions API (`IsDispatcherOperationTask` / `DispatcherOperationWait`)
+        // — see DispatcherOperationTaskMapping.cs and System.Windows.Presentation/TaskExtensions.cs.
+        // On the sync void-Invoke slow path the caller is `Dispatcher.Invoke(Action,...)`,
+        // which returns `void`: the DispatcherOperation is constructed locally inside
+        // Invoke, waited on via op.Wait (which routes through the per-op Task /
+        // DispatcherOperationEvent), and goes out of scope when Invoke returns. The
+        // op + its Task are never exposed to user code, so Task.AsyncState is
+        // unobservable on that path — meaning the Mapping is pure waste.
+        //
+        // When skipTaskAsyncStateMapping is true the TaskSource creates a default
+        // `new TaskCompletionSource<TResult>()` with null state, so Task.AsyncState
+        // is null. Internal callers (DispatcherOperation.Wait's
+        // `Task.GetAwaiter().GetResult()`, InvokeCompletions' SetResult/SetException/
+        // SetCanceled) don't read AsyncState, so they are unaffected.
+        //
+        // Default false preserves the existing allocation behavior for every
+        // DispatcherOperation construction that exposes the op (BeginInvoke /
+        // InvokeAsync / LegacyBeginInvokeImpl / params-object[] BeginInvoke /
+        // the typed DispatcherOperation<TResult> ctor used by both Invoke<TResult>
+        // and InvokeAsync<TResult>).
+        internal DispatcherOperation(
+            Dispatcher dispatcher,
+            Delegate method,
+            DispatcherPriority priority,
+            object args,
+            int numArgs,
+            DispatcherOperationTaskSource taskSource,
+            bool useAsyncSemantics,
+            bool skipTaskAsyncStateMapping)
         {
             _dispatcher = dispatcher;
             _method = method;
@@ -38,8 +77,11 @@ namespace System.Windows.Threading
             _executionContext = CulturePreservingExecutionContext.Capture();
 
             _taskSource = taskSource;
-            _taskSource.Initialize(this);
-            
+            if (skipTaskAsyncStateMapping)
+                _taskSource.InitializeWithoutMapping(this);
+            else
+                _taskSource.Initialize(this);
+
             _useAsyncSemantics = useAsyncSemantics;
         }
 
@@ -71,7 +113,30 @@ namespace System.Windows.Threading
                 new DispatcherOperationTaskSource<object>(),
                 true)
         {
-        }        
+        }
+
+        // Internal-sync ctor used by Dispatcher.Invoke(Action,...) slow path.
+        // The op is constructed locally inside Invoke, waited on, and goes out of
+        // scope when Invoke returns — it is never exposed to user code. Skipping
+        // the per-op DispatcherOperationTaskMapping allocation that the Initialize
+        // path would otherwise create saves ~24 B/op on every cross-thread or
+        // non-Send-priority synchronous Dispatcher.Invoke(Action,...) call.
+        // See the inner ctor's comment for the safety argument.
+        internal DispatcherOperation(
+            Dispatcher dispatcher,
+            DispatcherPriority priority,
+            Action action,
+            bool internalSyncInvoke) : this(
+                dispatcher,
+                action,
+                priority,
+                null,
+                0,
+                new DispatcherOperationTaskSource<object>(),
+                true,
+                skipTaskAsyncStateMapping: internalSyncInvoke)
+        {
+        }
 
         internal DispatcherOperation(
             Dispatcher dispatcher,
@@ -86,7 +151,7 @@ namespace System.Windows.Threading
                 new DispatcherOperationTaskSource<object>(),
                 true)
         {
-        }        
+        }
 
         /// <summary>
         ///     Returns the Dispatcher that this operation was posted to.
