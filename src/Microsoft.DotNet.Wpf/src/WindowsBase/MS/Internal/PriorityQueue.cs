@@ -10,22 +10,10 @@ namespace System.Windows.Threading
             // Build the collection of priority chains.
             _priorityChains = new SortedList<int, PriorityChain<T>>(); // NOTE: should be Priority
             _cacheReusableChains = new Stack<PriorityChain<T>>(10);
-            // Per-queue (= per-Dispatcher = per-UI-thread) PriorityItem free list.
-            // Sized to match the chain pool (10). Steady-state dispatcher queue depth is
-            // typically 1-3 items, so a tiny cap is fine and avoids unbounded pool growth
-            // under bursty workloads that briefly inflate the queue. Push/pop happens
-            // exclusively under Dispatcher._instanceLock (the same lock that already
-            // guards Enqueue / RemoveItem / ChangeItemPriority), so no internal locking
-            // is needed on the Stack itself. See PriorityItem.Reset / ClearForPool for
-            // the per-node hand-off semantics.
-            _cacheReusableItems = new Stack<PriorityItem<T>>(ItemPoolCapacity);
-
+                
             _head = _tail = null;
             _count = 0;
         }
-
-        // Cap on the per-queue PriorityItem free list. Matches the chain pool's cap.
-        private const int ItemPoolCapacity = 10;
 
         // NOTE: not used
         // public int Count {get{return _count;}}
@@ -54,24 +42,8 @@ namespace System.Windows.Threading
             PriorityChain<T> chain = GetChain(priority);
 
             // Wrap the item in a PriorityItem so we can put it in our
-            // linked list. Reuse one from the per-queue free list when available —
-            // RemoveItem (and Dequeue, which routes through it) pushes detached
-            // nodes back to this pool with all six reference fields nulled
-            // (the four linked-list pointers plus _chain plus _data, the last via
-            // ClearForPool). Reset only needs to restamp _data. Steady-state
-            // dispatcher cycles (Enqueue → Dequeue → Enqueue → Dequeue) reuse the
-            // same pooled node forever, eliminating the per-DispatcherOperation
-            // PriorityItem<DispatcherOperation> heap allocation entirely.
-            PriorityItem<T> priorityItem;
-            if (_cacheReusableItems.Count > 0)
-            {
-                priorityItem = _cacheReusableItems.Pop();
-                priorityItem.Reset(data);
-            }
-            else
-            {
-                priorityItem = new PriorityItem<T>(data);
-            }
+            // linked list.
+            PriorityItem<T> priorityItem = new PriorityItem<T>(data);
 
             // Step 1: Append this to the end of the "sequential" linked list.
             InsertItemInSequentialChain(priorityItem, _tail);
@@ -138,23 +110,6 @@ namespace System.Windows.Threading
             RemoveItemFromSequentialChain(item);
 
             // Note: we do not clean up empty chains on purpose to reduce churn.
-
-            // Step 3: Hand the now-detached node back to the per-queue free list. By the
-            // post-conditions of Step 1 + Step 2 the node already has _chain == null
-            // and all four linked-list pointers (sequentialPrev/Next, priorityPrev/Next)
-            // nulled. ClearForPool drops the _data back-reference so a pooled node
-            // doesn't keep a completed DispatcherOperation rooted across cycles. The
-            // caller (Dispatcher) is responsible for nulling its own DispatcherOperation
-            // ._item reference (under _instanceLock) at the matching call sites so that
-            // a pool-popped node re-issued to a new DispatcherOperation cannot be
-            // observed via the old op's stale _item alias — see Dispatcher.ProcessQueue,
-            // Dispatcher.Abort, and Dispatcher.InvokeAsyncImpl's failed-enqueue branch
-            // for the three matching null-stamps.
-            if (_cacheReusableItems.Count < ItemPoolCapacity)
-            {
-                item.ClearForPool();
-                _cacheReusableItems.Push(item);
-            }
         }
 
         public void ChangeItemPriority(PriorityItem<T> item, DispatcherPriority priority) // NOTE: should be Priority
@@ -432,11 +387,7 @@ namespace System.Windows.Threading
         // Priority chains...
         private SortedList<int, PriorityChain<T>> _priorityChains; // NOTE: should be Priority
         private Stack<PriorityChain<T>> _cacheReusableChains;
-
-        // Per-queue PriorityItem<T> free list. See ctor for sizing rationale and
-        // PriorityItem.Reset / ClearForPool for the per-node hand-off semantics.
-        private Stack<PriorityItem<T>> _cacheReusableItems;
-
+        
         // Sequential chain...
         private PriorityItem<T> _head;
         private PriorityItem<T> _tail;
