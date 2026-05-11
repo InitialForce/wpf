@@ -2870,6 +2870,65 @@ namespace System.Windows.Threading
 
         internal object WrappedInvoke(Delegate callback, object args, int numArgs, Delegate catchHandler)
         {
+            // No-user-handlers fast path. The static ctor unconditionally wires
+            // _exceptionWrapper.Catch/Filter to CatchExceptionStatic/ExceptionFilterStatic,
+            // so ExceptionWrapper's own "Catch == null && Filter == null" fast path
+            // is dead in production — every dispatch lands in TryCatchWhenWithHandlers
+            // and pays the EH-region barrier even when no user code is listening.
+            // Check the REAL user-handler condition here
+            // (`_unhandledExceptionFilter == null && UnhandledException == null`) and,
+            // when no per-call catchHandler is supplied either, dispatch the callback
+            // directly without the ExceptionWrapper round-trip.
+            //
+            // Behavioural equivalence: with no user handlers, the static
+            // ExceptionFilter returns `HasUnhandledExceptionHandler` (false) and the
+            // catch-when clause never matches, so any thrown exception unwinds
+            // exactly as if no try/catch existed. The one side-effect of the slow
+            // path — `e.Data.Add(ExceptionDataKey, null)` to detect dispatcher
+            // re-entry — is read only by ExceptionFilter itself, and on re-entry
+            // it still returns false in the no-handlers case, so the mark has no
+            // observable consumer here.
+            //
+            // What this eliminates on the hot path:
+            //   * the virtual call into ExceptionWrapper.TryCatchWhen,
+            //   * the call into TryCatchWhenWithHandlers and its EH region (which
+            //     keeps the dispatcher op-callback frame from being inlined and
+            //     blocks register-reuse the JIT would otherwise apply),
+            //   * the per-call FilterException / CatchException dispatch (cold,
+            //     but still part of the EH-region setup cost).
+            //
+            // Type-test shape mirrors ExceptionWrapper.InternalRealCall's hot
+            // numArgs=0 + Action / numArgs=1 + DispatcherOperationCallback dispatch.
+            // Cold delegate types (SendOrPostCallback, ShutdownCallback, numArgs==-1
+            // params-array, DynamicInvoke fallback) and any caller that supplies an
+            // explicit catchHandler still flow through the unmodified wrapper, so
+            // their behaviour — including for tests that subscribe handlers
+            // mid-run — is unchanged.
+            if (catchHandler == null
+                && _unhandledExceptionFilter == null
+                && UnhandledException == null)
+            {
+                if (numArgs == 0)
+                {
+                    if (callback is Action action)
+                    {
+                        action();
+                        return null;
+                    }
+                }
+                else if (numArgs == 1)
+                {
+                    if (callback is DispatcherOperationCallback doc)
+                    {
+                        return doc(args);
+                    }
+                }
+                // Cold-type / numArgs==-1 / unmatched-delegate fall-through:
+                // hand off to the unmodified wrapper so the full delegate-type
+                // matrix (including DynamicInvoke and params-array normalization)
+                // is preserved for those callers.
+            }
+
             return _exceptionWrapper.TryCatchWhen(this, callback, args, numArgs, catchHandler);
         }
 
