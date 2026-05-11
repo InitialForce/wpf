@@ -455,12 +455,18 @@ namespace System.Windows.Documents
         protected override Size MeasureOverride(Size constraint)
         {
             // Not using an enumerator because the list can be modified during the loop when we call out.
-            DictionaryEntry[] zOrderMapEntries = new DictionaryEntry[_zOrderMap.Count];
-            _zOrderMap.CopyTo(zOrderMapEntries, 0);
+            // Snapshot the values directly into a pooled object[] — SortedList.CopyTo(Array)
+            // would otherwise allocate a fresh DictionaryEntry[] every layout pass
+            // (~170 MB in the MotionCatalyst take-open profile).
+            IList valueList = _zOrderMap.GetValueList();
+            int count = valueList.Count;
+            if (_zOrderValuesSnapshotBuffer == null || _zOrderValuesSnapshotBuffer.Length < count)
+                _zOrderValuesSnapshotBuffer = new object[Math.Max(count, 8)];
+            valueList.CopyTo(_zOrderValuesSnapshotBuffer, 0);
 
-            for (int i = 0; i < zOrderMapEntries.Length; i++)
+            for (int i = 0; i < count; i++)
             {
-                ArrayList adornerInfos = (ArrayList)zOrderMapEntries[i].Value;
+                ArrayList adornerInfos = (ArrayList)_zOrderValuesSnapshotBuffer[i];
                 Debug.Assert(adornerInfos != null, "No adorners found for element in AdornerLayer._zOrderMap");
 
                 int j = 0;
@@ -470,6 +476,8 @@ namespace System.Windows.Documents
                     adornerInfo.Adorner.Measure(constraint);
                 }
             }
+
+            Array.Clear(_zOrderValuesSnapshotBuffer, 0, count);
 
             // Returning 0,0 prevents an invalidation of Measure for AdornerLayer from unnecessarily dirtying the parent.
             return new Size();
@@ -489,12 +497,16 @@ namespace System.Windows.Documents
         protected override Size ArrangeOverride(Size finalSize)
         {
             // Not using an enumerator because the list can be modified during the loop when we call out.
-            DictionaryEntry[] zOrderMapEntries = new DictionaryEntry[_zOrderMap.Count];
-            _zOrderMap.CopyTo(zOrderMapEntries, 0);
+            // Snapshot the values directly into the same pooled object[] used by MeasureOverride.
+            IList valueList = _zOrderMap.GetValueList();
+            int count = valueList.Count;
+            if (_zOrderValuesSnapshotBuffer == null || _zOrderValuesSnapshotBuffer.Length < count)
+                _zOrderValuesSnapshotBuffer = new object[Math.Max(count, 8)];
+            valueList.CopyTo(_zOrderValuesSnapshotBuffer, 0);
 
-            for (int i = 0; i < zOrderMapEntries.Length; i++)
+            for (int i = 0; i < count; i++)
             {
-                ArrayList adornerInfos = (ArrayList)zOrderMapEntries[i].Value;
+                ArrayList adornerInfos = (ArrayList)_zOrderValuesSnapshotBuffer[i];
 
                 Debug.Assert(adornerInfos != null, "No adorners found for element in AdornerLayer._zOrderMap");
 
@@ -531,6 +543,8 @@ namespace System.Windows.Documents
                     }
                 }
             }
+
+            Array.Clear(_zOrderValuesSnapshotBuffer, 0, count);
 
             return finalSize;
         }
@@ -1173,6 +1187,13 @@ namespace System.Windows.Documents
         // not self-reentrant on the same AdornerLayer instance.
         private List<UIElement> _removeList;
         private UIElement[] _keysSnapshotBuffer;
+
+        // Pooled snapshot buffer for MeasureOverride / ArrangeOverride iteration
+        // over _zOrderMap.GetValueList().  Avoids the per-pass DictionaryEntry[]
+        // allocation that SortedList.CopyTo(Array) would otherwise produce.
+        // Measure and Arrange share the buffer because they never overlap in a
+        // single layout pass (Measure runs to completion before Arrange begins).
+        private object[] _zOrderValuesSnapshotBuffer;
 
         // Dirty-bit gate for OnLayoutUpdated.  Set on adorner add/remove and on any
         // per-element LayoutUpdated event; cleared at the top of UpdateAdorner so a
