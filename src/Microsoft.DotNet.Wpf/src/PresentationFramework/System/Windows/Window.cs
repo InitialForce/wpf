@@ -5638,57 +5638,18 @@ namespace System.Windows
                 //
                 Debug.Assert(_dispatcherFrame == null, "_dispatcherFrame must be null here");
 
-                // Prefer a previously-parked DispatcherFrame from the [ThreadStatic] pool slot
-                // over a fresh `new DispatcherFrame()` allocation. The pooled frame was created
-                // on this same UI/STA thread by an earlier ShowDialog (the pool is [ThreadStatic],
-                // so any pooled instance's bound Dispatcher matches the current thread's
-                // dispatcher — PushFrame's frame.Dispatcher != dispatcher check will succeed).
-                // ResetForPushFrame() flips _continue back to true without invoking the public
-                // Continue setter's BeginInvoke side-effect (which is meant to wake a running
-                // pump and would itself allocate a DispatcherOperation we don't need here —
-                // the pump hasn't started yet). On the first ShowDialog of a given thread the
-                // slot is null and we allocate fresh, exactly as before.
-                DispatcherFrame pooledFrame = s_freedDispatcherFrame;
-                DispatcherFrame frame;
-                if (pooledFrame != null)
-                {
-                    s_freedDispatcherFrame = null;
-                    pooledFrame.ResetForPushFrame();
-                    frame = pooledFrame;
-                }
-                else
-                {
-                    frame = new DispatcherFrame();
-                }
-
                 try
                 {
                     // tell users we're going modal
                     ComponentDispatcher.PushModal();
 
-                    _dispatcherFrame = frame;
-                    Dispatcher.PushFrame(frame);
+                    _dispatcherFrame = new DispatcherFrame();
+                    Dispatcher.PushFrame(_dispatcherFrame);
                 }
                 finally
                 {
                     // tell users we're going non-modal
                     ComponentDispatcher.PopModal();
-
-                    // Park the frame back into the [ThreadStatic] pool slot for the next
-                    // ShowDialog on this thread. DoDialogHide already nulled _dispatcherFrame
-                    // (line ~4500) when it set Continue=false to break the pump; the local
-                    // `frame` reference is the only remaining handle. The frame's _continue
-                    // is in an indeterminate post-pump state (false if DoDialogHide ran;
-                    // true if the pump exited via _exitAllFrames / _hasShutdownStarted) —
-                    // ResetForPushFrame() on the next reuse normalizes it back to true.
-                    // Nested ShowDialog single-slot semantics: if a nested ShowDialog already
-                    // re-parked its own instance into the slot before we unwound, leave the
-                    // slot alone (don't overwrite the more-recently-parked instance — both
-                    // are equivalently reusable, so first-writer-wins keeps the slot stable).
-                    if (s_freedDispatcherFrame == null)
-                    {
-                        s_freedDispatcherFrame = frame;
-                    }
                 }
             }
 
@@ -7369,24 +7330,6 @@ namespace System.Windows
         // outer returns, then steady-state pooling resumes).
         [ThreadStatic]
         private static List<IntPtr> s_freedThreadWindowHandles;
-
-        // [ThreadStatic] single-slot pool holding the most recently parked DispatcherFrame
-        // used by Window.ShowDialog's modal pump (see ShowHelper). The frame's only mutable
-        // state is _continue, which DispatcherFrame.ResetForPushFrame() normalizes back to
-        // true on each reuse. _exitWhenRequested is set to true by the public default
-        // constructor and is never mutated; _dispatcher (DispatcherObject base) is set once
-        // at construction time to Dispatcher.CurrentDispatcher on this thread — and because
-        // the pool is per-thread (ThreadStatic), the pooled frame's bound Dispatcher always
-        // matches the current thread's dispatcher when popped. Nested ShowDialog is safe:
-        // the nested call pops the slot (or allocates fresh if empty), uses the frame, then
-        // tries to park back, deferring to whatever the inner-most ShowDialog already parked
-        // (first-writer-wins to avoid evicting a more-recently-cooled instance). On the
-        // first ShowDialog of a given UI thread the slot is null and a fresh frame is
-        // allocated, exactly as before — steady-state pooling eliminates the per-modal-pump
-        // DispatcherFrame allocation (~32 B / op) on every subsequent ShowDialog on the
-        // same thread.
-        [ThreadStatic]
-        private static DispatcherFrame s_freedDispatcherFrame;
 
         private bool                _updateHwndSize     = true;
         private bool                _updateHwndLocation = true;
