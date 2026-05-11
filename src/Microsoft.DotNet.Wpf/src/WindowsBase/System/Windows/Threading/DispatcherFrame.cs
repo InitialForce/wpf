@@ -84,6 +84,20 @@ namespace System.Windows.Threading
             }
         }
 
+        // Reactivates a pooled frame for a fresh PushFrame call without invoking the public
+        // Continue setter's BeginInvoke side-effect. The public setter posts a Send-priority
+        // no-op DispatcherOperation to wake the running message pump and force it to re-read
+        // Continue. That wake is unnecessary (and counterproductive — it allocates a fresh
+        // DispatcherOperation + delegate) when a pooled frame is being reset BEFORE it is
+        // pushed onto Dispatcher.PushFrame: at that moment there is no pump running yet that
+        // could be waiting on Continue. Window.ShowDialog's modal pump pool uses this method
+        // to flip _continue from `false` (left over from the previous modal exit) back to
+        // `true` before re-pushing the same frame for a new modal iteration.
+        internal void ResetForPushFrame()
+        {
+            _continue = true;
+        }
+
         private bool _exitWhenRequested;
         private bool _continue;
     }
