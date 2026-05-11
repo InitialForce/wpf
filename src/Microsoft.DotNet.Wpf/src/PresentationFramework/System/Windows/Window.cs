@@ -341,7 +341,24 @@ namespace System.Windows
             // EnableThreadWindow(true) is called when dialog is going away. Once dialog is closed and
             // thread windows have been enabled, then there no need to keep the list around.
             // Please see BUG 929740 before making any changes to how _threadWindowHandles works.
-            _threadWindowHandles = new List<IntPtr>();
+            //
+            // Prefer a previously-parked List<IntPtr> from the [ThreadStatic] pool slot over a fresh
+            // allocation. The pooled list has its IntPtr[] backing pre-grown to the highest capacity
+            // reached by a prior ShowDialog on this thread, so EnumThreadWindowsCallback's per-entry
+            // Add calls land in the existing buffer without re-paying the 0→4→8→16 grow-step
+            // allocations. The slot is repopulated by EnableThreadWindows(true) at modal exit (the
+            // contents are cleared by the same call). On the first ShowDialog of a given thread the
+            // slot is null and we allocate fresh — exactly as before.
+            List<IntPtr> pooledHandleList = s_freedThreadWindowHandles;
+            if (pooledHandleList != null)
+            {
+                s_freedThreadWindowHandles = null;
+                _threadWindowHandles = pooledHandleList;
+            }
+            else
+            {
+                _threadWindowHandles = new List<IntPtr>();
+            }
             //Get visible and enabled windows in the thread
             // If the callback function returns true for all windows in the thread, the return value is true.
             // If the callback function returns false on any enumerated window, or if there are no windows
@@ -3669,7 +3686,24 @@ namespace System.Windows
             // _threadWindowHandles.
             if (state)
             {
+                // Clear the contents (drops the per-iter IntPtr entries so no stale handles
+                // leak into the next ShowDialog) and park the now-empty (but grown-capacity)
+                // list back into the [ThreadStatic] pool slot for the next ShowDialog on this
+                // thread. List<IntPtr>.Clear() is a single _size=0 store (IntPtr is a value
+                // type, no array zeroing). _threadWindowHandles is then nulled exactly as
+                // before, preserving the existing entry-side Debug.Assert invariant. The
+                // already-occupied slot case (concurrent nested ShowDialog returned earlier
+                // and parked first) drops this instance for GC — benign last-writer-wins.
+                List<IntPtr> list = _threadWindowHandles;
                 _threadWindowHandles = null;
+                if (list != null)
+                {
+                    list.Clear();
+                    if (s_freedThreadWindowHandles == null)
+                    {
+                        s_freedThreadWindowHandles = list;
+                    }
+                }
             }
         }
 
@@ -7275,6 +7309,27 @@ namespace System.Windows
         // the duration of a single synchronous EnumThreadWindows call.
         [ThreadStatic]
         private static Window s_tlsEnumThreadWindowsTarget;
+
+        // [ThreadStatic] single-slot pool holding the most recently emptied List<IntPtr>
+        // used by ShowDialog to collect the snapshot of visible+enabled thread windows
+        // (the set that gets EnableWindow(false)'d for the duration of the modal frame
+        // and re-enabled in EnableThreadWindows(true)). Window is STA-affine and the
+        // list is borrowed by ShowDialog only on the dispatcher thread, so a per-thread
+        // single slot serves every Window on a given UI thread. EnableThreadWindows(true)
+        // clears the list (drops the IntPtr entries; List<IntPtr>.Clear() for a value-type
+        // T is a single _size=0 store with no array zeroing) and returns it to the slot;
+        // the next ShowDialog on the same thread pops the slot and pays zero allocation
+        // for both the List header and the IntPtr[] backing (capacity is preserved at
+        // the highest grown stage from the previous ShowDialog). Nested ShowDialog is
+        // safe under single-slot semantics: the nested call hits an empty slot (the
+        // outer call's instance is still field-bound on the outer Window because the
+        // outer parks via EnableThreadWindows(true) which only fires after the modal
+        // pump returns), allocates fresh, parks its own instance at the end, possibly
+        // evicting the outer's parked instance — benign last-writer-wins (the evicted
+        // instance is GC-collected; at most one wasted-reuse on the call after the
+        // outer returns, then steady-state pooling resumes).
+        [ThreadStatic]
+        private static List<IntPtr> s_freedThreadWindowHandles;
 
         private bool                _updateHwndSize     = true;
         private bool                _updateHwndLocation = true;
