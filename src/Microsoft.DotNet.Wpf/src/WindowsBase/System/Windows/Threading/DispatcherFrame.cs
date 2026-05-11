@@ -84,6 +84,17 @@ namespace System.Windows.Threading
             }
         }
 
+        // Direct field-set helper for pooled-frame reuse: a caller that
+        // parked a previously-pumped frame (now in _continue=false state)
+        // can rebind it for a fresh PushFrame without paying the Continue
+        // setter's BeginInvoke cost — the BeginInvoke is only needed to
+        // wake an already-running pump, which by construction does not
+        // exist at the moment the pooled frame is being reactivated.
+        internal void ResetForPushFrame()
+        {
+            _continue = true;
+        }
+
         private bool _exitWhenRequested;
         private bool _continue;
     }
