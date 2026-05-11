@@ -580,21 +580,29 @@ namespace System.Windows.Threading
 
                 try
                 {
+                    // priority is statically Send inside this guard. Use the per-Dispatcher cached
+                    // SyncCtx + cached compat bools (captured at ctor time) to skip the per-call
+                    // BaseCompatibilityPreferences Get*() static method calls AND the per-call
+                    // DispatcherSynchronizationContext allocation under the .NET Core defaults
+                    // (reuseInstance=false, flowPriority=true). Mirrors the LegacyInvokeImpl
+                    // pattern at the same call site (Send + same-thread + cached compat bools).
                     DispatcherSynchronizationContext newSynchronizationContext;
-                    if(BaseCompatibilityPreferences.GetReuseDispatcherSynchronizationContextInstance())
+                    if(_reuseDispatcherSyncCtxInstance)
                     {
                         newSynchronizationContext = _defaultDispatcherSynchronizationContext;
                     }
+                    else if(_flowDispatcherSyncCtxPriority)
+                    {
+                        // .NET Core default: flow Send priority. Reuse the cached Send-priority
+                        // instance instead of allocating a fresh one per call.
+                        newSynchronizationContext = _sendDispatcherSynchronizationContext;
+                    }
                     else
                     {
-                        if(BaseCompatibilityPreferences.GetFlowDispatcherSynchronizationContextPriority())
-                        {
-                            newSynchronizationContext = new DispatcherSynchronizationContext(this, priority);
-                        }
-                        else
-                        {
-                            newSynchronizationContext = new DispatcherSynchronizationContext(this, DispatcherPriority.Normal);
-                        }
+                        // Rare opt-out: reuseInstance=false && flow=false. Preserve the original
+                        // per-call Normal-priority alloc so callers that key off reference identity
+                        // in this config continue to see a unique instance.
+                        newSynchronizationContext = new DispatcherSynchronizationContext(this, DispatcherPriority.Normal);
                     }
                     SynchronizationContext.SetSynchronizationContext(newSynchronizationContext);
 
@@ -722,21 +730,22 @@ namespace System.Windows.Threading
 
                 try
                 {
+                    // priority is statically Send inside this guard. Mirror the Action-overload's
+                    // cached-SyncCtx + cached-compat-bools pattern to skip the per-call DSC alloc
+                    // under the .NET Core defaults (reuseInstance=false, flowPriority=true).
                     DispatcherSynchronizationContext newSynchronizationContext;
-                    if(BaseCompatibilityPreferences.GetReuseDispatcherSynchronizationContextInstance())
+                    if(_reuseDispatcherSyncCtxInstance)
                     {
                         newSynchronizationContext = _defaultDispatcherSynchronizationContext;
                     }
+                    else if(_flowDispatcherSyncCtxPriority)
+                    {
+                        newSynchronizationContext = _sendDispatcherSynchronizationContext;
+                    }
                     else
                     {
-                        if(BaseCompatibilityPreferences.GetFlowDispatcherSynchronizationContextPriority())
-                        {
-                            newSynchronizationContext = new DispatcherSynchronizationContext(this, priority);
-                        }
-                        else
-                        {
-                            newSynchronizationContext = new DispatcherSynchronizationContext(this, DispatcherPriority.Normal);
-                        }
+                        // Rare opt-out: preserve the per-call Normal-priority alloc semantics.
+                        newSynchronizationContext = new DispatcherSynchronizationContext(this, DispatcherPriority.Normal);
                     }
                     SynchronizationContext.SetSynchronizationContext(newSynchronizationContext);
 
@@ -1753,6 +1762,20 @@ namespace System.Windows.Threading
             _reuseDispatcherSyncCtxInstance = BaseCompatibilityPreferences.GetReuseDispatcherSynchronizationContextInstance();
             _flowDispatcherSyncCtxPriority = BaseCompatibilityPreferences.GetFlowDispatcherSynchronizationContextPriority();
             _sendDispatcherSynchronizationContext = new DispatcherSynchronizationContext(this, DispatcherPriority.Send);
+
+            // Per-priority DSC cache for the variable-priority InvokeImpl path (DispatcherOperation.InvokeImpl
+            // gets _priority from the queued op, so unlike Invoke's Send fast path it can't reuse the Send
+            // singleton). Sized for the DispatcherPriority enum's valid range [Inactive=0 .. Send=10]; slots
+            // are filled lazily on first use by GetOrCreatePrioritySyncContext. Pre-populate the Normal and
+            // Send slots with the already-constructed cached instances so the two most common priorities
+            // (Normal = queued ops, Send = same-thread synchronous Invoke) skip even the lazy-fill branch.
+            // The cache is per-Dispatcher (per-thread), so cross-thread DSC instances remain distinct,
+            // preserving the per-thread reference-inequality semantics that motivated the .NET 4.5 switch
+            // away from the WPF 4.0 shared-singleton design (cross-thread EC flow still uses CreateCopy(),
+            // which is unchanged and continues to allocate fresh DSCs at the EC.Capture / EC.SetEC handoff).
+            _priorityDispatcherSyncContexts = new DispatcherSynchronizationContext[11];
+            _priorityDispatcherSyncContexts[(int)DispatcherPriority.Normal] = _defaultDispatcherSynchronizationContext;
+            _priorityDispatcherSyncContexts[(int)DispatcherPriority.Send] = _sendDispatcherSynchronizationContext;
 
             // Create the message-only window we use to receive messages
             // that tell us to process the queue.
@@ -2816,6 +2839,47 @@ namespace System.Windows.Threading
             return _exceptionWrapper.TryCatchWhen(this, callback, args, numArgs, catchHandler);
         }
 
+        // Per-priority DSC cache lookup used by DispatcherOperation.InvokeImpl (variable priority comes
+        // from the queued op's _priority field). Hot path: array load + slot read + null-check on the
+        // already-populated slot — three memory references that the JIT folds into the caller. The
+        // first-touch fill of an unused priority goes through the outlined slow path so it doesn't
+        // bloat InvokeImpl's epilogue. The array is sized 11 for DispatcherPriority [Inactive=0..Send=10]
+        // and was allocated + Normal/Send pre-filled in the ctor; ValidatePriority gates the public APIs
+        // so the (uint)idx bounds check is defensive only.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal DispatcherSynchronizationContext GetOrCreatePrioritySyncContext(DispatcherPriority priority)
+        {
+            DispatcherSynchronizationContext[] arr = _priorityDispatcherSyncContexts;
+            int idx = (int)priority;
+            if ((uint)idx < (uint)arr.Length)
+            {
+                DispatcherSynchronizationContext dsc = arr[idx];
+                if (dsc != null)
+                {
+                    return dsc;
+                }
+            }
+            return GetOrCreatePrioritySyncContextSlow(priority);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private DispatcherSynchronizationContext GetOrCreatePrioritySyncContextSlow(DispatcherPriority priority)
+        {
+            int idx = (int)priority;
+            DispatcherSynchronizationContext[] arr = _priorityDispatcherSyncContexts;
+            // Defensive: ValidatePriority should have rejected out-of-range priorities upstream, but
+            // if a caller somehow bypasses validation (or the enum is extended), fall back to a fresh
+            // per-call DSC instead of crashing. This is the same allocation behavior we replaced, so
+            // the fallback is strictly no worse than the pre-cache code.
+            if ((uint)idx >= (uint)arr.Length)
+            {
+                return new DispatcherSynchronizationContext(this, priority);
+            }
+            DispatcherSynchronizationContext dsc = new DispatcherSynchronizationContext(this, priority);
+            arr[idx] = dsc;
+            return dsc;
+        }
+
         private object[] CombineParameters(object arg, object[] args)
         {
             object[] parameters = new object[1 + (args == null ? 1 : args.Length)];
@@ -2896,6 +2960,17 @@ namespace System.Windows.Threading
         // HwndSubclass.SubclassWndProc -> dispatcher.Invoke(Send, callback, param) hot path
         // does not allocate a fresh DispatcherSynchronizationContext per Win32 message dispatch.
         private DispatcherSynchronizationContext _sendDispatcherSynchronizationContext;
+
+        // Per-priority DSC cache for DispatcherOperation.InvokeImpl. Indexed by (int)DispatcherPriority
+        // in the [Inactive=0..Send=10] range. Allocated in the ctor at size 11; Normal and Send slots
+        // pre-populated with the already-cached singletons; other slots lazy-filled by
+        // GetOrCreatePrioritySyncContext on first use. The cache eliminates the per-op
+        // `new DispatcherSynchronizationContext(_dispatcher, _priority)` allocation that
+        // InvokeImpl was paying on every queued op under the .NET Core defaults
+        // (reuseInstance=false, flowPriority=true) — that's a ~32 B heap alloc on every
+        // dispatcher pump iteration. Same per-thread safety story as the other cached fields:
+        // cross-thread DSC instances stay distinct because EC flow goes through CreateCopy().
+        private DispatcherSynchronizationContext[] _priorityDispatcherSyncContexts;
 
         // Cached compat-pref values, captured once in the ctor (BaseCompatibilityPreferences seals
         // these on first read anyway). Lets the LegacyInvokeImpl fast path skip per-call
