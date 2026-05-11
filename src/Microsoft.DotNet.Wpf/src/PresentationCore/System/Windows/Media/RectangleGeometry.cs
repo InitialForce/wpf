@@ -406,7 +406,7 @@ namespace System.Windows.Media
             double radiusY = RadiusY;
             Rect rect = Rect;
 
-            ByteStreamGeometryContext ctx = new ByteStreamGeometryContext();
+            ByteStreamGeometryContext ctx = ByteStreamGeometryContext.AcquireFromPool();
 
             if (IsRounded(radiusX, radiusY))
             {
@@ -431,6 +431,7 @@ namespace System.Windows.Media
 
             ctx.Close();
             data.SerializedData = ctx.GetData();
+            ctx.ReleaseToPool();
 
             return data;
         }
