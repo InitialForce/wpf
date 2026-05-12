@@ -134,7 +134,11 @@ jobs:
       - name: Compute NuGet version
         id: version
         run: |
-          $version = pwsh -File tools/compute-version.ps1 -DryRun
+          # compute-version.ps1 -DryRun emits the version on stdout AND a
+          # diagnostic on the Information stream; capturing the subprocess
+          # output as a single value merges both, so take only the first
+          # line (the actual version string).
+          $version = (& pwsh -File tools/compute-version.ps1 -DryRun | Select-Object -First 1).Trim()
           echo "nuget_version=$version" >> "$env:GITHUB_OUTPUT"
           echo "Computed NuGet version: $version"
         shell: pwsh
