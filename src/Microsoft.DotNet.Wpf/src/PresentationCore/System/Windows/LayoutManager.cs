@@ -575,9 +575,9 @@ namespace System.Windows
             {
                 _inFireLayoutUpdated = true;
 
-                LayoutEventList.ListItem [] copy = LayoutEvents.CopyToArray();
+                LayoutEventList.ListItem [] copy = LayoutEvents.CopyToReusableArray(out int copyCount);
 
-                for(int i=0; i<copy.Length; i++)
+                for(int i=0; i<copyCount; i++)
                 {
                     LayoutEventList.ListItem item = copy[i];
                     //store handler here in case if thread gets pre-empted between check for IsAlive and invocation
@@ -678,9 +678,9 @@ namespace System.Windows
                 _inFireAutomationEvents = true;
                 _firePostLayoutEvents = false;
 
-                LayoutEventList.ListItem [] copy = AutomationEvents.CopyToArray();
+                LayoutEventList.ListItem [] copy = AutomationEvents.CopyToReusableArray(out int copyCount);
 
-                for(int i=0; i<copy.Length; i++)
+                for(int i=0; i<copyCount; i++)
                 {
                     LayoutEventList.ListItem item = copy[i];
                     //store peer here in case if thread gets pre-empted between check for IsAlive and invocation
@@ -729,6 +729,12 @@ namespace System.Windows
 
         internal AutomationPeer[] GetAutomationRoots()
         {
+            // Use the parameterless CopyToArray (fresh snapshot) here, NOT
+            // CopyToReusableArray. This method is reachable from inside
+            // fireAutomationEvents → peer.FireAutomationEvents() →
+            // AutomationPeer.ValidateConnected (LayoutManager.cs callers in
+            // AutomationPeer.cs:578), which would otherwise overwrite the
+            // shared _copyBuffer mid-iteration of the outer fire loop.
             LayoutEventList.ListItem [] copy = AutomationEvents.CopyToArray();
 
             AutomationPeer[] peers = new AutomationPeer[copy.Length];
@@ -1125,6 +1131,57 @@ namespace System.Windows
                 t = t.Next;
             }
             return copy;
+        }
+
+        // Per-instance scratch buffer for CopyToReusableArray. Each call to
+        // fireLayoutUpdateEvent / fireAutomationEvents (one per render pass
+        // when there is layout dirtiness) used to allocate a fresh
+        // ListItem[_count]; with the typical hundreds of UIElements that
+        // subscribe to LayoutUpdated that's hundreds of MB of gen0 churn
+        // during sustained playback. The buffer is shared across calls, so
+        // it is only safe to use from a caller that can guarantee no other
+        // CopyToReusableArray call on the same LayoutEventList runs before
+        // iteration over the returned buffer is complete. Reentrant or
+        // on-demand callers (e.g. GetAutomationRoots, which can be reached
+        // from inside FireAutomationEvents handlers via AutomationPeer
+        // connectivity checks) must use the parameterless CopyToArray()
+        // instead so they get a private snapshot.
+        //
+        // Caller must use the returned `count`; buffer length may exceed it.
+        private ListItem[] _copyBuffer;
+
+        internal ListItem[] CopyToReusableArray(out int count)
+        {
+            count = _count;
+            ListItem[] buffer = _copyBuffer;
+            if (buffer == null || buffer.Length < count)
+            {
+                // Round up to next power of two so steady-state subscriber
+                // counts don't keep reallocating on small swings.
+                int newSize = buffer == null ? 16 : buffer.Length;
+                while (newSize < count) newSize *= 2;
+                buffer = new ListItem[newSize];
+                _copyBuffer = buffer;
+            }
+
+            ListItem t = _head;
+            int i = 0;
+            while (t != null)
+            {
+                buffer[i++] = t;
+                t = t.Next;
+            }
+            // Clear the tail of any stale references from a previous fire so
+            // ListItems removed during/after that fire can be GC'd. Removed
+            // ListItems already null their Target (see reuseListItem), so
+            // this only retains lightweight WeakReference shells, but we
+            // null them anyway to keep the invariant "buffer beyond `count`
+            // is null" so callers can't mistakenly read stale entries.
+            for (int j = i; j < buffer.Length && buffer[j] != null; j++)
+            {
+                buffer[j] = null;
+            }
+            return buffer;
         }
 
         internal int Count

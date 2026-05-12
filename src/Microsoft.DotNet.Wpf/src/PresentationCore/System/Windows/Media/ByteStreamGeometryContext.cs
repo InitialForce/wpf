@@ -23,6 +23,42 @@ namespace System.Windows.Media
         /// </summary>
         internal ByteStreamGeometryContext()
         {
+            InitializePathGeometryHeader();
+        }
+
+        /// <summary>
+        /// Reset all per-parse state and re-write the initial MIL_PATHGEOMETRY header
+        /// so this instance can be reused after a prior Dispose. Used by the
+        /// [ThreadStatic] pool in StreamGeometryCallbackContext to skip the per-Open
+        /// heap allocation that would otherwise fire on every Geometry.Parse call.
+        /// </summary>
+        protected void ResetForReuse()
+        {
+            _disposed = false;
+            _currChunkOffset = 0;
+            // Clear() drops the byte[] reference but keeps the underlying
+            // SingleItemList<byte[]> store alive across the [ThreadStatic]
+            // pool cycle. The first AppendData below then re-uses that
+            // pre-existing store instead of allocating a fresh one in
+            // FrugalStructList.Add's `_listStore = new SingleItemList<T>()`
+            // null-store branch. (DetachChunkListForPool also calls Clear
+            // before pooling, so the typical post-Dispose state already has
+            // a cleared SingleItemList; the call here is defensive.)
+            _chunkList.Clear();
+            _currOffset = 0;
+            _currentPathGeometryData = default;
+            _currentPathFigureData = default;
+            _currentPathFigureDataOffset = -1;
+            _currentPolySegmentData = default;
+            _currentPolySegmentDataOffset = -1;
+            _lastSegmentSize = 0;
+            _lastFigureSize = 0;
+
+            InitializePathGeometryHeader();
+        }
+
+        private void InitializePathGeometryHeader()
+        {
             // For now, we just write this into the stream.  We'll update its fields as we go.
             MIL_PATHGEOMETRY tempPath = new MIL_PATHGEOMETRY();
 
@@ -33,6 +69,83 @@ namespace System.Windows.Media
                 // Initialize the size to include the MIL_PATHGEOMETRY itself
                 // All other fields are intentionally left as 0;
                 _currentPathGeometryData.Size = (uint)sizeof(MIL_PATHGEOMETRY);
+            }
+        }
+
+        /// <summary>
+        /// Drop the byte[] reference held by this context's chunk list.
+        /// Called from StreamGeometryCallbackContext.DisposeCore right before
+        /// returning the instance to the [ThreadStatic] pool — at that point
+        /// _chunkList[0] is the FINAL byte[] now owned by the StreamGeometry,
+        /// and we don't want the pooled context to hold an extra reference
+        /// to it (which would pin every parsed geometry alive until the next
+        /// Acquire on this thread).
+        ///
+        /// We Clear() rather than reset _chunkList to default so the
+        /// underlying SingleItemList&lt;byte[]&gt; store survives the pool
+        /// cycle: FrugalStructList.Clear sets _loneEntry=null and _count=0
+        /// without dropping _listStore, so the next ResetForReuse +
+        /// AppendData reuses the same SingleItemList rather than going
+        /// through FrugalStructList.Add's `_listStore = new SingleItemList&lt;T&gt;()`
+        /// null-store branch. On the GeometryParser microbench, this saves
+        /// one ~32 B SingleItemList&lt;byte[]&gt; allocation per Geometry.Parse
+        /// call (the common single-chunk path). The rare multi-chunk parse
+        /// goes through ShrinkToFit's `_chunkList = new FrugalStructList&lt;byte[]&gt;()`
+        /// reset branch, which still allocates a fresh SingleItemList; the
+        /// next single-chunk parse then re-uses THAT store.
+        /// </summary>
+        protected void DetachChunkListForPool()
+        {
+            _chunkList.Clear();
+        }
+
+        /// <summary>
+        /// [ThreadStatic] pool slot for callers that build geometry data
+        /// without owning a StreamGeometry — e.g. EllipseGeometry,
+        /// LineGeometry, RectangleGeometry, PathGeometry.GetAsPathGeometry().
+        /// These were the dominant source of ~70 MB SingleItemList&lt;byte[]&gt;
+        /// allocations across take-open + playback scenarios (2026-05-11
+        /// deep-dive). Sharing the [ThreadStatic] slot across all four
+        /// callers is safe because GetAsPathGeometry is synchronous within
+        /// one render/bounds/hit-test query and the slot is acquired and
+        /// released in the same call frame.
+        /// </summary>
+        [ThreadStatic]
+        private static ByteStreamGeometryContext _pooledOwnerlessContext;
+
+        /// <summary>
+        /// Acquire a pooled ByteStreamGeometryContext for callers that build
+        /// geometry data without a StreamGeometry owner. Returns a fresh
+        /// instance when the [ThreadStatic] pool slot is empty (cold start
+        /// or nested reentrancy). Callers must invoke ReleaseToPool() after
+        /// extracting the data via GetData().
+        /// </summary>
+        internal static ByteStreamGeometryContext AcquireFromPool()
+        {
+            ByteStreamGeometryContext ctx = _pooledOwnerlessContext;
+            if (ctx is null)
+            {
+                return new ByteStreamGeometryContext();
+            }
+            _pooledOwnerlessContext = null;
+            ctx.ResetForReuse();
+            return ctx;
+        }
+
+        /// <summary>
+        /// Return this context to the [ThreadStatic] pool. Drops the byte[]
+        /// reference held by _chunkList[0] — now owned by the caller via
+        /// GetData() — while preserving the underlying SingleItemList store
+        /// across the pool cycle. If the pool slot is occupied (rare
+        /// nested-use case), this instance is left to the GC and the
+        /// existing pooled instance keeps the slot.
+        /// </summary>
+        internal void ReleaseToPool()
+        {
+            DetachChunkListForPool();
+            if (_pooledOwnerlessContext is null)
+            {
+                _pooledOwnerlessContext = this;
             }
         }
 
@@ -92,9 +205,11 @@ namespace System.Windows.Media
 
             unsafe
             {
-                Point* scratchForLine = stackalloc Point[1];
-                scratchForLine[0] = point;
-                GenericPolyTo(scratchForLine,
+                // Pass the address of the by-value parameter directly. Locals/parameters
+                // of unmanaged value-type live on the stack (not GC-movable), so &point
+                // is valid without `fixed`. Skips the 1-element stackalloc + assignment
+                // the prior implementation used to adapt to GenericPolyTo's Point*.
+                GenericPolyTo(&point,
                               count: 1,
                               isStroked,
                               isSmoothJoin,
@@ -464,37 +579,82 @@ namespace System.Windows.Media
         {
             Invariant.Assert(cbDataSize >= 0);
 
-            // Skip past irrelevant chunks
+            // Skip past irrelevant chunks. On the AppendData hot path this is a no-op
+            // (currentChunk is the last chunk and bufferOffset == _currChunkOffset which
+            // is maintained inside chunk bounds). Required for OverwriteData / ReadData
+            // call shapes that start from currentChunk=0 and may target a later chunk.
             while (bufferOffset > _chunkList[currentChunk].Length)
             {
                 bufferOffset -= _chunkList[currentChunk].Length;
                 currentChunk++;
             }
 
-            // Arithmetic should be checked by the caller (AppendData or OverwriteData)
+            // Fast path: the entire copy fits within the current chunk. This is the
+            // dominant case for AppendData of small fixed-size structures (Point=16,
+            // MIL_SEGMENT_POLY=24, MIL_PATHFIGURE=40, MIL_SEGMENT_ARC=48 bytes) during
+            // geometry stream construction — typical chunks are ~1 KB+, so a 16-byte
+            // Point write almost never crosses a chunk boundary. Hitting this path
+            // skips the cross-chunk while-loop entry, the inner cbDataForThisChunk>0
+            // branch, the Math.Min, the post-iteration cbDataSize>0 + currentChunk++
+            // + Add-new-chunk handling, and 2 of 3 FrugalStructList indexer accesses.
+            //
+            // `fixed` + Buffer.MemoryCopy lowers to a JIT-recognized memcpy intrinsic
+            // (no per-call array-pinning P/Invoke transition like Marshal.Copy).
+            {
+                byte[] chunk = _chunkList[currentChunk];
+                if ((uint)cbDataSize <= (uint)(chunk.Length - bufferOffset))
+                {
+                    if (cbDataSize > 0)
+                    {
+                        Invariant.Assert(chunk != null);
+                        Invariant.Assert(chunk.Length > 0);
+
+                        fixed (byte* pbChunk = chunk)
+                        {
+                            if (reading)
+                            {
+                                Buffer.MemoryCopy(pbChunk + bufferOffset, pbData, cbDataSize, cbDataSize);
+                            }
+                            else
+                            {
+                                Buffer.MemoryCopy(pbData, pbChunk + bufferOffset, cbDataSize, cbDataSize);
+                            }
+                        }
+                        bufferOffset += cbDataSize;
+                    }
+                    return;
+                }
+            }
+
+            // Slow path: copy spans multiple chunks. Used for chunk-crossing writes
+            // and chunk grow/allocate. Arithmetic should be checked by the caller
+            // (AppendData or OverwriteData).
 
             while (cbDataSize > 0)
             {
-                int cbDataForThisChunk = Math.Min(cbDataSize,
-                    _chunkList[currentChunk].Length - bufferOffset);
+                byte[] chunk = _chunkList[currentChunk];
+                int cbDataForThisChunk = Math.Min(cbDataSize, chunk.Length - bufferOffset);
 
                 if (cbDataForThisChunk > 0)
                 {
                     // At this point, _buffer must be non-null and
                     // _buffer.Length must be >= newOffset
-                    Invariant.Assert((_chunkList[currentChunk] != null) 
-                        && (_chunkList[currentChunk].Length >= bufferOffset + cbDataForThisChunk));
+                    Invariant.Assert((chunk != null)
+                        && (chunk.Length >= bufferOffset + cbDataForThisChunk));
 
                     // Also, because pinning a 0-length buffer fails, we assert this too.
-                    Invariant.Assert(_chunkList[currentChunk].Length > 0);
+                    Invariant.Assert(chunk.Length > 0);
 
-                    if (reading)
+                    fixed (byte* pbChunk = chunk)
                     {
-                        Marshal.Copy(_chunkList[currentChunk], bufferOffset, (IntPtr)pbData, cbDataForThisChunk);
-                    }
-                    else
-                    {
-                        Marshal.Copy((IntPtr)pbData, _chunkList[currentChunk], bufferOffset, cbDataForThisChunk);
+                        if (reading)
+                        {
+                            Buffer.MemoryCopy(pbChunk + bufferOffset, pbData, cbDataForThisChunk, cbDataForThisChunk);
+                        }
+                        else
+                        {
+                            Buffer.MemoryCopy(pbData, pbChunk + bufferOffset, cbDataForThisChunk, cbDataForThisChunk);
+                        }
                     }
 
                     cbDataSize -= cbDataForThisChunk;

@@ -341,15 +341,52 @@ namespace System.Windows
             // EnableThreadWindow(true) is called when dialog is going away. Once dialog is closed and
             // thread windows have been enabled, then there no need to keep the list around.
             // Please see BUG 929740 before making any changes to how _threadWindowHandles works.
-            _threadWindowHandles = new List<IntPtr>();
+            //
+            // Prefer a previously-parked List<IntPtr> from the [ThreadStatic] pool slot over a fresh
+            // allocation. The pooled list has its IntPtr[] backing pre-grown to the highest capacity
+            // reached by a prior ShowDialog on this thread, so EnumThreadWindowsCallback's per-entry
+            // Add calls land in the existing buffer without re-paying the 0→4→8→16 grow-step
+            // allocations. The slot is repopulated by EnableThreadWindows(true) at modal exit (the
+            // contents are cleared by the same call). On the first ShowDialog of a given thread the
+            // slot is null and we allocate fresh — exactly as before.
+            List<IntPtr> pooledHandleList = s_freedThreadWindowHandles;
+            if (pooledHandleList != null)
+            {
+                s_freedThreadWindowHandles = null;
+                _threadWindowHandles = pooledHandleList;
+            }
+            else
+            {
+                _threadWindowHandles = new List<IntPtr>();
+            }
             //Get visible and enabled windows in the thread
             // If the callback function returns true for all windows in the thread, the return value is true.
             // If the callback function returns false on any enumerated window, or if there are no windows
             // found in the thread, the return value is false.
             // No need for use to actually check the return value.
-            UnsafeNativeMethods.EnumThreadWindows(SafeNativeMethods.GetCurrentThreadId(),
-                                                  new NativeMethods.EnumThreadWindowsCallback(ThreadWindowsCallback),
-                                                  NativeMethods.NullHandleRef);
+            //
+            // Use a single cached static delegate (s_threadWindowsCallback) routed through a
+            // [ThreadStatic] target slot (s_tlsEnumThreadWindowsTarget) instead of allocating a fresh
+            // `new NativeMethods.EnumThreadWindowsCallback(ThreadWindowsCallback)` delegate per call.
+            // The static delegate is built once at type-init; the TLS target slot is set immediately
+            // before EnumThreadWindows and restored in the finally block immediately after. The OS
+            // dispatches every callback synchronously inline within EnumThreadWindows on the caller
+            // thread, so the slot is live for the duration of one synchronous OS call only. The save-
+            // and-restore pattern (prev/finally) handles the nested-ShowDialog case correctly: a
+            // nested ShowDialog overwrites the slot, does its own EnumThreadWindows, restores. The
+            // outer's slot value is recovered when nested unwinds.
+            Window prevEnumTarget = s_tlsEnumThreadWindowsTarget;
+            s_tlsEnumThreadWindowsTarget = this;
+            try
+            {
+                UnsafeNativeMethods.EnumThreadWindows(SafeNativeMethods.GetCurrentThreadId(),
+                                                      s_threadWindowsCallback,
+                                                      NativeMethods.NullHandleRef);
+            }
+            finally
+            {
+                s_tlsEnumThreadWindowsTarget = prevEnumTarget;
+            }
 
             // Disable those windows
             EnableThreadWindows(false);
@@ -3589,6 +3626,17 @@ namespace System.Windows
         }
 
         /// <summary>
+        /// The callback function for EnumThreadWindows. Reads the per-thread target Window from
+        /// the [ThreadStatic] slot set by ShowDialog and delegates to its instance method.
+        /// </summary>
+        private static bool ThreadWindowsCallbackStatic(IntPtr hWnd, IntPtr lparam)
+        {
+            Window target = s_tlsEnumThreadWindowsTarget;
+            Debug.Assert(target != null, "s_tlsEnumThreadWindowsTarget must be set during EnumThreadWindows");
+            return target.ThreadWindowsCallback(hWnd, lparam);
+        }
+
+        /// <summary>
         /// The callback function for EnumThreadWindows
         /// </summary>
         /// <param name="hWnd"></param>
@@ -3638,7 +3686,24 @@ namespace System.Windows
             // _threadWindowHandles.
             if (state)
             {
+                // Clear the contents (drops the per-iter IntPtr entries so no stale handles
+                // leak into the next ShowDialog) and park the now-empty (but grown-capacity)
+                // list back into the [ThreadStatic] pool slot for the next ShowDialog on this
+                // thread. List<IntPtr>.Clear() is a single _size=0 store (IntPtr is a value
+                // type, no array zeroing). _threadWindowHandles is then nulled exactly as
+                // before, preserving the existing entry-side Debug.Assert invariant. The
+                // already-occupied slot case (concurrent nested ShowDialog returned earlier
+                // and parked first) drops this instance for GC — benign last-writer-wins.
+                List<IntPtr> list = _threadWindowHandles;
                 _threadWindowHandles = null;
+                if (list != null)
+                {
+                    list.Clear();
+                    if (s_freedThreadWindowHandles == null)
+                    {
+                        s_freedThreadWindowHandles = list;
+                    }
+                }
             }
         }
 
@@ -7231,6 +7296,41 @@ namespace System.Windows
         private WindowCollection    _ownedWindows;
         private List<IntPtr>        _threadWindowHandles;
 
+        // Single AppDomain-wide cached delegate routed to ThreadWindowsCallbackStatic. Allocated
+        // once at type-init; reused by every ShowDialog call on every thread instead of allocating
+        // a fresh `new NativeMethods.EnumThreadWindowsCallback(...)` per call.
+        private static readonly NativeMethods.EnumThreadWindowsCallback s_threadWindowsCallback =
+            new NativeMethods.EnumThreadWindowsCallback(ThreadWindowsCallbackStatic);
+
+        // Per-thread target Window for the static EnumThreadWindows callback. Set immediately
+        // before EnumThreadWindows by ShowDialog (save-and-restore pattern); read by
+        // ThreadWindowsCallbackStatic on every callback invocation. The OS dispatches the
+        // callbacks synchronously inline on the caller thread, so the slot is live only for
+        // the duration of a single synchronous EnumThreadWindows call.
+        [ThreadStatic]
+        private static Window s_tlsEnumThreadWindowsTarget;
+
+        // [ThreadStatic] single-slot pool holding the most recently emptied List<IntPtr>
+        // used by ShowDialog to collect the snapshot of visible+enabled thread windows
+        // (the set that gets EnableWindow(false)'d for the duration of the modal frame
+        // and re-enabled in EnableThreadWindows(true)). Window is STA-affine and the
+        // list is borrowed by ShowDialog only on the dispatcher thread, so a per-thread
+        // single slot serves every Window on a given UI thread. EnableThreadWindows(true)
+        // clears the list (drops the IntPtr entries; List<IntPtr>.Clear() for a value-type
+        // T is a single _size=0 store with no array zeroing) and returns it to the slot;
+        // the next ShowDialog on the same thread pops the slot and pays zero allocation
+        // for both the List header and the IntPtr[] backing (capacity is preserved at
+        // the highest grown stage from the previous ShowDialog). Nested ShowDialog is
+        // safe under single-slot semantics: the nested call hits an empty slot (the
+        // outer call's instance is still field-bound on the outer Window because the
+        // outer parks via EnableThreadWindows(true) which only fires after the modal
+        // pump returns), allocates fresh, parks its own instance at the end, possibly
+        // evicting the outer's parked instance — benign last-writer-wins (the evicted
+        // instance is GC-collected; at most one wasted-reuse on the call after the
+        // outer returns, then steady-state pooling resumes).
+        [ThreadStatic]
+        private static List<IntPtr> s_freedThreadWindowHandles;
+
         private bool                _updateHwndSize     = true;
         private bool                _updateHwndLocation = true;
         private bool                _updateStartupLocation;
@@ -7297,6 +7397,17 @@ namespace System.Windows
         private int                 _styleDoNotUse;
         private int                 _styleExDoNotUse;
         private HwndStyleManager    _manager;
+
+        // Per-Window pool slot for a previously-disposed HwndStyleManager
+        // instance. Holds the most recently freed manager so the next
+        // StartManaging call on this Window can reuse it instead of
+        // allocating a fresh one — see HwndStyleManager.StartManaging /
+        // HwndStyleManager.Dispose for the borrow/return protocol.
+        // Single-element pool is sufficient because Window is single-thread-
+        // affine (STA) and HwndStyleManager activations on a given Window
+        // are serial (the refcounted nested-StartManaging case reuses the
+        // already-active Manager, not the pool slot). No locking required.
+        private HwndStyleManager    _freedStyleManager;
 
         // reference to Resize Grip control; this is used to find out whether
         // the mouse of over the resizegrip control
@@ -7660,32 +7771,59 @@ namespace System.Windows
         {
             internal static HwndStyleManager StartManaging(Window w, int Style, int StyleEx )
             {
-                if (w.Manager == null)
+                HwndStyleManager m = w.Manager;
+                if (m == null)
                 {
-                    return new HwndStyleManager(w, Style, StyleEx);
+                    // Reuse the per-Window pooled HwndStyleManager instance retained
+                    // from the previous StartManaging/Dispose cycle on this Window,
+                    // killing one ~24-32 B HwndStyleManager heap allocation per
+                    // Show/Hide cycle (SafeStyleSetter fires from Window.ShowHelper
+                    // after every ShowWindow on a created HWND, and the other
+                    // StartManaging call sites — CorrectStyleForBorderlessWindowCase,
+                    // SizeToContent invalidation, ResizeMode change, etc. — also
+                    // benefit on their respective hot paths). Window is single-thread-
+                    // affine (STA), so the per-Window slot _freedStyleManager is
+                    // race-free without locking.
+                    m = w._freedStyleManager;
+                    if (m != null)
+                    {
+                        w._freedStyleManager = null;
+                    }
+                    else
+                    {
+                        m = new HwndStyleManager(w);
+                    }
+
+                    // Activate: publish Manager BEFORE any _Style / _StyleEx writes,
+                    // because the setters of those properties dereference
+                    // Manager.Dirty (= true) — matches the original ctor's ordering
+                    // ("_window.Manager = this" preceded the "_window._Style = Style"
+                    // assignment). The subsequent "Dirty = false" override is also
+                    // preserved (the just-fetched style cannot be out-of-sync with
+                    // the HWND we read it from).
+                    w.Manager = m;
+                    if (!w.IsSourceWindowNull)
+                    {
+                        w._Style = Style;
+                        w._StyleEx = StyleEx;
+                        m.Dirty = false;
+                    }
+                    m._refCount = 1;
+                    return m;
                 }
                 else
                 {
-                    w.Manager._refCount++;
-                    return w.Manager;
+                    m._refCount++;
+                    return m;
                 }
             }
 
-            private HwndStyleManager(Window w, int Style, int StyleEx  )
+            // Minimal ctor: only binds _window. All transient state
+            // (_refCount, _fDirty) is initialized in StartManaging so the
+            // instance can be parked into _freedStyleManager and reused.
+            private HwndStyleManager(Window w)
             {
                 _window = w;
-                _window.Manager = this;
-
-                if (!w.IsSourceWindowNull)
-                {
-                    _window._Style    =  Style;
-                    _window._StyleEx  = StyleEx;
-
-                    // Dirty ==> _style and hwnd are out of sync. Since we just got
-                    // the style from hwnd, it obviously is not Dirty.
-                    Dirty = false;
-                }
-                _refCount = 1;
             }
 
             void IDisposable.Dispose()
@@ -7713,6 +7851,18 @@ namespace System.Windows
                     if (_window.Manager == this)
                     {
                         _window.Manager = null;
+                        // Park the now-inactive instance into the per-Window pool
+                        // so the next StartManaging on this Window reuses it
+                        // without allocating. _window is set once in the ctor and
+                        // never mutated, so no per-pool-return field clear is
+                        // needed; _refCount and Dirty are re-initialized by the
+                        // next StartManaging activation. The re-entrancy guard
+                        // (_window.Manager == this) preserved: if Flush above
+                        // already caused a nested StartManaging+Dispose that
+                        // re-parked the instance, that path will have nulled
+                        // Manager, so this branch is skipped — preventing a
+                        // double-pool.
+                        _window._freedStyleManager = this;
                     }
                 }
             }

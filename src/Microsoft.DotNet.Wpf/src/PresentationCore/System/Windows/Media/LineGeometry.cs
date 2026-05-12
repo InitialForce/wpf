@@ -241,13 +241,14 @@ namespace System.Windows.Media
                 Matrix = CompositionResourceManager.TransformToMilMatrix3x2D(Transform)
             };
 
-            ByteStreamGeometryContext ctx = new ByteStreamGeometryContext();
+            ByteStreamGeometryContext ctx = ByteStreamGeometryContext.AcquireFromPool();
 
             ctx.BeginFigure(StartPoint, isFilled: true, isClosed: false);
             ctx.LineTo(EndPoint, isStroked: true, isSmoothJoin: false);
-            
+
             ctx.Close();
             data.SerializedData = ctx.GetData();
+            ctx.ReleaseToPool();
 
             return data;
         }

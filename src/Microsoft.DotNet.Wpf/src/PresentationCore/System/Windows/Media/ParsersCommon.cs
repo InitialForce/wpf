@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Runtime.CompilerServices;
 
 #if PRESENTATION_CORE
 
@@ -78,9 +79,27 @@ namespace MS.Internal.Markup
             StreamGeometry geometry = new StreamGeometry();
             StreamGeometryContext context = geometry.Open(); 
 
-            ParseStringToStreamGeometryContext( context, pathString, formatProvider , ref fillRule ) ; 
+            ParseStringToStreamGeometryContext( context, pathString, formatProvider , ref fillRule ) ;
 
-            geometry.FillRule = fillRule ;                                          
+            // Only invoke the FillRule DP setter when the parser actually changed
+            // fillRule away from the default. FillRuleProperty is registered with
+            // FillRule.EvenOdd as its default value (Generated/StreamGeometry.cs),
+            // so a fresh StreamGeometry already reads back EvenOdd from the
+            // property store with no entry allocated. The unconditional setter
+            // routes through DependencyObject.SetValueInternal which boxes via
+            // FillRuleBoxes (cached, free), allocates / mutates an
+            // EffectiveValueEntry to record the explicit set, runs the
+            // ValidateValueCallback (IsFillRuleValid) and dispatches the
+            // FillRulePropertyChanged callback. ParseStringToStreamGeometryContext
+            // only assigns fillRule = Nonzero when the path starts with "F1"; for
+            // every M-/m-prefixed path (the GeometryParser microbench corpus and
+            // the overwhelming majority of real-world XAML path strings) the
+            // setter is a pure no-op semantically, so skipping it kills the
+            // per-Parse property-store work + EffectiveValueEntry alloc.
+            if (fillRule != FillRule.EvenOdd)
+            {
+                geometry.FillRule = fillRule ;
+            }
             geometry.Freeze();
 
             return geometry;
@@ -150,9 +169,15 @@ namespace MS.Internal.Markup
                         }
                     }
 
-                    AbbreviatedGeometryParser parser = new AbbreviatedGeometryParser();
-            
-                    parser.ParseToGeometryContext(context, pathString, curIndex);
+                    AbbreviatedGeometryParser parser = AbbreviatedGeometryParser.Acquire();
+                    try
+                    {
+                        parser.ParseToGeometryContext(context, pathString, curIndex);
+                    }
+                    finally
+                    {
+                        parser.ReleaseToPool();
+                    }
                 }
             }
         }
@@ -171,6 +196,56 @@ namespace MS.Internal.Markup
         private const bool      IsClosed     = true;
         private const bool      IsStroked    = true;
         private const bool      IsSmoothJoin = true;
+
+        // Per-thread single-slot pool. AbbreviatedGeometryParser is stateful
+        // (mutable instance fields), but ParseToGeometryContext fully overwrites
+        // every used field at entry, so a previously-released instance is safe
+        // to hand back without an explicit reset. Pooling kills the per-call
+        // ~96 B class allocation on the Geometry.Parse hot path; on the
+        // GeometryParser microbench (100 paths/op), this drops the parser
+        // class allocation alone by ~9.6 KB out of the current ~89.9 KB/op
+        // baseline left by iter=032 (StreamGeometryCallbackContext pool) and
+        // iter=033 (FrugalStructList store pool).
+        [ThreadStatic]
+        private static AbbreviatedGeometryParser s_pooled;
+
+        /// <summary>
+        /// Acquire a per-thread pooled parser. Returns the [ThreadStatic]
+        /// slot's current instance (clearing the slot so a nested Parse on
+        /// the same thread cannot see and reuse it), or allocates a fresh
+        /// one when the slot is empty (first call on the thread, or while
+        /// a nested parse holds the previously-pooled instance).
+        /// </summary>
+        internal static AbbreviatedGeometryParser Acquire()
+        {
+            AbbreviatedGeometryParser parser = s_pooled;
+            if (parser is null)
+            {
+                return new AbbreviatedGeometryParser();
+            }
+            s_pooled = null;
+            return parser;
+        }
+
+        /// <summary>
+        /// Drop reference-typed fields (so the pooled instance does not pin
+        /// the parsed string, the StreamGeometryContext, or the format
+        /// provider alive across calls) and publish back to the
+        /// [ThreadStatic] slot. Single-slot pool: if the slot is occupied
+        /// (nested parse), the redundant instance is left for GC. Value-type
+        /// fields are intentionally not cleared — they are unconditionally
+        /// overwritten by ParseToGeometryContext at entry.
+        /// </summary>
+        internal void ReleaseToPool()
+        {
+            _pathString = null;
+            _context = null;
+            _formatProvider = null;
+            if (s_pooled is null)
+            {
+                s_pooled = this;
+            }
+        }
 
         private IFormatProvider _formatProvider;
         
@@ -195,20 +270,39 @@ namespace MS.Internal.Markup
             throw new System.FormatException(SR.Format(SR.Parser_UnexpectedToken, _pathString, _curIndex - 1));
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private bool More()
         {
             return _curIndex < _pathLength;
         }
-        
-        // Skip white space, one comma if allowed
+
+        // Skip white space, one comma if allowed.
+        //
+        // AggressiveInlining: SkipWhiteSpace is the inner-most prelude on
+        // ReadToken / IsNumber / ReadBool, all of which are called from the
+        // ReadNumber + do-while hot loops in ParseToGeometryContext. Forcing
+        // inlining at every call site eliminates the ~3-5 ns method-call
+        // frame paid on each of the ~6700 SkipWhiteSpace invocations per
+        // ParseCorpus. The body is moderately sized (~80 IL bytes incl. the
+        // switch) but well within the AggressiveInlining budget; the outer
+        // callers (IsNumber, ReadToken) are themselves marked AggressiveInlining
+        // so the inlining cascades into ReadNumber + the loop tests.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private bool SkipWhiteSpace(bool allowComma)
         {
+            // Hoist fields to locals so the JIT proves they don't change across
+            // the loop and folds away per-iteration field loads + null-checks on
+            // the string indexer. _curIndex is only written back at exit.
+            string s = _pathString;
+            int end = _pathLength;
+            int i = _curIndex;
+
             bool commaMet = false;
-            
-            while (More())
+
+            while (i < end)
             {
-                char ch = _pathString[_curIndex];
-                
+                char ch = s[i];
+
                 switch (ch)
                 {
                 case ' ' :
@@ -216,7 +310,7 @@ namespace MS.Internal.Markup
                 case '\r':
                 case '\t': // SVG whitespace
                     break;
-            
+
                 case ',':
                     if (allowComma)
                     {
@@ -225,22 +319,32 @@ namespace MS.Internal.Markup
                     }
                     else
                     {
+                        _curIndex = i;
                         ThrowBadToken();
                     }
                     break;
-                    
+
                 default:
                     // Avoid calling IsWhiteSpace for ch in (' ' .. 'z']
                     if (((ch >' ') && (ch <= 'z')) || ! Char.IsWhiteSpace(ch))
                     {
+                        _curIndex = i;
+                        // Stash the non-WS char into _token so callers
+                        // (ReadToken, IsNumber, ReadBool) can skip a redundant
+                        // _pathString[_curIndex] reload + bounds-check after
+                        // SkipWhiteSpace returns. _token retains its prior value
+                        // when SkipWhiteSpace exits at end-of-string (default
+                        // case did not fire); callers must check More() first.
+                        _token = ch;
                         return commaMet;
-                    }                        
+                    }
                     break;
                 }
-                
-                _curIndex ++;
+
+                i++;
             }
-            
+
+            _curIndex = i;
             return commaMet;
         }
 
@@ -248,15 +352,22 @@ namespace MS.Internal.Markup
         /// Read the next non whitespace character
         /// </summary>
         /// <returns>True if not end of string</returns>
+        // AggressiveInlining: thin wrapper over SkipWhiteSpace + More + curIndex
+        // advance. Called from the outer `while (ReadToken())` loop and inlining
+        // here lets the JIT see the entire prelude (SkipWhiteSpace + More) in
+        // one body and fold the loop's per-token bookkeeping with the SkipWS
+        // body that follows it.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private bool ReadToken()
         {
             SkipWhiteSpace(!AllowComma);
 
-            // Check for end of string
+            // Check for end of string. SkipWhiteSpace already stashed the
+            // first non-WS char into _token when it returned via the default
+            // branch; just advance _curIndex to consume it.
             if (More())
             {
-                _token = _pathString[_curIndex ++];
-
+                _curIndex ++;
                 return true;
             }
             else
@@ -264,47 +375,49 @@ namespace MS.Internal.Markup
                 return false;
             }
         }
-        
+
+        // AggressiveInlining: called once per ReadNumber prelude (~5000/op) and
+        // once per do-while loop test in ParseToGeometryContext (~1700/op).
+        // Inlining eliminates the call-frame on the per-number hot path AND
+        // — combined with SkipWhiteSpace's own AggressiveInlining — collapses
+        // the prelude into a tight load+compare sequence inside ReadNumber
+        // and the loop tests, killing two method-call frames per ReadNumber.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private bool IsNumber(bool allowComma)
         {
             bool commaMet = SkipWhiteSpace(allowComma);
-            
+
             if (More())
             {
-                _token = _pathString[_curIndex];
+                // _token was set by SkipWhiteSpace's default-branch exit when
+                // it stopped on a non-WS char; reuse it instead of doing a
+                // second _pathString[_curIndex] indexer-read with bounds-check.
+                char t = _token;
 
-                // Valid start of a number
-                if ((_token == '.') || (_token == '-') || (_token == '+') || ((_token >= '0') && (_token <= '9'))
-                    || (_token == 'I')  // Infinity
-                    || (_token == 'N')) // NaN
+                // Path data is digit-dominated; check the digit range first
+                // via single subtract+unsigned-compare so the hot path takes
+                // one branch instead of stepping through '.', '-', '+'.
+                if ((uint)(t - '0') <= 9u)
                 {
                     return true;
-                }                    
+                }
+
+                // Other valid number starts: sign, decimal point, Infinity, NaN.
+                if ((t == '.') || (t == '-') || (t == '+') || (t == 'I') || (t == 'N'))
+                {
+                    return true;
+                }
             }
 
             if (commaMet) // Only allowed between numbers
             {
                 ThrowBadToken();
             }
-            
+
             return false;
         }
 
-        private void SkipDigits(bool signAllowed)
-        {
-            // Allow for a sign
-            if (signAllowed && More() && ((_pathString[_curIndex] == '-') || _pathString[_curIndex] == '+'))
-            {
-                _curIndex++;
-            }
-        
-            while (More() && (_pathString[_curIndex] >= '0') && (_pathString[_curIndex] <= '9'))
-            {
-                _curIndex ++;
-            }
-        }
-        
-//       
+//
 //         /// <summary>
 //         /// See if the current token matches the string s. If so, advance and
 //         /// return true. Else, return false.
@@ -312,7 +425,7 @@ namespace MS.Internal.Markup
 //         bool TryAdvance(string s)
 //         {
 //             Debug.Assert(s.Length != 0);
-// 
+//
 //             bool match = false;
 //             if (More() && _pathString[_currentIndex] == s[0])
 //             {
@@ -321,14 +434,14 @@ namespace MS.Internal.Markup
 //                 // do this for us later.
 //                 //
 //                 _currentIndex = Math.Min(_currentIndex + s.Length, _pathLength);
-// 
+//
 //                 match = true;
 //             }
-// 
+//
 //             return match;
 //         }
-// 
-      
+//
+
         /// <summary>
         /// Read a floating point number
         /// </summary>
@@ -338,95 +451,153 @@ namespace MS.Internal.Markup
             if (!IsNumber(allowComma))
             {
                 ThrowBadToken();
-            }                
-            
-            bool simple = true;
-            int start = _curIndex;
-            
-            //
-            // Allow for a sign
-            // 
-            // There are numbers that cannot be preceded with a sign, for instance, -NaN, but it's
-            // fine to ignore that at this point, since the CLR parser will catch this later.
-            //
-            if (More() && ((_pathString[_curIndex] == '-') || _pathString[_curIndex] == '+'))
-            {
-                _curIndex ++;
             }
 
-            // Check for Infinity (or -Infinity).
-            if (More() && (_pathString[_curIndex] == 'I'))
+            // Hoist _pathString / _pathLength / _curIndex into locals across
+            // the whole function. The integer/period/exponent walks all share
+            // the same s/end/i; keeping them in registers eliminates the
+            // _curIndex = i; ... if (More()) ... _pathString[_curIndex] ping-
+            // pong that the prior structure forced between each sub-walk
+            // (digit run -> period scan -> exponent scan -> SkipDigits inner-
+            // hoist). _curIndex is only written back once, just before return.
+            string s = _pathString;
+            int end = _pathLength;
+            int i = _curIndex;
+            int start = i;
+
+            // IsNumber already loaded _pathString[_curIndex] into _token and
+            // proved we're in bounds, so `first` is the head char of the
+            // number lexeme (one of '-', '+', '.', '0'..'9', 'I', 'N').
+            char first = _token;
+            bool simple = true;
+            int intValue = 0;
+
+            // Sign consumption. There are numbers that cannot be preceded
+            // with a sign, e.g. -NaN, but it's fine to ignore that at this
+            // point — double.Parse on the slow path will catch any malformed
+            // lexeme with the original error semantics.
+            //
+            // For the unsigned-digit dominant case (the geometry corpus is
+            // ~all unsigned integers), this branch is never taken: i stays
+            // == start, and the I/N pre-empt below is dispatched against
+            // `first` (already in a register from _token) rather than re-
+            // reading _pathString[_curIndex].
+            if (first == '-' || first == '+')
             {
-                //
-                // Don't bother reading the characters, as the CLR parser will
-                // do this for us later.
-                //
-                _curIndex = Math.Min(_curIndex+8, _pathLength); // "Infinity" has 8 characters
+                i++;
+            }
+
+            // Detect the head of the number body (the char immediately after
+            // the optional sign). For unsigned numbers, `first` already IS
+            // the head — reuse it instead of issuing another string-indexer
+            // load. For signed numbers we have to read s[i].
+            char head = (first == '-' || first == '+')
+                ? (i < end ? s[i] : '\0')
+                : first;
+
+            // Check for Infinity / NaN — slow path: don't bother reading the
+            // rest of the lexeme, the CLR's double.Parse will validate it.
+            if (head == 'I')
+            {
+                i = Math.Min(i + 8, end); // "Infinity" has 8 characters
                 simple = false;
             }
-            // Check for NaN
-            else if (More() && (_pathString[_curIndex] == 'N'))
+            else if (head == 'N')
             {
-                //
-                // Don't bother reading the characters, as the CLR parser will
-                // do this for us later.
-                //
-                _curIndex = Math.Min(_curIndex+3, _pathLength); // "NaN" has 3 characters
+                i = Math.Min(i + 3, end); // "NaN" has 3 characters
                 simple = false;
             }
             else
             {
-                SkipDigits(! AllowSign);
-
-                // Optional period, followed by more digits
-                if (More() && (_pathString[_curIndex] == '.'))
+                // Walk + accumulate the integer digit run in a single pass.
+                // Capture the loop-terminating char into `endChar` so the
+                // following period / exponent / end-of-number checks compare
+                // a register instead of re-issuing a More()+_pathString[_curIndex]
+                // pair. For the integer-only dominant case in the corpus,
+                // endChar is the trailing whitespace and both the period and
+                // exponent branches short-circuit on a single register-resident
+                // compare each.
+                //
+                // Overflow on intValue is benign: the (i <= start + 8) gate
+                // on the simple-integer return below caps the digit count at
+                // 8 (positive numbers up to 99,999,999 — well inside int32),
+                // and any longer run forces simple=false anyway via the
+                // period/exponent branches or via the gate, both of which
+                // discard intValue and re-parse via double.Parse.
+                char endChar = '\0';
+                while (i < end)
                 {
-                    simple = false;
-                    _curIndex ++;
-                    SkipDigits(! AllowSign);
+                    char ch = s[i];
+                    uint d = (uint)(ch - '0');
+                    if (d > 9u)
+                    {
+                        endChar = ch;
+                        break;
+                    }
+                    intValue = intValue * 10 + (int)d;
+                    i++;
                 }
 
-                // Exponent
-                if (More() && ((_pathString[_curIndex] == 'E') || (_pathString[_curIndex] == 'e')))
+                // Optional period, followed by more digits.
+                // SkipDigits(!AllowSign) inlined: walk plain digits, no sign.
+                if (endChar == '.')
                 {
                     simple = false;
-                    _curIndex ++;
-                    SkipDigits(AllowSign);
+                    i++;
+                    endChar = '\0';
+                    while (i < end)
+                    {
+                        char c2 = s[i];
+                        uint d = (uint)(c2 - '0');
+                        if (d > 9u)
+                        {
+                            endChar = c2;
+                            break;
+                        }
+                        i++;
+                    }
+                }
+
+                // Exponent.
+                // SkipDigits(AllowSign) inlined: optional sign, then digits.
+                // No need to track endChar past this point — the only post-
+                // exponent action is the slow-path double.Parse.
+                if (endChar == 'E' || endChar == 'e')
+                {
+                    simple = false;
+                    i++;
+                    if (i < end && (s[i] == '-' || s[i] == '+'))
+                    {
+                        i++;
+                    }
+                    while (i < end)
+                    {
+                        if ((uint)(s[i] - '0') > 9u)
+                        {
+                            break;
+                        }
+                        i++;
+                    }
                 }
             }
 
-            if (simple && (_curIndex <= (start + 8))) // 32-bit integer
+            _curIndex = i;
+
+            if (simple && (i <= (start + 8))) // 32-bit integer
             {
-                int sign = 1;
-                
-                if (_pathString[start] == '+')
-                {
-                    start ++;
-                }
-                else if (_pathString[start] == '-')
-                {
-                    start ++;
-                    sign = -1;
-                }                                        
-                
-                int value = 0;
-                
-                while (start < _curIndex)
-                {
-                    value = value * 10 + (_pathString[start] - '0');
-                    start ++;
-                }
-                
-                return value * sign;
+                // Sign comes from the original first char of the number token;
+                // intValue accumulated the digit-run in the loop above. Apply
+                // the sign as a single conditional negate.
+                return (first == '-') ? -intValue : (double)intValue;
             }
             else
             {
                 try
                 {
 #if NET
-                    return double.Parse(_pathString.AsSpan(start, _curIndex - start), provider: _formatProvider);
+                    return double.Parse(s.AsSpan(start, i - start), provider: _formatProvider);
 #else
-                    return double.Parse(_pathString.Substring(start, _curIndex - start), provider: _formatProvider);
+                    return double.Parse(s.Substring(start, i - start), provider: _formatProvider);
 #endif
                 }
                 catch (FormatException except)
@@ -446,7 +617,9 @@ namespace MS.Internal.Markup
 
             if (More())
             {
-                _token = _pathString[_curIndex ++];
+                // _token already holds the non-WS char that SkipWhiteSpace
+                // stopped on; advance past it without reloading.
+                _curIndex ++;
 
                 if (_token == '0')
                 {
@@ -459,7 +632,7 @@ namespace MS.Internal.Markup
             }
 
             ThrowBadToken();
-            
+
             return false;
         }
         

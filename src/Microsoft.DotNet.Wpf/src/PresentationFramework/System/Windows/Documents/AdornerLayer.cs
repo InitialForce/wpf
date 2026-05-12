@@ -9,6 +9,7 @@
 
 using System.Windows.Media;
 using System.Collections;
+using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Windows.Threading;
 using System.Windows.Controls;
@@ -68,7 +69,26 @@ namespace System.Windows.Documents
             }
 
             /// <summary>
-            /// Transform on the Visual
+            /// Transform on the Visual — affine fast path.
+            /// Set when TryTransformToAncestorAsMatrix returns true. Prefer this over
+            /// <see cref="Transform"/> on the hot LayoutUpdated path to avoid
+            /// MatrixTransform + Matrix DP-box allocations.
+            /// </summary>
+            internal Matrix SimpleTransform;
+
+            /// <summary>
+            /// True when <see cref="SimpleTransform"/> is valid; false when the visual
+            /// chain has Effects or 3D embedding and only <see cref="Transform"/> is set.
+            /// </summary>
+            internal bool HasSimpleTransform;
+
+            /// <summary>
+            /// Transform on the Visual — GeneralTransform fallback.
+            /// Non-null only when <see cref="HasSimpleTransform"/> is false (rare).
+            /// Downstream consumers (ArrangeOverride, GetDesiredTransform) use
+            /// <see cref="GetTransformForArrange"/> which materialises a MatrixTransform
+            /// from SimpleTransform when needed; the alloc is amortised to the arrange
+            /// pass rather than the hot update pass.
             /// </summary>
             internal GeneralTransform Transform
             {
@@ -80,6 +100,21 @@ namespace System.Windows.Documents
                 {
                     _transform = value;
                 }
+            }
+
+            /// <summary>
+            /// Returns the transform in GeneralTransform form for callers that need it
+            /// (e.g. ArrangeOverride → GetDesiredTransform).  On the simple path this
+            /// allocates a MatrixTransform, but that path is called once per arrange
+            /// (not on every LayoutUpdated fire).
+            /// </summary>
+            internal GeneralTransform GetTransformForArrange()
+            {
+                if (HasSimpleTransform)
+                    return SimpleTransform.IsIdentity
+                        ? System.Windows.Media.Transform.Identity
+                        : new MatrixTransform(SimpleTransform);
+                return _transform;
             }
 
             internal int ZOrder
@@ -197,6 +232,14 @@ namespace System.Windows.Documents
             RemoveAdornerInfo(_zOrderMap, adorner, adornerInfo.ZOrder);
             _children.Remove(adorner);
             RemoveLogicalChild(adorner);
+
+            // If no more adorners remain for this element, unsubscribe from its LayoutUpdated
+            // to break the AdornerLayer/UIElement retention cycle.
+            if (ElementMap[adorner.AdornedElement] == null)
+            {
+                UnsubscribeFromElementLayout(adorner.AdornedElement);
+            }
+            _layoutDirty = true;
         }
 
         /// <summary>
@@ -218,11 +261,12 @@ namespace System.Windows.Documents
                 }
             }
 
+            _layoutDirty = true;
             UpdateAdorner(null);
         }
 
         /// <summary>
-        /// Update (layout and render) all adorners for the given element.  
+        /// Update (layout and render) all adorners for the given element.
         /// </summary>
         /// <param name="element">element key for redraw</param>
         public void Update(UIElement element)
@@ -241,6 +285,7 @@ namespace System.Windows.Documents
                 InvalidateAdorner((AdornerInfo)adornerInfos[i++]);
             }
 
+            _layoutDirty = true;
             UpdateAdorner(element);
         }
 
@@ -410,12 +455,18 @@ namespace System.Windows.Documents
         protected override Size MeasureOverride(Size constraint)
         {
             // Not using an enumerator because the list can be modified during the loop when we call out.
-            DictionaryEntry[] zOrderMapEntries = new DictionaryEntry[_zOrderMap.Count];
-            _zOrderMap.CopyTo(zOrderMapEntries, 0);
+            // Snapshot the values directly into a pooled object[] — SortedList.CopyTo(Array)
+            // would otherwise allocate a fresh DictionaryEntry[] every layout pass
+            // (~170 MB in the MotionCatalyst take-open profile).
+            IList valueList = _zOrderMap.GetValueList();
+            int count = valueList.Count;
+            if (_zOrderValuesSnapshotBuffer == null || _zOrderValuesSnapshotBuffer.Length < count)
+                _zOrderValuesSnapshotBuffer = new object[Math.Max(count, 8)];
+            valueList.CopyTo(_zOrderValuesSnapshotBuffer, 0);
 
-            for (int i = 0; i < zOrderMapEntries.Length; i++)
+            for (int i = 0; i < count; i++)
             {
-                ArrayList adornerInfos = (ArrayList)zOrderMapEntries[i].Value;
+                ArrayList adornerInfos = (ArrayList)_zOrderValuesSnapshotBuffer[i];
                 Debug.Assert(adornerInfos != null, "No adorners found for element in AdornerLayer._zOrderMap");
 
                 int j = 0;
@@ -425,6 +476,8 @@ namespace System.Windows.Documents
                     adornerInfo.Adorner.Measure(constraint);
                 }
             }
+
+            Array.Clear(_zOrderValuesSnapshotBuffer, 0, count);
 
             // Returning 0,0 prevents an invalidation of Measure for AdornerLayer from unnecessarily dirtying the parent.
             return new Size();
@@ -444,12 +497,16 @@ namespace System.Windows.Documents
         protected override Size ArrangeOverride(Size finalSize)
         {
             // Not using an enumerator because the list can be modified during the loop when we call out.
-            DictionaryEntry[] zOrderMapEntries = new DictionaryEntry[_zOrderMap.Count];
-            _zOrderMap.CopyTo(zOrderMapEntries, 0);
+            // Snapshot the values directly into the same pooled object[] used by MeasureOverride.
+            IList valueList = _zOrderMap.GetValueList();
+            int count = valueList.Count;
+            if (_zOrderValuesSnapshotBuffer == null || _zOrderValuesSnapshotBuffer.Length < count)
+                _zOrderValuesSnapshotBuffer = new object[Math.Max(count, 8)];
+            valueList.CopyTo(_zOrderValuesSnapshotBuffer, 0);
 
-            for (int i = 0; i < zOrderMapEntries.Length; i++)
+            for (int i = 0; i < count; i++)
             {
-                ArrayList adornerInfos = (ArrayList)zOrderMapEntries[i].Value;
+                ArrayList adornerInfos = (ArrayList)_zOrderValuesSnapshotBuffer[i];
 
                 Debug.Assert(adornerInfos != null, "No adorners found for element in AdornerLayer._zOrderMap");
 
@@ -463,7 +520,7 @@ namespace System.Windows.Documents
                         // We're dependent on Arrange to get the rendersize of the adorner, so Arrange before
                         // doing our transform magic.
                         adornerInfo.Adorner.Arrange(new Rect(new Point(), adornerInfo.Adorner.DesiredSize));
-                        GeneralTransform proposedTransform = adornerInfo.Adorner.GetDesiredTransform(adornerInfo.Transform);
+                        GeneralTransform proposedTransform = adornerInfo.Adorner.GetDesiredTransform(adornerInfo.GetTransformForArrange());
                         GeneralTransform adornerTransform = GetProposedTransform(adornerInfo.Adorner, proposedTransform);
 
                         int index = _children.IndexOf(adornerInfo.Adorner);
@@ -486,6 +543,8 @@ namespace System.Windows.Documents
                     }
                 }
             }
+
+            Array.Clear(_zOrderValuesSnapshotBuffer, 0, count);
 
             return finalSize;
         }
@@ -516,10 +575,15 @@ namespace System.Windows.Documents
 
             AddAdornerInfo(ElementMap, adornerInfo, adorner.AdornedElement);
 
+            // Subscribe to the adorned element's LayoutUpdated so we can arm _layoutDirty
+            // only when something actually changes, rather than on every layer-level fire.
+            SubscribeToElementLayout(adorner.AdornedElement);
+
             AddAdornerToVisualTree(adornerInfo, zOrder);
 
             AddLogicalChild(adorner);
 
+            _layoutDirty = true;
             UpdateAdorner(adorner.AdornedElement);
         }
 
@@ -534,7 +598,21 @@ namespace System.Windows.Documents
             adornerInfo.Adorner.InvalidateVisual();
             adornerInfo.RenderSize = new Size(double.NaN, double.NaN);
             adornerInfo.Transform = null;
+            adornerInfo.HasSimpleTransform = false;
+            adornerInfo.SimpleTransform = default;
         }
+
+        // TODO: regression tests for OnLayoutUpdated fast path (no DRT harness available in fork):
+        //   1. EmptyAdornerLayer_OnLayoutUpdated_DoesNotCallUpdateAdorner
+        //      Create an AdornerLayer, call OnLayoutUpdated — verify UpdateAdorner was NOT called
+        //      (mock or subclass override) and _layoutDirty ends up false.
+        //   2. AdornerLayer_AddAdornerAfterIdle_TriggersUpdateAdorner
+        //      Create empty layer, fire OnLayoutUpdated (empty fast-path, _layoutDirty→false),
+        //      Add() an adorner, fire OnLayoutUpdated again — verify UpdateAdorner IS called.
+        //   3. AdornerLayer_AddRemoveDuringLayoutUpdated_NoStaleDirtyFlag
+        //      Simulate Add() inside a LayoutUpdated handler that fires concurrently with the
+        //      layer's own handler; confirm that by the time the next pass fires, the adorner
+        //      is walked (ElementMap.Count > 0 path) and _layoutDirty is not stranded false.
 
         /// <summary>
         /// OnLayoutUpdated event handler
@@ -543,10 +621,58 @@ namespace System.Windows.Documents
         /// <param name="args"></param>
         internal void OnLayoutUpdated(object sender, EventArgs args)
         {
+            // Empty AdornerLayer fast path: skip the per-pass walk entirely when
+            // no user adorners are attached. Without this, the default AdornerLayer
+            // on every WPF window subscribes to LayoutUpdated unconditionally and
+            // calls UpdateAdorner→TransformToAncestor→InvalidateMeasure on every
+            // pass, which schedules a new render via NeedsRecalc→PostRender,
+            // amplifying any forever-animation by ~17× (e.g. a perpetual busy
+            // spinner produces ~570 renders/sec instead of ~32). Clearing
+            // _layoutDirty before exit prevents stale-flag leak when the first
+            // adorner is later attached (oracle-panel correction, gemini 9/10).
             if (ElementMap.Count == 0)
+            {
+                _layoutDirty = false;
                 return;
+            }
 
+            if (!_layoutDirty) return;       // existing dirty-bit guard from 5e7df8833 — keep
+            _layoutDirty = false;
             UpdateAdorner(null);
+        }
+
+        /// <summary>
+        /// LayoutUpdated handler subscribed per adorned element.
+        /// Arms the layer-level dirty bit so the next OnLayoutUpdated fires UpdateAdorner.
+        /// </summary>
+        private void OnAdornedElementLayoutUpdated(object sender, EventArgs e)
+        {
+            _layoutDirty = true;
+        }
+
+        /// <summary>
+        /// Subscribe to LayoutUpdated on the given element exactly once (tracked via
+        /// _subscribedElements).  Called when the first adorner is registered for an element.
+        /// </summary>
+        private void SubscribeToElementLayout(UIElement element)
+        {
+            _subscribedElements ??= new HashSet<UIElement>();
+            if (_subscribedElements.Add(element))
+            {
+                element.LayoutUpdated += OnAdornedElementLayoutUpdated;
+            }
+        }
+
+        /// <summary>
+        /// Unsubscribe from LayoutUpdated on the given element.
+        /// Called when the last adorner for an element is removed.
+        /// </summary>
+        private void UnsubscribeFromElementLayout(UIElement element)
+        {
+            if (_subscribedElements != null && _subscribedElements.Remove(element))
+            {
+                element.LayoutUpdated -= OnAdornedElementLayoutUpdated;
+            }
         }
 
         /// <summary>
@@ -572,6 +698,7 @@ namespace System.Windows.Documents
             adornerInfo.ZOrder = zOrder;
             AddAdornerToVisualTree(adornerInfo, zOrder);
             InvalidateAdorner(adornerInfo);
+            _layoutDirty = true;
             UpdateAdorner(adorner.AdornedElement);
         }
 
@@ -716,9 +843,14 @@ namespace System.Windows.Documents
             bool dirty = false;
 
             //
-            // See if the adorners need to be rerendered due to object resizing
+            // See if the adorners need to be rerendered due to object resizing.
+            // Fast path: TryTransformToAncestorAsMatrix avoids MatrixTransform +
+            // Matrix DP-box allocations on the common purely-affine visual chain.
+            // Fall back to the GeneralTransform overload only when Effects or 3D
+            // embedding are present in the ancestor chain.
             //
-            GeneralTransform transform = element.TransformToAncestor(adornerLayerParent);                            
+            bool isSimpleTransform = element.TryTransformToAncestorAsMatrix(adornerLayerParent as Visual, out Matrix simpleMatrix);
+            GeneralTransform transform = isSimpleTransform ? null : element.TransformToAncestor(adornerLayerParent);
 
             for (int i = 0; i < adornerInfos.Count; i++)
             {
@@ -736,16 +868,37 @@ namespace System.Windows.Documents
                     }
                 }
 
-                if (adornerInfo.Adorner.NeedsUpdate(adornerInfo.RenderSize) || adornerInfo.Transform == null ||
-                    transform.AffineTransform == null || adornerInfo.Transform.AffineTransform == null ||
-                    transform.AffineTransform.Value != adornerInfo.Transform.AffineTransform.Value ||
-                    clipChanged)
+                // Determine whether the transform has changed since the last update.
+                bool transformChanged;
+                if (isSimpleTransform && adornerInfo.HasSimpleTransform)
+                {
+                    // Both old and new are simple affines — compare matrices directly.
+                    transformChanged = simpleMatrix != adornerInfo.SimpleTransform;
+                }
+                else if (!isSimpleTransform && !adornerInfo.HasSimpleTransform)
+                {
+                    // Both are GeneralTransforms — use the existing affine-value comparison.
+                    transformChanged = adornerInfo.Transform == null ||
+                        transform.AffineTransform == null || adornerInfo.Transform.AffineTransform == null ||
+                        transform.AffineTransform.Value != adornerInfo.Transform.AffineTransform.Value;
+                }
+                else
+                {
+                    // The simple/complex path changed — always treat as dirty.
+                    transformChanged = true;
+                }
+
+                if (adornerInfo.Adorner.NeedsUpdate(adornerInfo.RenderSize) || transformChanged || clipChanged)
                 {
                     adornerInfo.Adorner.InvalidateMeasure();
                     adornerInfo.Adorner.InvalidateVisual();
 
                     adornerInfo.RenderSize = size;
-                    adornerInfo.Transform = transform;
+
+                    // Store the transform in whichever representation was computed.
+                    adornerInfo.HasSimpleTransform = isSimpleTransform;
+                    adornerInfo.SimpleTransform = isSimpleTransform ? simpleMatrix : default;
+                    adornerInfo.Transform = isSimpleTransform ? null : transform;
 
                     if (adornerInfo.Adorner.IsClipEnabled)
                     {
@@ -779,8 +932,10 @@ namespace System.Windows.Documents
                 return;
             }
 
-            // We only expect one to have been removed on any one call.
-            ArrayList removeList = new ArrayList(1);
+            // Reuse pooled list to avoid per-call ArrayList allocation.
+            _removeList ??= new List<UIElement>(4);
+            _removeList.Clear();
+            List<UIElement> removeList = _removeList;
 
             if (element != null)
             {
@@ -797,12 +952,15 @@ namespace System.Windows.Documents
             else
             {
                 ICollection keyCollection = ElementMap.Keys;
-                UIElement[] keys = new UIElement[keyCollection.Count];
-                keyCollection.CopyTo(keys, 0);  // make a static copy of the keys to prevent any possible enumerator exceptions
+                int keysCount = keyCollection.Count;
+                // Reuse a grow-only snapshot buffer; min capacity 8.
+                if (_keysSnapshotBuffer == null || _keysSnapshotBuffer.Length < keysCount)
+                    _keysSnapshotBuffer = new UIElement[Math.Max(keysCount, 8)];
+                keyCollection.CopyTo(_keysSnapshotBuffer, 0);  // static snapshot to prevent enumerator exceptions
 
-                for (int i = 0; i < keys.Length; i++)
+                for (int i = 0; i < keysCount; i++)
                 {
-                    UIElement elTemp = (UIElement)keys[i];
+                    UIElement elTemp = _keysSnapshotBuffer[i];
 
                     // Make sure element is still beneath the adorner decorator
                     if (!elTemp.IsDescendantOf(adornerLayerParent))
@@ -814,11 +972,15 @@ namespace System.Windows.Documents
                         UpdateElementAdorners(elTemp);
                     }
                 }
+
+                // Clear used slots to release UIElement refs; prevents the buffer from
+                // retaining strong references to elements after this call returns.
+                Array.Clear(_keysSnapshotBuffer, 0, keysCount);
             }
 
             for (int i = 0; i < removeList.Count; i++)
             {
-                Clear((UIElement)removeList[i]);
+                Clear(removeList[i]);
             }
         }
 
@@ -1018,6 +1180,29 @@ namespace System.Windows.Documents
         private SortedList _zOrderMap = new SortedList(10);
         private const int DefaultZOrder = System.Int32.MaxValue;
         private VisualCollection _children;
+
+        // Pooled buffers for UpdateAdorner — avoids per-call heap allocation on the
+        // hot LayoutUpdated path (~570 fires/sec in MotionCatalyst profiling).
+        // Both fields are reused across calls; UpdateAdorner is UI-thread-only and
+        // not self-reentrant on the same AdornerLayer instance.
+        private List<UIElement> _removeList;
+        private UIElement[] _keysSnapshotBuffer;
+
+        // Pooled snapshot buffer for MeasureOverride / ArrangeOverride iteration
+        // over _zOrderMap.GetValueList().  Avoids the per-pass DictionaryEntry[]
+        // allocation that SortedList.CopyTo(Array) would otherwise produce.
+        // Measure and Arrange share the buffer because they never overlap in a
+        // single layout pass (Measure runs to completion before Arrange begins).
+        private object[] _zOrderValuesSnapshotBuffer;
+
+        // Dirty-bit gate for OnLayoutUpdated.  Set on adorner add/remove and on any
+        // per-element LayoutUpdated event; cleared at the top of UpdateAdorner so a
+        // re-entrant fire during the walk re-arms for the next pass.
+        // Starts true so the very first layout pass is never skipped.
+        private bool _layoutDirty = true;
+        // Set of elements for which we have a LayoutUpdated subscription.
+        // Maintained to ensure subscribe/unsubscribe are balanced.
+        private HashSet<UIElement> _subscribedElements;
 
         #endregion Private Fields
     }

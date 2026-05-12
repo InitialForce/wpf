@@ -2951,6 +2951,7 @@ namespace MS.Internal.TextFormatting
             }
             else
             {
+                double emSizeReal = textFormatterImp.IdealToReal(lsrun.EmSize, currentLine.PixelsPerDip);
                 if (justify)
                 {
                     AdjustMetricsForDisplayModeJustifiedText(
@@ -2967,21 +2968,22 @@ namespace MS.Internal.TextFormatting
                 }
                 else
                 {
-                    glyphAdvances = new List<double>(glyphCount);
+                    glyphAdvances = new ThousandthOfEmRealDoubles(emSizeReal, glyphCount);
                     for (int i = 0; i < glyphCount; i++)
                     {
-                        glyphAdvances.Add(textFormatterImp.IdealToReal(piJustifiedGlyphAdvances[i], currentLine.PixelsPerDip));
+                        glyphAdvances[i] = textFormatterImp.IdealToReal(piJustifiedGlyphAdvances[i], currentLine.PixelsPerDip);
                     }
                 }
-                glyphOffsets  = new List<Point>(glyphCount);
+                ThousandthOfEmRealPoints glyphOffsetsTyped = new ThousandthOfEmRealPoints(emSizeReal, glyphCount);
                 for (int i = 0; i < glyphCount; i++)
                 {
                     glyphIndices[i] = puGlyphs[i];
-                    glyphOffsets.Add(new Point(
+                    glyphOffsetsTyped[i] = new Point(
                             textFormatterImp.IdealToReal(piiGlyphOffsets[i].du, currentLine.PixelsPerDip),
                             textFormatterImp.IdealToReal(piiGlyphOffsets[i].dv, currentLine.PixelsPerDip)
-                            ));
+                            );
                 }
+                glyphOffsets = glyphOffsetsTyped;
             }
 
 #if CHECK_GLYPHS
@@ -3104,11 +3106,14 @@ namespace MS.Internal.TextFormatting
                     }
                     else
                     {
-                        charWidths = new List<double>(cchText);
+                        ThousandthOfEmRealDoubles charWidthsTyped = new ThousandthOfEmRealDoubles(
+                            textFormatterImp.IdealToReal(lsrun.EmSize, Draw.CurrentLine.PixelsPerDip),
+                            cchText);
                         for (int i = 0; i < cchText; i++)
                         {
-                            charWidths.Add(textFormatterImp.IdealToReal(piCharAdvances[i], Draw.CurrentLine.PixelsPerDip));
+                            charWidthsTyped[i] = textFormatterImp.IdealToReal(piCharAdvances[i], Draw.CurrentLine.PixelsPerDip);
                         }
+                        charWidths = charWidthsTyped;
                     }
                     for (int i = 0; i < cchText; i++)
                     {
