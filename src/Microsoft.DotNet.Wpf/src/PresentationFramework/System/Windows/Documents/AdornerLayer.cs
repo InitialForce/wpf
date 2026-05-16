@@ -473,27 +473,32 @@ namespace System.Windows.Documents
             if (buffer == null || buffer.Length < count)
                 buffer = new object[Math.Max(count, 8)];
 
-            valueList.CopyTo(buffer, 0);
-
-            for (int i = 0; i < count; i++)
+            try
             {
-                ArrayList adornerInfos = (ArrayList)buffer[i];
-                Debug.Assert(adornerInfos != null, "No adorners found for element in AdornerLayer._zOrderMap");
+                valueList.CopyTo(buffer, 0);
 
-                int j = 0;
-                while (j < adornerInfos.Count)
+                for (int i = 0; i < count; i++)
                 {
-                    AdornerInfo adornerInfo = (AdornerInfo)adornerInfos[j++];
-                    adornerInfo.Adorner.Measure(constraint);
+                    ArrayList adornerInfos = (ArrayList)buffer[i];
+                    Debug.Assert(adornerInfos != null, "No adorners found for element in AdornerLayer._zOrderMap");
+
+                    int j = 0;
+                    while (j < adornerInfos.Count)
+                    {
+                        AdornerInfo adornerInfo = (AdornerInfo)adornerInfos[j++];
+                        adornerInfo.Adorner.Measure(constraint);
+                    }
                 }
             }
+            finally
+            {
+                Array.Clear(buffer, 0, count);
 
-            Array.Clear(buffer, 0, count);
-
-            // Return the buffer to the pool. If a re-entrant call already restored a
-            // (possibly larger) buffer, keep the larger one.
-            if (_zOrderValuesSnapshotBuffer == null || _zOrderValuesSnapshotBuffer.Length < buffer.Length)
-                _zOrderValuesSnapshotBuffer = buffer;
+                // Return the buffer to the pool. If a re-entrant call already restored a
+                // (possibly larger) buffer, keep the larger one.
+                if (_zOrderValuesSnapshotBuffer == null || _zOrderValuesSnapshotBuffer.Length < buffer.Length)
+                    _zOrderValuesSnapshotBuffer = buffer;
+            }
 
             // Returning 0,0 prevents an invalidation of Measure for AdornerLayer from unnecessarily dirtying the parent.
             return new Size();
@@ -524,54 +529,59 @@ namespace System.Windows.Documents
             if (buffer == null || buffer.Length < count)
                 buffer = new object[Math.Max(count, 8)];
 
-            valueList.CopyTo(buffer, 0);
-
-            for (int i = 0; i < count; i++)
+            try
             {
-                ArrayList adornerInfos = (ArrayList)buffer[i];
+                valueList.CopyTo(buffer, 0);
 
-                Debug.Assert(adornerInfos != null, "No adorners found for element in AdornerLayer._zOrderMap");
-
-                int j = 0;
-                while (j < adornerInfos.Count)
+                for (int i = 0; i < count; i++)
                 {
-                    AdornerInfo adornerInfo = (AdornerInfo)adornerInfos[j++];
+                    ArrayList adornerInfos = (ArrayList)buffer[i];
 
-                    if (!adornerInfo.Adorner.IsArrangeValid)    // optimization
+                    Debug.Assert(adornerInfos != null, "No adorners found for element in AdornerLayer._zOrderMap");
+
+                    int j = 0;
+                    while (j < adornerInfos.Count)
                     {
-                        // We're dependent on Arrange to get the rendersize of the adorner, so Arrange before
-                        // doing our transform magic.
-                        adornerInfo.Adorner.Arrange(new Rect(new Point(), adornerInfo.Adorner.DesiredSize));
-                        GeneralTransform proposedTransform = adornerInfo.Adorner.GetDesiredTransform(adornerInfo.GetTransformForArrange());
-                        GeneralTransform adornerTransform = GetProposedTransform(adornerInfo.Adorner, proposedTransform);
+                        AdornerInfo adornerInfo = (AdornerInfo)adornerInfos[j++];
 
-                        int index = _children.IndexOf(adornerInfo.Adorner);
-
-                        if (index >= 0)
+                        if (!adornerInfo.Adorner.IsArrangeValid)    // optimization
                         {
-                            // Get the matrix transform out, skip all non affine transforms
-                            Transform transform = adornerTransform?.AffineTransform;
-                            
-                            ((Adorner)(_children[index])).AdornerTransform = transform;
+                            // We're dependent on Arrange to get the rendersize of the adorner, so Arrange before
+                            // doing our transform magic.
+                            adornerInfo.Adorner.Arrange(new Rect(new Point(), adornerInfo.Adorner.DesiredSize));
+                            GeneralTransform proposedTransform = adornerInfo.Adorner.GetDesiredTransform(adornerInfo.GetTransformForArrange());
+                            GeneralTransform adornerTransform = GetProposedTransform(adornerInfo.Adorner, proposedTransform);
+
+                            int index = _children.IndexOf(adornerInfo.Adorner);
+
+                            if (index >= 0)
+                            {
+                                // Get the matrix transform out, skip all non affine transforms
+                                Transform transform = adornerTransform?.AffineTransform;
+
+                                ((Adorner)(_children[index])).AdornerTransform = transform;
+                            }
                         }
-                    }
-                    if (adornerInfo.Adorner.IsClipEnabled)
-                    {
-                        adornerInfo.Adorner.AdornerClip = adornerInfo.Clip;
-                    }
-                    else if (adornerInfo.Adorner.AdornerClip != null)
-                    {
-                        adornerInfo.Adorner.AdornerClip = null;
+                        if (adornerInfo.Adorner.IsClipEnabled)
+                        {
+                            adornerInfo.Adorner.AdornerClip = adornerInfo.Clip;
+                        }
+                        else if (adornerInfo.Adorner.AdornerClip != null)
+                        {
+                            adornerInfo.Adorner.AdornerClip = null;
+                        }
                     }
                 }
             }
+            finally
+            {
+                Array.Clear(buffer, 0, count);
 
-            Array.Clear(buffer, 0, count);
-
-            // Return the buffer to the pool. If a re-entrant call already restored a
-            // (possibly larger) buffer, keep the larger one.
-            if (_zOrderValuesSnapshotBuffer == null || _zOrderValuesSnapshotBuffer.Length < buffer.Length)
-                _zOrderValuesSnapshotBuffer = buffer;
+                // Return the buffer to the pool. If a re-entrant call already restored a
+                // (possibly larger) buffer, keep the larger one.
+                if (_zOrderValuesSnapshotBuffer == null || _zOrderValuesSnapshotBuffer.Length < buffer.Length)
+                    _zOrderValuesSnapshotBuffer = buffer;
+            }
 
             return finalSize;
         }
