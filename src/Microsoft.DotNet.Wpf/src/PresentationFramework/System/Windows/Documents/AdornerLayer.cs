@@ -664,17 +664,21 @@ namespace System.Windows.Documents
             // calls UpdateAdorner→TransformToAncestor→InvalidateMeasure on every
             // pass, which schedules a new render via NeedsRecalc→PostRender,
             // amplifying any forever-animation by ~17× (e.g. a perpetual busy
-            // spinner produces ~570 renders/sec instead of ~32). Clearing
-            // _layoutDirty before exit prevents stale-flag leak when the first
-            // adorner is later attached (oracle-panel correction, gemini 9/10).
+            // spinner produces ~570 renders/sec instead of ~32).
             if (ElementMap.Count == 0)
             {
-                _layoutDirty = false;
                 return;
             }
 
-            if (!_layoutDirty) return;       // existing dirty-bit guard from 5e7df8833 — keep
-            _layoutDirty = false;
+            // Non-empty layer: always run UpdateAdorner. A cached _layoutDirty flag
+            // cannot comprehensively observe every coordinate-space change that
+            // requires re-walking adorners (ancestor RenderTransform changes,
+            // ContentPresenter re-templating that swaps the subtree between an
+            // adorned element and the AdornerLayer parent without firing layout
+            // on the adorned element itself, ancestor scroll, layer-parent
+            // changes, ArrangeDirty propagation, stale-element cleanup, etc.).
+            // The transform/size/clip-change gates inside UpdateElementAdorners
+            // still suppress redundant Adorner.InvalidateMeasure calls.
             UpdateAdorner(null);
         }
 
@@ -969,55 +973,82 @@ namespace System.Windows.Documents
                 return;
             }
 
-            // Reuse pooled list to avoid per-call ArrayList allocation.
-            _removeList ??= new List<UIElement>(4);
-            _removeList.Clear();
-            List<UIElement> removeList = _removeList;
+            // Lease the pooled removeList: null the field so a re-entrant
+            // UpdateAdorner (triggered when a custom Adorner's InvalidateMeasure/
+            // InvalidateVisual override calls back into AdornerLayer.Add/Remove)
+            // allocates its own buffer instead of clobbering ours. Same pattern
+            // as _zOrderValuesSnapshotBuffer in Measure/ArrangeOverride.
+            List<UIElement> removeList = _removeList ?? new List<UIElement>(4);
+            _removeList = null;
+            removeList.Clear();
 
-            if (element != null)
+            // Lease the pooled keys snapshot buffer for the same reason.
+            UIElement[] keysBuffer = null;
+            int leasedKeysCount = 0;
+
+            try
             {
-                // Make sure element is still beneath the adorner decorator
-                if (!element.IsDescendantOf(adornerLayerParent))
+                if (element != null)
                 {
-                    removeList.Add(element);
-                }
-                else
-                {
-                    UpdateElementAdorners(element);
-                }
-            }
-            else
-            {
-                ICollection keyCollection = ElementMap.Keys;
-                int keysCount = keyCollection.Count;
-                // Reuse a grow-only snapshot buffer; min capacity 8.
-                if (_keysSnapshotBuffer == null || _keysSnapshotBuffer.Length < keysCount)
-                    _keysSnapshotBuffer = new UIElement[Math.Max(keysCount, 8)];
-                keyCollection.CopyTo(_keysSnapshotBuffer, 0);  // static snapshot to prevent enumerator exceptions
-
-                for (int i = 0; i < keysCount; i++)
-                {
-                    UIElement elTemp = _keysSnapshotBuffer[i];
-
                     // Make sure element is still beneath the adorner decorator
-                    if (!elTemp.IsDescendantOf(adornerLayerParent))
+                    if (!element.IsDescendantOf(adornerLayerParent))
                     {
-                        removeList.Add(elTemp);
+                        removeList.Add(element);
                     }
                     else
                     {
-                        UpdateElementAdorners(elTemp);
+                        UpdateElementAdorners(element);
+                    }
+                }
+                else
+                {
+                    ICollection keyCollection = ElementMap.Keys;
+                    int keysCount = keyCollection.Count;
+
+                    keysBuffer = _keysSnapshotBuffer;
+                    _keysSnapshotBuffer = null;
+                    if (keysBuffer == null || keysBuffer.Length < keysCount)
+                        keysBuffer = new UIElement[Math.Max(keysCount, 8)];
+                    keyCollection.CopyTo(keysBuffer, 0);  // static snapshot to prevent enumerator exceptions
+                    leasedKeysCount = keysCount;
+
+                    for (int i = 0; i < keysCount; i++)
+                    {
+                        UIElement elTemp = keysBuffer[i];
+
+                        // Make sure element is still beneath the adorner decorator
+                        if (!elTemp.IsDescendantOf(adornerLayerParent))
+                        {
+                            removeList.Add(elTemp);
+                        }
+                        else
+                        {
+                            UpdateElementAdorners(elTemp);
+                        }
                     }
                 }
 
-                // Clear used slots to release UIElement refs; prevents the buffer from
-                // retaining strong references to elements after this call returns.
-                Array.Clear(_keysSnapshotBuffer, 0, keysCount);
+                for (int i = 0; i < removeList.Count; i++)
+                {
+                    Clear(removeList[i]);
+                }
             }
-
-            for (int i = 0; i < removeList.Count; i++)
+            finally
             {
-                Clear(removeList[i]);
+                // Clear used slots in the keys buffer before returning it to the
+                // pool so it doesn't retain UIElement references across calls.
+                if (keysBuffer != null)
+                {
+                    Array.Clear(keysBuffer, 0, leasedKeysCount);
+                    if (_keysSnapshotBuffer == null || _keysSnapshotBuffer.Length < keysBuffer.Length)
+                        _keysSnapshotBuffer = keysBuffer;
+                }
+
+                // Return removeList to the pool only if a nested call hasn't
+                // already produced a (potentially larger) replacement.
+                removeList.Clear();
+                if (_removeList == null)
+                    _removeList = removeList;
             }
         }
 
