@@ -4,7 +4,7 @@ Tests for .github/workflows/build.yml
 Validates structural requirements of the PR validation matrix workflow:
 - YAML parses cleanly
 - All 6 required jobs are present
-- Matrix: windows-latest runner + x64/arm64 architectures
+- Matrix: windows-2022 runner + x64/arm64 architectures
 - Triggers: pull_request, push, workflow_dispatch
 - Python lint job calls ruff, mypy, pytest
 - Concurrency group is set
@@ -71,15 +71,21 @@ def test_all_six_jobs_present(workflow: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. Matrix: windows-latest runner + x64/arm64
+# 3. Matrix: windows-2022 runner + x64/arm64
 # ---------------------------------------------------------------------------
 def test_build_wpf_runs_on_windows(workflow: dict) -> None:
-    """build-wpf job must target windows-latest."""
+    """build-wpf job must target a pinned windows-2022 runner.
+
+    The native WpfGfx vcxproj files pin PlatformToolset v143 (VS2022), so the
+    runner is pinned to windows-2022 rather than windows-latest: a floating
+    label drifts to a newer Visual Studio whose MSVC toolset v143 rejects
+    (MSB8052).
+    """
     jobs = workflow["jobs"]
     assert "build-wpf" in jobs, "build-wpf job not found"
     build_job = jobs["build-wpf"]
-    assert build_job.get("runs-on") == "windows-latest", (
-        f"build-wpf must run on windows-latest, got: {build_job.get('runs-on')}"
+    assert build_job.get("runs-on") == "windows-2022", (
+        f"build-wpf must run on windows-2022, got: {build_job.get('runs-on')}"
     )
 
 

@@ -183,6 +183,7 @@ def compare_benchmarks(
     threshold_fail: float,
     strict_new_scenarios: bool = False,
     allow_new_scenarios: set[str] | None = None,
+    warn_only_metrics: set[str] | None = None,
 ) -> list[ScenarioResult]:
     """
     Compare current benchmarks against baseline.
@@ -192,9 +193,16 @@ def compare_benchmarks(
     instead each such scenario produces a 'warning' result with reason='no_baseline'
     (or 'fail' when strict_new_scenarios=True, or 'pass' when the scenario name is
     in allow_new_scenarios).
+
+    Metrics named in warn_only_metrics never produce a hard 'fail': a regression
+    that would fail is downgraded to 'warning' (reason='warn_only_metric'). This
+    exists because wall-clock time (Mean) on shared/hosted CI runners flaps widely,
+    so time is advisory while allocations (Allocated) stay a hard gate.
     """
     if allow_new_scenarios is None:
         allow_new_scenarios = set()
+    if warn_only_metrics is None:
+        warn_only_metrics = set()
 
     results: list[ScenarioResult] = []
 
@@ -243,6 +251,11 @@ def compare_benchmarks(
             delta = compute_delta_pct(baseline_val, current_val)
             verdict = verdict_for_delta(delta, threshold_warn, threshold_fail)
 
+            reason = ""
+            if verdict == "fail" and metric in warn_only_metrics:
+                verdict = "warning"
+                reason = "warn_only_metric"
+
             results.append(
                 ScenarioResult(
                     name=full_name,
@@ -251,6 +264,7 @@ def compare_benchmarks(
                     current=current_val,
                     delta_pct=delta,
                     verdict=verdict,
+                    reason=reason,
                 )
             )
 
@@ -340,6 +354,17 @@ def build_parser() -> argparse.ArgumentParser:
             "new (verdict=pass instead of warning)."
         ),
     )
+    parser.add_argument(
+        "--warn-only-metrics",
+        metavar="METRICS",
+        default="",
+        help=(
+            "Comma-separated list of metric names (Mean, Allocated) that are "
+            "advisory only: a regression that would fail is downgraded to a "
+            "warning. Use 'Mean' to keep time advisory (hosted runners flap) "
+            "while Allocated stays a hard gate. Default: none (all metrics gate)."
+        ),
+    )
     return parser
 
 
@@ -354,6 +379,11 @@ def main(argv: list[str] | None = None) -> int:
     allow_new_scenarios: set[str] = (
         {n.strip() for n in args.allow_new_scenarios.split(",") if n.strip()}
         if args.allow_new_scenarios
+        else set()
+    )
+    warn_only_metrics: set[str] = (
+        {n.strip() for n in args.warn_only_metrics.split(",") if n.strip()}
+        if args.warn_only_metrics
         else set()
     )
 
@@ -393,6 +423,7 @@ def main(argv: list[str] | None = None) -> int:
         threshold_fail,
         strict_new_scenarios=strict_new_scenarios,
         allow_new_scenarios=allow_new_scenarios,
+        warn_only_metrics=warn_only_metrics,
     )
 
     status = aggregate_status(results)
