@@ -18,10 +18,6 @@ public class StyleTests : SmokeBase
     [Test]
     public void ResourceDictionaryAllStylesResolve()
     {
-        // TODO(SMOKE-019): stub — deferred to Windows CI where XAML parsing is fully operational.
-        Assert.That(true, Is.True, "SMOKE-019 stub — deferred to Windows CI.");
-
-        /* Full implementation:
         RunOnStaThread(() =>
         {
             var xaml = """
@@ -53,6 +49,5 @@ public class StyleTests : SmokeBase
                     $"'{key}' is not a Style.");
             }
         });
-        */
     }
 }

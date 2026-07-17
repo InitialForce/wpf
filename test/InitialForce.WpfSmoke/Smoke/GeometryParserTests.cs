@@ -21,12 +21,6 @@ public class GeometryParserTests : SmokeBase
     [Test]
     public void RoundTrip10kPaths()
     {
-        // TODO(SMOKE-001): Replace Assert.That(true) stub with real assertion
-        // once InitialForce.WPF package is available in the test environment.
-        // Full implementation is ready below; enable by removing the stub.
-        Assert.That(true, Is.True, "SMOKE-001 stub — full impl ready, deferred to Windows CI.");
-
-        /* Full implementation (enable on Windows CI):
         int errors = 0;
         foreach (var path in _svgPaths)
         {
@@ -44,7 +38,6 @@ public class GeometryParserTests : SmokeBase
             }
         }
         Assert.That(errors, Is.Zero, $"{errors} of {_svgPaths.Length} paths failed to parse.");
-        */
     }
 
     private static string[] LoadSvgPaths()

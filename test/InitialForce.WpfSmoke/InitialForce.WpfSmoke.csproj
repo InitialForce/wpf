@@ -11,20 +11,38 @@
     <OutputType>Exe</OutputType>
     <!-- NUnit console runner needs a real entry point. -->
     <StartupObject>InitialForce.WpfSmoke.Program</StartupObject>
+    <!-- The WPF Arcade SDK's ClearReferenceCopyLocalPaths target strips NuGet package
+         assemblies from output unless this is true (it assumes test projects never
+         publish as a standalone exe). Keep it true so the copy-local set is preserved;
+         the smoke CI step additionally copies the NUnit assemblies from the package
+         cache into the published app directory as a guaranteed backstop. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- The package under test. Resolved from local feed in CI via -source flag. -->
-    <PackageReference Include="InitialForce.WPF" Version="$(InitialForceWpfVersion)" />
+    <!-- The package under test. Resolved from local feed in CI via -source flag.
+         GeneratePathProperty exposes $(PkgInitialForce_WPF), the extracted package
+         root, so _AddPatchedWpfCompileReference can point the compiler at the patched
+         WindowsBase.dll shipped under runtimes/. -->
+    <PackageReference Include="InitialForce.WPF" Version="$(InitialForceWpfVersion)"
+                      GeneratePathProperty="true" />
 
-    <!-- Test framework. -->
+    <!-- Test framework. NUnitLite provides the embeddable AutoRun runner the console
+         entry point (Program.Main) uses. The smoke harness runs as a self-contained
+         published exe rather than under `dotnet test`, so the VSTest adapter and
+         Microsoft.NET.Test.Sdk are intentionally absent: Test.Sdk marks the project
+         IsTestProject and its targets drop nunitlite.dll from the publish output. -->
     <PackageReference Include="NUnit" Version="4.*" />
-    <PackageReference Include="NUnit3TestAdapter" Version="4.*" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
+    <PackageReference Include="NUnitLite" Version="4.*" />
+  </ItemGroup>
 
-    <!-- Benchmarks. -->
-    <PackageReference Include="BenchmarkDotNet" Version="0.14.*" />
-    <PackageReference Include="BenchmarkDotNet.Diagnostics.Windows" Version="0.14.*" />
+  <!-- The benchmark harness lives in its own project (Perf/InitialForce.WpfPerf.csproj)
+       with its own BenchmarkDotNet references. Exclude the Perf sources from the smoke
+       assembly so it does not reference BenchmarkDotNet: NUnitLite reflects over every
+       type at startup, and a type referencing an unresolved BenchmarkDotNet aborts test
+       discovery (0 tests) when the smoke exe runs without the benchmark dependency set. -->
+  <ItemGroup>
+    <Compile Remove="Perf\**\*.cs" />
   </ItemGroup>
 
   <!-- Golden images ship alongside the project. -->
@@ -32,5 +50,48 @@
     <EmbeddedResource Include="goldens\**\*.png" />
     <EmbeddedResource Include="goldens\**\*.sha256" />
   </ItemGroup>
+
+  <!--
+    The InitialForce.WPF package ships lib/net10.0/_._ (no compile assets) and its
+    four patched WPF DLLs as RID-specific runtime assets under runtimes/win-x64/.
+    Its buildTransitive targets strip PresentationCore, PresentationFramework,
+    WindowsBase and System.Xaml from the runtime pack and copy the patched DLLs into
+    the output instead. That leaves the C# compiler with an inconsistent WPF
+    reference set for this self-contained win-x64 project, so files that name WPF
+    types directly (System.Windows.Point, Dispatcher, DispatcherOperation) or
+    inherit/override a WPF type whose base chain reaches
+    System.Windows.DependencyObject fail with CS0246/CS0012.
+
+    This target points the compiler at the same four patched DLLs the app loads at
+    runtime, so the compile-time surface matches the runtime surface exactly. It
+    runs after reference resolution has populated both @(ReferencePath) and
+    @(ReferencePathWithRefAssemblies) and just before CoreCompile, replacing any
+    existing entry for each assembly (InjectIfWpfAssemblies performs the runtime copy
+    independently). Private=false keeps these references out of the copy-local set,
+    leaving the package's runtime DLL swap untouched.
+  -->
+  <Target Name="_AddPatchedWpfCompileReference"
+          DependsOnTargets="ResolveAssemblyReferences;FindReferenceAssembliesForReferences"
+          BeforeTargets="CoreCompile"
+          Condition="'$(RuntimeIdentifier)' == 'win-x64' and '$(PkgInitialForce_WPF)' != ''">
+    <ItemGroup>
+      <_IFPatchedWpf Include="$(PkgInitialForce_WPF)\runtimes\win-x64\lib\net10.0\PresentationCore.dll" />
+      <_IFPatchedWpf Include="$(PkgInitialForce_WPF)\runtimes\win-x64\lib\net10.0\PresentationFramework.dll" />
+      <_IFPatchedWpf Include="$(PkgInitialForce_WPF)\runtimes\win-x64\lib\net10.0\WindowsBase.dll" />
+      <_IFPatchedWpf Include="$(PkgInitialForce_WPF)\runtimes\win-x64\lib\net10.0\System.Xaml.dll" />
+    </ItemGroup>
+    <ItemGroup>
+      <ReferencePath Remove="@(ReferencePath)"
+                     Condition="'%(FileName)' == 'PresentationCore' or '%(FileName)' == 'PresentationFramework' or '%(FileName)' == 'WindowsBase' or '%(FileName)' == 'System.Xaml'" />
+      <ReferencePath Include="@(_IFPatchedWpf)">
+        <Private>false</Private>
+      </ReferencePath>
+      <ReferencePathWithRefAssemblies Remove="@(ReferencePathWithRefAssemblies)"
+                                      Condition="'%(FileName)' == 'PresentationCore' or '%(FileName)' == 'PresentationFramework' or '%(FileName)' == 'WindowsBase' or '%(FileName)' == 'System.Xaml'" />
+      <ReferencePathWithRefAssemblies Include="@(_IFPatchedWpf)">
+        <Private>false</Private>
+      </ReferencePathWithRefAssemblies>
+    </ItemGroup>
+  </Target>
 
 </Project>

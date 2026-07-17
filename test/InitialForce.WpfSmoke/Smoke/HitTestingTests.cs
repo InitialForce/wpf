@@ -18,10 +18,6 @@ public class HitTestingTests : SmokeBase
     [Test]
     public void ThreeRectanglesNinePoints()
     {
-        // TODO(SMOKE-013): stub — deferred to Windows CI where WPF rendering is available.
-        Assert.That(true, Is.True, "SMOKE-013 stub — deferred to Windows CI.");
-
-        /* Full implementation:
         RunOnStaThread(() =>
         {
             var canvas = new System.Windows.Controls.Canvas
@@ -55,37 +51,39 @@ public class HitTestingTests : SmokeBase
             System.Windows.Controls.Canvas.SetLeft(rects[2], 210);
             foreach (var r in rects) canvas.Children.Add(r);
 
-            canvas.Measure(new System.Windows.Size(300, 100));
-            canvas.Arrange(new System.Windows.Rect(0, 0, 300, 100));
-            canvas.UpdateLayout();
-
-            // 3 sample points per rectangle (top-left, center, bottom-right).
+            // 3 sample points per rectangle (top-left, center, bottom-right). Each rect is
+            // 80x80 at Top=0, so the bottom-right sample uses y=75 to stay inside the
+            // 0..80 vertical span (the 100-tall canvas has empty space below y=80).
             var cases = new (System.Windows.Point pt, string expected)[]
             {
                 (new System.Windows.Point(15, 15),   "Red"),
                 (new System.Windows.Point(50, 50),   "Red"),
-                (new System.Windows.Point(85, 85),   "Red"),
+                (new System.Windows.Point(85, 75),   "Red"),
                 (new System.Windows.Point(115, 15),  "Green"),
                 (new System.Windows.Point(150, 50),  "Green"),
-                (new System.Windows.Point(185, 85),  "Green"),
+                (new System.Windows.Point(185, 75),  "Green"),
                 (new System.Windows.Point(215, 15),  "Blue"),
                 (new System.Windows.Point(250, 50),  "Blue"),
-                (new System.Windows.Point(285, 85),  "Blue"),
+                (new System.Windows.Point(285, 75),  "Blue"),
             };
 
-            foreach (var (pt, expected) in cases)
+            // Hit-testing needs a source-connected, rendered visual tree; a detached
+            // Measure/Arrange pass returns null. Host the canvas in a live window.
+            HostAndRender(canvas, () =>
             {
-                System.Windows.Media.HitTestResult? result = null;
-                System.Windows.Media.VisualTreeHelper.HitTest(
-                    canvas, null,
-                    r => { result = r; return System.Windows.Media.HitTestResultBehavior.Stop; },
-                    new System.Windows.Media.PointHitTestParameters(pt));
+                foreach (var (pt, expected) in cases)
+                {
+                    System.Windows.Media.HitTestResult? result = null;
+                    System.Windows.Media.VisualTreeHelper.HitTest(
+                        canvas, null,
+                        r => { result = r; return System.Windows.Media.HitTestResultBehavior.Stop; },
+                        new System.Windows.Media.PointHitTestParameters(pt));
 
-                var hitRect = result?.VisualHit as System.Windows.Shapes.Rectangle;
-                Assert.That(hitRect?.Name, Is.EqualTo(expected),
-                    $"Hit test at {pt} expected '{expected}', got '{hitRect?.Name ?? "null"}'.");
-            }
+                    var hitRect = result?.VisualHit as System.Windows.Shapes.Rectangle;
+                    Assert.That(hitRect?.Name, Is.EqualTo(expected),
+                        $"Hit test at {pt} expected '{expected}', got '{hitRect?.Name ?? "null"}'.");
+                }
+            });
         });
-        */
     }
 }

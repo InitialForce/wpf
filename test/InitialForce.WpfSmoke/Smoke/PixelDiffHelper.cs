@@ -33,7 +33,7 @@ public static class PixelDiffHelper
     public static BitmapSource RenderElement(FrameworkElement element, int width, int height)
     {
         // Force WARP software renderer — must be set before first WPF render.
-        System.Windows.Interop.RenderOptions.ProcessRenderMode =
+        System.Windows.Media.RenderOptions.ProcessRenderMode =
             System.Windows.Interop.RenderMode.SoftwareOnly;
 
         element.Width  = width;
