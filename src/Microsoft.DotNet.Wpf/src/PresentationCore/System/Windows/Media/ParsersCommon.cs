@@ -39,9 +39,9 @@ namespace MS.Internal.Markup
         {
             StreamGeometry geometry = new StreamGeometry();
             
-            using (StreamGeometryContext context = geometry.Open())
+            using (StreamGeometryContext context = geometry.OpenPooled())
             {
-                ParserStreamGeometryContext.Deserialize( reader, context, geometry ); 
+                ParserStreamGeometryContext.Deserialize( reader, context, geometry );
             }
             geometry.Freeze();
 
@@ -77,7 +77,7 @@ namespace MS.Internal.Markup
         {
             FillRule fillRule = FillRule.EvenOdd ;             
             StreamGeometry geometry = new StreamGeometry();
-            StreamGeometryContext context = geometry.Open(); 
+            StreamGeometryContext context = geometry.OpenPooled();
 
             ParseStringToStreamGeometryContext( context, pathString, formatProvider , ref fillRule ) ;
 

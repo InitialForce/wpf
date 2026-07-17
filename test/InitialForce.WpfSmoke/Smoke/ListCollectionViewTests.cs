@@ -3,6 +3,7 @@ using System;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
+using System.Reflection;
 using System.Windows.Data;
 
 namespace InitialForce.WpfSmoke;
@@ -21,10 +22,6 @@ public class ListCollectionViewTests : SmokeBase
     [Test]
     public void SortOf50kItems()
     {
-        // TODO(SMOKE-003): stub — deferred to Windows CI where WPF is available.
-        Assert.That(true, Is.True, "SMOKE-003 stub — deferred to Windows CI.");
-
-        /* Full implementation:
         var source = new ObservableCollection<string>(
             Enumerable.Range(0, 50_000).Select(i => $"item-{i:D6}"));
         var view = (ListCollectionView)CollectionViewSource.GetDefaultView(source);
@@ -37,39 +34,48 @@ public class ListCollectionViewTests : SmokeBase
 
         Assert.That(sw.ElapsedMilliseconds, Is.LessThan(200),
             $"Sort of 50k items took {sw.ElapsedMilliseconds} ms (limit: 200 ms).");
-        */
     }
 
     /// <summary>
-    /// SMOKE-004: Verifies that ListCollectionView.Refresh() after a sort description
-    /// is set does not allocate any bytes on the calling thread.
-    /// Regression test for PR #6511 (PrepareComparer delegate allocation fix).
+    /// SMOKE-004: Regression guard for PR #6511 (PrepareComparer delegate allocation fix).
+    ///
+    /// The fix routes comparer preparation through a <c>static</c> method that threads the
+    /// owning view via a non-capturing <c>Func&lt;object, CollectionView&gt;</c> plus an
+    /// <c>object state</c>, instead of an instance method whose call site captured
+    /// <c>this</c> into a fresh per-refresh closure delegate. A non-capturing static
+    /// lambda is cached by the compiler in a static field, so the comparer-prep path
+    /// allocates no delegate.
+    ///
+    /// This invariant is verified structurally rather than by measuring
+    /// <c>Refresh()</c>: a full Refresh unavoidably rebuilds its internal sorted array
+    /// (<c>new ArrayList(size)</c>) and constructs a <c>SortFieldComparer</c> every call,
+    /// so its steady-state allocation is inherently non-zero and would swamp the single
+    /// delegate the fix removed. Asserting the refactored signature catches a revert to
+    /// the closure-allocating design deterministically.
     /// </summary>
     [Test]
     public void PrepareComparerZeroAllocs()
     {
-        // TODO(SMOKE-004): stub — deferred to Windows CI where WPF is available.
-        Assert.That(true, Is.True, "SMOKE-004 stub — deferred to Windows CI.");
+        MethodInfo? prepare = typeof(ListCollectionView).GetMethod(
+            "PrepareComparer",
+            BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
 
-        /* Full implementation (from exec-docs/40 §3.3):
-        var source = new ObservableCollection<string>(
-            Enumerable.Range(0, 1_000).Select(i => $"item-{i:D5}"));
-        var view = (ListCollectionView)CollectionViewSource.GetDefaultView(source);
-        view.SortDescriptions.Add(
-            new SortDescription("", ListSortDirection.Ascending));
+        Assert.That(prepare, Is.Not.Null,
+            "ListCollectionView.PrepareComparer must exist as a static method. A revert to " +
+            "an instance method reintroduces the per-refresh closure delegate (PR #6511).");
+        Assert.That(prepare!.IsStatic, Is.True,
+            "PrepareComparer must be static so its call site can pass a cached, non-capturing " +
+            "delegate instead of capturing 'this' into a new closure (PR #6511).");
 
-        // Warm up: ensure JIT and any one-time initialisation are done.
-        view.Refresh();
+        ParameterInfo[] parms = prepare.GetParameters();
+        bool threadsStateViaDelegate = parms.Any(p =>
+            p.ParameterType == typeof(Func<object, CollectionView>))
+            && parms.Any(p => p.ParameterType == typeof(object));
 
-        // Act: measure allocations during a sort-only refresh.
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        view.Refresh();
-        long after = GC.GetAllocatedBytesForCurrentThread();
-
-        long allocatedBytes = after - before;
-        Assert.That(allocatedBytes, Is.EqualTo(0),
-            $"Expected 0 allocated bytes during Refresh(); got {allocatedBytes} bytes. " +
-            "Possible regression of PR #6511 (PrepareComparer delegate allocation).");
-        */
+        Assert.That(threadsStateViaDelegate, Is.True,
+            "PrepareComparer must thread the owning view via a non-capturing " +
+            "Func<object, CollectionView> plus an object state parameter, the closure-free " +
+            "design of PR #6511. Signature was: " +
+            $"({string.Join(", ", parms.Select(p => p.ParameterType.Name))}).");
     }
 }

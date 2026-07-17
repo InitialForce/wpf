@@ -1,4 +1,5 @@
 using NUnit.Framework;
+using System.Linq;
 
 namespace InitialForce.WpfSmoke;
 
@@ -18,16 +19,12 @@ public class VirtualizingPanelTests : SmokeBase
     [Test]
     public void Only30ContainersRealized()
     {
-        // TODO(SMOKE-008): stub — requires STA thread + WPF dispatcher loop.
-        // Deferred to Windows CI.
-        Assert.That(true, Is.True, "SMOKE-008 stub — deferred to Windows CI.");
-
-        /* Full implementation:
         RunOnStaThread(() =>
         {
             var items = Enumerable.Range(0, 100_000).Select(i => $"Item {i}").ToList();
             var listBox = new System.Windows.Controls.ListBox
             {
+                Width = 400,
                 Height = 600,
                 ItemsSource = items,
             };
@@ -35,24 +32,26 @@ public class VirtualizingPanelTests : SmokeBase
             System.Windows.Controls.VirtualizingStackPanel.SetVirtualizationMode(
                 listBox, System.Windows.Controls.VirtualizationMode.Recycling);
 
-            var window = new System.Windows.Window
+            int realized = 0;
+
+            // Virtualization only runs once the ListBox is hosted in a source-connected,
+            // rendered tree with a constrained viewport; a detached UpdateLayout realizes
+            // nothing (or everything). Host it in a live window and render.
+            HostAndRender(listBox, () =>
             {
-                Width = 400, Height = 600,
-                Content = listBox,
-            };
-            window.Show();
-            listBox.UpdateLayout();
-
-            int realized = listBox.Items.Count > 0
-                ? listBox.ItemContainerGenerator.Items.Count
-                : 0;
-
-            window.Close();
+                // ItemContainerGenerator.Items is the full item list (100k). The realized
+                // container count is the number of indices with a materialized container.
+                var generator = listBox.ItemContainerGenerator;
+                for (int i = 0; i < items.Count; i++)
+                {
+                    if (generator.ContainerFromIndex(i) != null)
+                        realized++;
+                }
+            });
 
             Assert.That(realized, Is.InRange(20, 40),
                 $"Expected ~30 realized containers for 100k-item list; got {realized}. " +
                 "Possible virtualization regression.");
         });
-        */
     }
 }

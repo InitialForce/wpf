@@ -22,10 +22,6 @@ public class DataBindingTests : SmokeBase
     [Test]
     public void ItemsControlUpdatesOnChange()
     {
-        // TODO(SMOKE-016): stub — deferred to Windows CI where WPF dispatcher is available.
-        Assert.That(true, Is.True, "SMOKE-016 stub — deferred to Windows CI.");
-
-        /* Full implementation:
         RunOnStaThread(() =>
         {
             var source = new ObservableCollection<string>(new[] { "Alpha", "Beta", "Gamma" });
@@ -53,7 +49,6 @@ public class DataBindingTests : SmokeBase
             Assert.That(itemsControl.Items.Count, Is.EqualTo(3),
                 "Count after RemoveAt() mismatch.");
         });
-        */
     }
 
     /// <summary>
@@ -64,10 +59,6 @@ public class DataBindingTests : SmokeBase
     [Test]
     public void MultiBindingConverterChain()
     {
-        // TODO(SMOKE-017): stub — deferred to Windows CI.
-        Assert.That(true, Is.True, "SMOKE-017 stub — deferred to Windows CI.");
-
-        /* Full implementation:
         RunOnStaThread(() =>
         {
             var vm = new TwoStringsViewModel { First = "Hello", Second = "World" };
@@ -92,7 +83,6 @@ public class DataBindingTests : SmokeBase
             Assert.That(textBlock.Text, Is.EqualTo("Hello World"),
                 "MultiBinding converter chain produced wrong result.");
         });
-        */
     }
 }
 

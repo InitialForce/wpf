@@ -20,11 +20,6 @@ public class AnimationTests : SmokeBase
     [Test]
     public void DoubleAnimationReachesTarget()
     {
-        // TODO(SMOKE-018): stub — animation requires WPF Dispatcher loop running.
-        // Deferred to Windows CI.
-        Assert.That(true, Is.True, "SMOKE-018 stub — deferred to Windows CI.");
-
-        /* Full implementation:
         RunOnStaThread(() =>
         {
             var element = new System.Windows.Controls.Border
@@ -33,33 +28,33 @@ public class AnimationTests : SmokeBase
                 Height = 100,
             };
 
-            var window = new System.Windows.Window
-            {
-                Width  = 400,
-                Height = 400,
-                Content = element,
-            };
-            window.Show();
-
             const double targetWidth = 300.0;
-            var animation = new DoubleAnimation
+            var duration = TimeSpan.FromMilliseconds(300);
+            double finalWidth = double.NaN;
+
+            HostAndRender(element, () =>
             {
-                To       = targetWidth,
-                Duration = TimeSpan.FromMilliseconds(300),
-            };
-            element.BeginAnimation(System.Windows.FrameworkElement.WidthProperty, animation);
+                var animation = new DoubleAnimation
+                {
+                    To       = targetWidth,
+                    Duration = duration,
+                };
 
-            // Wait for animation to complete (300 ms + margin).
-            Thread.Sleep(500);
-            window.Dispatcher.Invoke(() => { });  // Flush dispatcher queue.
+                // Drive the animation via an explicit clock and seek it to the end.
+                // SeekAlignedToLastTick applies the new clock position synchronously, so
+                // the animated value is resolved without waiting for the render loop to
+                // present frames (which an off-screen window on a headless runner does not
+                // do). This exercises the real animation/timing pipeline end to end.
+                var clock = animation.CreateClock();
+                element.ApplyAnimationClock(System.Windows.FrameworkElement.WidthProperty, clock);
+                clock.Controller!.SeekAlignedToLastTick(duration, TimeSeekOrigin.BeginTime);
 
-            double finalWidth = element.Width;
-            window.Close();
+                finalWidth = element.Width;
+            });
 
             double tolerance = targetWidth * 0.05;
             Assert.That(finalWidth, Is.InRange(targetWidth - tolerance, targetWidth + tolerance),
                 $"DoubleAnimation did not reach target: final={finalWidth}, target={targetWidth}.");
         });
-        */
     }
 }

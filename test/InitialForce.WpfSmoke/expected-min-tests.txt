@@ -1,0 +1,17 @@
+# Minimum number of tests the smoke harness MUST discover and run.
+#
+# This is a RATCHET-UP floor. The smoke CI job parses the produced TRX and
+# fails if the total test count is below this number. Its purpose is to make a
+# hollow/fabricated smoke run (0 tests, or a placeholder TRX) impossible to
+# pass silently — the failure mode that let 5 correctness bugs ship.
+#
+# Raise this number as scenarios are added or un-stubbed. Never lower it
+# without a written justification: a drop means tests stopped being discovered.
+#
+# The first non-comment line that starts with a number is read as the floor.
+# 22 pre-existing smoke [Test] methods, plus six per-bug regression fixtures
+# (DispatcherTaskMapping, ReentrantInputHitTest, PooledStyleManagerDirty,
+# StreamGeometryStaleDispose, DispatcherAwaitOrdering, DispatcherOperationEventPool)
+# contributing at least 13 more. Floor set conservatively below the true
+# discovered count, which only a Windows CI run can measure exactly.
+30

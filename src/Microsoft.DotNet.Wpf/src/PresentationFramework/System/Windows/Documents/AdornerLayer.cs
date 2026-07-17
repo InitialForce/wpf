@@ -631,13 +631,10 @@ namespace System.Windows.Documents
         /// <param name="args"></param>
         internal void OnLayoutUpdated(object sender, EventArgs args)
         {
-            // Empty AdornerLayer fast path: skip the per-pass walk entirely when
-            // no user adorners are attached. Without this, the default AdornerLayer
-            // on every WPF window subscribes to LayoutUpdated unconditionally and
-            // calls UpdateAdorner→TransformToAncestor→InvalidateMeasure on every
-            // pass, which schedules a new render via NeedsRecalc→PostRender,
-            // amplifying any forever-animation by ~17× (e.g. a perpetual busy
-            // spinner produces ~570 renders/sec instead of ~32).
+            // Skip the per-pass walk entirely when no adorners are attached; the
+            // walk would be a no-op with an empty ElementMap. The measured
+            // per-pass cost reduction lives in UpdateElementAdorners via
+            // TryTransformToAncestorAsMatrix, not here.
             if (ElementMap.Count == 0)
             {
                 return;

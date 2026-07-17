@@ -21,12 +21,6 @@ public class SortTests : SmokeBase
     [Test]
     public void ArrayListSortGenericPath()
     {
-        // TODO(SMOKE-020): stub — the generic sort path is in WindowsBase internals.
-        // This test uses ArrayList which exercises the non-generic sort improved in PR #6285.
-        // Deferred to Windows CI for full regression validation.
-        Assert.That(true, Is.True, "SMOKE-020 stub — deferred to Windows CI.");
-
-        /* Full implementation:
         const int count = 10_000;
         var rng = new Random(42);
         var list = new ArrayList(Enumerable.Range(0, count).OrderBy(_ => rng.Next()).ToList());
@@ -44,6 +38,5 @@ public class SortTests : SmokeBase
             Assert.That((int)list[i]!, Is.GreaterThanOrEqualTo((int)list[i - 1]!),
                 $"Sort order violation at index {i}: {list[i - 1]} > {list[i]}");
         }
-        */
     }
 }

@@ -21,11 +21,6 @@ public class PresentationSourceTests : SmokeBase
     [Apartment(ApartmentState.STA)]
     public void NoLeakAfter100Windows()
     {
-        // TODO(SMOKE-021): stub — requires STA thread + WPF window creation.
-        // Deferred to Windows CI.
-        Assert.That(true, Is.True, "SMOKE-021 stub — deferred to Windows CI.");
-
-        /* Full implementation (from exec-docs/40 §3.3):
         int baseline = CountPresentationSources();
 
         for (int i = 0; i < 100; i++)
@@ -45,7 +40,6 @@ public class PresentationSourceTests : SmokeBase
         Assert.That(after, Is.LessThanOrEqualTo(baseline + 1),
             $"PresentationSource list has {after} entries after 100 open+close cycles " +
             $"(baseline: {baseline}). Possible regression of PR #6502 WeakRef leak.");
-        */
     }
 
     private static int CountPresentationSources()

@@ -11,6 +11,11 @@ on:
         description: "Tag to release (e.g. if-10.0.4-perf.20260427)"
         required: true
         type: string
+      regenerate_perf_baseline:
+        description: "Also regenerate perf/baseline.json from this build's package (uploaded as an artifact to commit manually)"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: release-${{ github.ref }}
@@ -102,7 +107,7 @@ jobs:
     name: Build and pack NuGet packages
     needs: verify-tag
     if: needs.verify-tag.result == 'success'
-    runs-on: windows-latest
+    runs-on: windows-2022
     outputs:
       nuget_version: ${{ steps.version.outputs.nuget_version }}
 
@@ -175,7 +180,7 @@ jobs:
     name: Smoke harness against packed NuGet
     needs: build
     if: needs.build.result == 'success'
-    runs-on: windows-latest
+    runs-on: windows-2022
 
     steps:
       - uses: actions/checkout@v4
@@ -194,21 +199,112 @@ jobs:
           name: release-packages-${{ needs.build.outputs.nuget_version }}
           path: /tmp/packages/
 
-      - name: Install packages into temp feed and run smoke harness
+      - name: Run smoke harness against packed nupkg
         run: |
-          # Set up a local NuGet feed pointing at the downloaded packages
+          # Local NuGet feed pointing at the downloaded packages.
           $feedDir = "/tmp/local-feed"
           New-Item -ItemType Directory -Force -Path $feedDir | Out-Null
           Copy-Item /tmp/packages/*.nupkg $feedDir/
 
-          # Run the smoke harness against the consumer experience
-          $env:NUGET_VERSION = "${{ needs.build.outputs.nuget_version }}"
-          $env:LOCAL_FEED_PATH = $feedDir
-          dotnet test test/InitialForce.WpfSmoke/ `
-            -c Release `
-            --logger trx `
-            --results-directory /tmp/smoke-results/ `
-            -- NUnit.DefaultTestNamePattern="{m}"
+          $ver = "${{ needs.build.outputs.nuget_version }}"
+          if (-not $ver) { throw "nuget_version output is empty — cannot resolve InitialForceWpfVersion." }
+          Write-Host "Consuming InitialForce.WPF $ver from $feedDir"
+
+          dotnet nuget add source $feedDir --name local-packed --configfile NuGet.config
+          dotnet nuget add source https://api.nuget.org/v3/index.json --name nuget.org --configfile NuGet.config
+          dotnet restore test/InitialForce.WpfSmoke/InitialForce.WpfSmoke.csproj `
+            -p:InitialForceWpfVersion=$ver
+          if ($LASTEXITCODE -ne 0) { throw "restore failed" }
+
+          # Publish self-contained win-x64 (the csproj pins the RID + SelfContained),
+          # which lays down a full runtime AND the patched WPF DLLs while stripping the
+          # stock ones — the exact production consumption path, so the patched WPF loads
+          # unambiguously. `dotnet test` cannot run a self-contained testhost from build
+          # output (hostpolicy.dll is not laid down there), so run the NUnitLite console
+          # entry point directly; it emits NUnit3 result XML.
+          dotnet publish test/InitialForce.WpfSmoke/InitialForce.WpfSmoke.csproj `
+            -c Release --no-restore `
+            -p:InitialForceWpfVersion=$ver `
+            -o /tmp/smoke-publish/
+          if ($LASTEXITCODE -ne 0) { throw "publish failed" }
+          # The WPF Arcade SDK strips NuGet package assemblies from test-project output,
+          # so the NUnit assemblies are absent from the self-contained publish. Copy them
+          # from the restored package cache into the app directory; the self-contained host
+          # probes the application base directory, so they load without a deps.json entry.
+          $gp = ((dotnet nuget locals global-packages --list) -replace '^[^:]*:\s*','').Trim()
+          Write-Host "NuGet global packages: $gp"
+          foreach ($pkgId in 'nunit','nunitlite') {
+            $pkgDir = Join-Path $gp $pkgId
+            if (-not (Test-Path $pkgDir)) { throw "package cache missing '$pkgId' under $gp" }
+            $verDir = Get-ChildItem $pkgDir -Directory | Sort-Object Name -Descending | Select-Object -First 1
+            $libRoot = Join-Path $verDir.FullName 'lib'
+            $tfmDir = @('netstandard2.0','net6.0','net462') |
+                      ForEach-Object { Join-Path $libRoot $_ } |
+                      Where-Object { Test-Path $_ } | Select-Object -First 1
+            if (-not $tfmDir) { throw "no compatible lib TFM for '$pkgId' under $libRoot" }
+            Get-ChildItem $tfmDir -Filter '*.dll' | ForEach-Object {
+              Copy-Item $_.FullName /tmp/smoke-publish/ -Force
+              Write-Host "  copied $($_.Name) from $pkgId ($($verDir.Name))"
+            }
+          }
+          # A self-contained app resolves assemblies strictly from its deps.json TPA and
+          # does not probe the app base directory for files absent from it. The WPF Arcade
+          # SDK strips the NUnit package assemblies, and the InitialForce.WPF targets strip
+          # the patched WPF DLLs, from the generated deps.json (the WPF DLLs are still copied
+          # into the app directory by the package targets, just not registered). Register
+          # every assembly physically present in the publish directory that deps.json does
+          # not already list, so the host resolves them from the app base directory.
+          $depsPath = "/tmp/smoke-publish/InitialForce.WpfSmoke.deps.json"
+          $deps = Get-Content $depsPath -Raw | ConvertFrom-Json
+          $rt = $deps.runtimeTarget.name
+          $existing = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+          foreach ($lib in $deps.targets.$rt.PSObject.Properties) {
+            $runtime = $lib.Value.runtime
+            if ($null -ne $runtime) {
+              foreach ($r in $runtime.PSObject.Properties) { [void]$existing.Add([System.IO.Path]::GetFileName($r.Name)) }
+            }
+          }
+          $appProp = $deps.targets.$rt.PSObject.Properties |
+                     Where-Object { $_.Name -like 'InitialForce.WpfSmoke/*' } | Select-Object -First 1
+          $runtimeObj = $deps.targets.$rt.($appProp.Name).runtime
+          $added = 0
+          foreach ($f in Get-ChildItem /tmp/smoke-publish -Filter '*.dll') {
+            if (-not $existing.Contains($f.Name)) {
+              $runtimeObj | Add-Member -NotePropertyName $f.Name -NotePropertyValue ([pscustomobject]@{}) -Force
+              [void]$existing.Add($f.Name); $added++
+              Write-Host "  deps.json += $($f.Name)"
+            }
+          }
+          Write-Host "Registered $added assemblies in deps.json"
+          ($deps | ConvertTo-Json -Depth 100) | Set-Content $depsPath -Encoding utf8
+          New-Item -ItemType Directory -Force -Path /tmp/smoke-results | Out-Null
+          & "/tmp/smoke-publish/InitialForce.WpfSmoke.exe" --result:"/tmp/smoke-results/smoke.xml"
+          $runExit = $LASTEXITCODE
+          Write-Host "NUnitLite exit code: $runExit"
+          if ($runExit -ne 0) { throw "smoke run reported failures or errors (exit $runExit)" }
+        shell: pwsh
+
+      - name: Enforce non-empty smoke run (NUnit3 floor gate)
+        if: always()
+        run: |
+          $floorFile = "test/InitialForce.WpfSmoke/expected-min-tests.txt"
+          $floor = [int]((Get-Content $floorFile) |
+                   Where-Object { $_ -match '^\s*\d+' } | Select-Object -First 1)
+          $xml = Get-ChildItem /tmp/smoke-results -Recurse -Filter '*.xml' -ErrorAction SilentlyContinue |
+                 Select-Object -First 1
+          if (-not $xml) { Write-Error "No NUnit3 result XML produced — smoke harness did not run."; exit 1 }
+          [xml]$doc = Get-Content $xml.FullName
+          $run = $doc.'test-run'
+          $total = [int]$run.total
+          Write-Host "Smoke results total=$total passed=$($run.passed) failed=$($run.failed) (floor=$floor)"
+          if ($total -lt $floor) {
+            Write-Error "Smoke run reported $total tests, below the floor of $floor."
+            exit 1
+          }
+          if ([int]$run.failed -gt 0) {
+            Write-Error "Smoke run reported $($run.failed) failed tests."
+            exit 1
+          }
         shell: pwsh
 
       - name: Upload smoke results
@@ -226,7 +322,7 @@ jobs:
     name: Perf regression check against packed NuGet
     needs: build
     if: needs.build.result == 'success'
-    runs-on: windows-latest
+    runs-on: windows-2022
 
     steps:
       - uses: actions/checkout@v4
@@ -250,16 +346,41 @@ jobs:
           name: release-packages-${{ needs.build.outputs.nuget_version }}
           path: /tmp/packages/
 
-      - name: Run perf harness
+      - name: Run BenchmarkDotNet perf harness against packed nupkg
         run: |
-          $env:NUGET_VERSION = "${{ needs.build.outputs.nuget_version }}"
-          dotnet test test/InitialForce.WpfSmoke/ `
-            -c Release `
-            --filter "Category=Perf" `
-            -- NUnit.DefaultTestNamePattern="{m}"
+          $feedDir = "/tmp/local-feed"
+          New-Item -ItemType Directory -Force -Path $feedDir | Out-Null
+          Copy-Item /tmp/packages/*.nupkg $feedDir/
+
+          $ver = "${{ needs.build.outputs.nuget_version }}"
+          if (-not $ver) { throw "nuget_version output is empty — cannot resolve InitialForceWpfVersion." }
+          $proj = "test/InitialForce.WpfSmoke/Perf/InitialForce.WpfPerf.csproj"
+
+          dotnet nuget add source $feedDir --name local-packed --configfile NuGet.config
+          dotnet nuget add source https://api.nuget.org/v3/index.json --name nuget.org --configfile NuGet.config
+          dotnet restore $proj `
+            -p:InitialForceWpfVersion=$ver
+          if ($LASTEXITCODE -ne 0) { throw "restore failed" }
+
+          # Standalone BenchmarkDotNet console harness (NOT the NUnit stubs).
+          dotnet run -c Release --no-restore --project $proj `
+            -p:InitialForceWpfVersion=$ver `
+            -- --filter '*' --exporters json --artifacts /tmp/bdn-artifacts
+          if ($LASTEXITCODE -ne 0) { throw "BenchmarkDotNet run failed" }
+
+          $json = Get-ChildItem /tmp/bdn-artifacts -Recurse -Filter '*-report-full-compressed.json' -ErrorAction SilentlyContinue |
+                  Select-Object -First 1
+          if (-not $json) {
+            $json = Get-ChildItem /tmp/bdn-artifacts -Recurse -Filter '*.json' -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+          }
+          if (-not $json) { throw "No BenchmarkDotNet JSON export produced under /tmp/bdn-artifacts." }
+          New-Item -ItemType Directory -Force -Path perf | Out-Null
+          Copy-Item $json.FullName perf/current.json -Force
+          Write-Host "Wrote perf/current.json from $($json.FullName)"
         shell: pwsh
 
-      - name: Check perf regression
+      - name: Check perf regression (hard on Allocated, warn-only on time)
         run: |
           python tools/check-regression.py `
             --current perf/current.json `
@@ -267,7 +388,8 @@ jobs:
             --current-sha ${{ github.sha }} `
             --output /tmp/perf-result.json `
             --threshold-warn 5 `
-            --threshold-fail 15
+            --threshold-fail 15 `
+            --warn-only-metrics Mean
         shell: pwsh
 
       - name: Upload perf results
@@ -277,6 +399,81 @@ jobs:
           name: perf-results-${{ needs.build.outputs.nuget_version }}
           path: /tmp/perf-result.json
           retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Job 5b: regenerate-perf-baseline — operator-driven refresh of the checked-in
+  # perf/baseline.json from this build's package. Runs only when dispatched with
+  # regenerate_perf_baseline=true. The refreshed baseline is uploaded as an
+  # artifact (perf-baseline-<version>) for a human to review and commit; CI does
+  # not push to the repo. The seeded perf/baseline.json is a hand-authored
+  # placeholder until this job replaces it with real measurements.
+  # ---------------------------------------------------------------------------
+  regenerate-perf-baseline:
+    name: Regenerate perf baseline (manual)
+    needs: build
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.regenerate_perf_baseline &&
+      needs.build.result == 'success'
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Download packed NuGet artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-packages-${{ needs.build.outputs.nuget_version }}
+          path: /tmp/packages/
+
+      - name: Run BenchmarkDotNet and capture baseline
+        run: |
+          $feedDir = "/tmp/local-feed"
+          New-Item -ItemType Directory -Force -Path $feedDir | Out-Null
+          Copy-Item /tmp/packages/*.nupkg $feedDir/
+
+          $ver = "${{ needs.build.outputs.nuget_version }}"
+          if (-not $ver) { throw "nuget_version output is empty." }
+          $proj = "test/InitialForce.WpfSmoke/Perf/InitialForce.WpfPerf.csproj"
+
+          dotnet nuget add source $feedDir --name local-packed --configfile NuGet.config
+          dotnet nuget add source https://api.nuget.org/v3/index.json --name nuget.org --configfile NuGet.config
+          dotnet restore $proj `
+            -p:InitialForceWpfVersion=$ver
+          if ($LASTEXITCODE -ne 0) { throw "restore failed" }
+
+          dotnet run -c Release --no-restore --project $proj `
+            -p:InitialForceWpfVersion=$ver `
+            -- --filter '*' --exporters json --artifacts /tmp/bdn-artifacts
+          if ($LASTEXITCODE -ne 0) { throw "BenchmarkDotNet run failed" }
+
+          $json = Get-ChildItem /tmp/bdn-artifacts -Recurse -Filter '*-report-full-compressed.json' -ErrorAction SilentlyContinue |
+                  Select-Object -First 1
+          if (-not $json) {
+            $json = Get-ChildItem /tmp/bdn-artifacts -Recurse -Filter '*.json' -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+          }
+          if (-not $json) { throw "No BenchmarkDotNet JSON export produced." }
+          New-Item -ItemType Directory -Force -Path perf | Out-Null
+          Copy-Item $json.FullName perf/baseline.json -Force
+          Write-Host "Regenerated perf/baseline.json from $($json.FullName)"
+          Write-Host "Review and commit this file to update the checked-in baseline."
+        shell: pwsh
+
+      - name: Upload regenerated baseline
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-baseline-${{ needs.build.outputs.nuget_version }}
+          path: perf/baseline.json
+          retention-days: 30
 
   # ---------------------------------------------------------------------------
   # Job 6: release-notes — run Claude to draft GitHub Release notes from ledger

@@ -913,6 +913,9 @@ namespace System.Windows.Media
         
         #region Fields
 
+        /// <summary>Whether this context has been closed or disposed.</summary>
+        protected bool IsDisposed => _disposed;
+
         private bool _disposed;
         private int _currChunkOffset;
         private FrugalStructList<byte []> _chunkList;

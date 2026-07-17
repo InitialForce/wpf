@@ -1,0 +1,55 @@
+{
+  "_todo": "SEED BASELINE — NOT MEASURED ON REAL HARDWARE. These numbers are hand-authored placeholders so tools/check-regression.py has a valid schema to gate against. Regenerate on windows-latest from the last-good package via the release.yml 'regenerate-perf-baseline' job (workflow_dispatch with regenerate_perf_baseline=true), then commit the produced perf/baseline.json. The Allocated (BytesAllocatedPerOperation) numbers are the hard gate; Mean is warn-only.",
+  "Title": "BenchmarkRun_InitialForce_WPF_Baseline_Seed",
+  "HostEnvironmentInfo": {
+    "BenchmarkDotNetVersion": "0.14.0",
+    "OsVersion": "Windows",
+    "ProcessorName": "seed-placeholder",
+    "RuntimeVersion": ".NET 10.0",
+    "Architecture": "X64"
+  },
+  "Benchmarks": [
+    {
+      "FullName": "InitialForce.WpfSmoke.GeometryParserBench.ReadNumberBench",
+      "Namespace": "InitialForce.WpfSmoke",
+      "Type": "GeometryParserBench",
+      "Method": "ReadNumberBench",
+      "Parameters": "",
+      "Statistics": {
+        "N": 10,
+        "Mean": 45500.0,
+        "Median": 45500.0,
+        "StandardError": 115.0,
+        "StandardDeviation": 363.8
+      },
+      "Memory": {
+        "Gen0Collections": 0,
+        "Gen1Collections": 0,
+        "Gen2Collections": 0,
+        "TotalOperations": 10000,
+        "BytesAllocatedPerOperation": 0
+      }
+    },
+    {
+      "FullName": "InitialForce.WpfSmoke.ImageLoadingBench.JpegDecode100",
+      "Namespace": "InitialForce.WpfSmoke",
+      "Type": "ImageLoadingBench",
+      "Method": "JpegDecode100",
+      "Parameters": "",
+      "Statistics": {
+        "N": 10,
+        "Mean": 4250000.0,
+        "Median": 4250000.0,
+        "StandardError": 14000.0,
+        "StandardDeviation": 44272.0
+      },
+      "Memory": {
+        "Gen0Collections": 2,
+        "Gen1Collections": 0,
+        "Gen2Collections": 0,
+        "TotalOperations": 100,
+        "BytesAllocatedPerOperation": 8192
+      }
+    }
+  ]
+}

@@ -82,7 +82,7 @@ public class PixelDiffTests : SmokeBase
 
     private static System.Windows.Media.Imaging.BitmapSource RenderXamlSceneA()
     {
-        System.Windows.Interop.RenderOptions.ProcessRenderMode =
+        System.Windows.Media.RenderOptions.ProcessRenderMode =
             System.Windows.Interop.RenderMode.SoftwareOnly;
 
         var xaml = """
@@ -101,7 +101,7 @@ public class PixelDiffTests : SmokeBase
 
     private static System.Windows.Media.Imaging.BitmapSource RenderDataGrid5Rows()
     {
-        System.Windows.Interop.RenderOptions.ProcessRenderMode =
+        System.Windows.Media.RenderOptions.ProcessRenderMode =
             System.Windows.Interop.RenderMode.SoftwareOnly;
 
         var xaml = """
@@ -120,7 +120,7 @@ public class PixelDiffTests : SmokeBase
 
     private static System.Windows.Media.Imaging.BitmapSource RenderFlowDocument()
     {
-        System.Windows.Interop.RenderOptions.ProcessRenderMode =
+        System.Windows.Media.RenderOptions.ProcessRenderMode =
             System.Windows.Interop.RenderMode.SoftwareOnly;
 
         var viewer = new System.Windows.Controls.FlowDocumentScrollViewer
@@ -137,7 +137,7 @@ public class PixelDiffTests : SmokeBase
 
     private static System.Windows.Media.Imaging.BitmapSource RenderRtlText()
     {
-        System.Windows.Interop.RenderOptions.ProcessRenderMode =
+        System.Windows.Media.RenderOptions.ProcessRenderMode =
             System.Windows.Interop.RenderMode.SoftwareOnly;
 
         var xaml = """

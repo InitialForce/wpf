@@ -7806,8 +7806,12 @@ namespace System.Windows
                     {
                         w._Style = Style;
                         w._StyleEx = StyleEx;
-                        m.Dirty = false;
                     }
+                    // Activation always begins clean on both branches. A parked
+                    // instance may carry Dirty from a prior cycle whose final
+                    // Flush was skipped (Handle was IntPtr.Zero), so the reset
+                    // cannot be conditional on the source-window branch.
+                    m.Dirty = false;
                     m._refCount = 1;
                     return m;
                 }

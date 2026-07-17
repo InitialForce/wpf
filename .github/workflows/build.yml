@@ -142,13 +142,14 @@ jobs:
   # ---------------------------------------------------------------------------
   build-wpf:
     name: Build WPF (${{ matrix.arch }})
-    runs-on: windows-latest
+    runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
         arch: [x64, arm64]
 
-    # arm64 cross-compile runs on windows-latest x64 runner; runs-on already pins to Windows.
+    # arm64 cross-compile runs on the windows-2022 x64 runner (VS2022 / v143
+    # platform toolset, which the native WpfGfx vcxproj files require).
 
     steps:
       - uses: actions/checkout@v4
@@ -169,7 +170,7 @@ jobs:
           global-json-file: global.json
 
       - name: Install Strawberry Perl (idempotent)
-        # windows-latest pre-installs strawberryperl (currently v5.42+).
+        # windows-2022 pre-installs strawberryperl (currently v5.42+).
         # Skip choco install if perl is already on PATH; otherwise install.
         run: |
           if (Get-Command perl -ErrorAction SilentlyContinue) {
@@ -370,23 +371,27 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
-  # smoke: 22-scenario smoke harness (needs build-wpf)
+  # smoke: real smoke harness run against the packed nupkg.
+  #
+  # x64 only: the pack steps in build-wpf run under `if: matrix.arch == 'x64'`
+  # (only build-x64 carries a nupkg), and the smoke project is pinned to the
+  # win-x64 RID, so there is no arm64 package to consume.
   # ---------------------------------------------------------------------------
   smoke:
     name: Smoke (${{ matrix.arch }})
-    runs-on: windows-latest
+    runs-on: windows-2022
     needs: build-wpf
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, arm64]
+        arch: [x64]
 
     steps:
       - uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download build artifacts
+      - name: Download build artifacts (packed nupkg)
         uses: actions/download-artifact@v4
         with:
           name: build-${{ matrix.arch }}
@@ -397,18 +402,139 @@ jobs:
         with:
           global-json-file: global.json
 
-      # Placeholder: run 22-scenario smoke harness.
-      # TODO (wired by smoke-harness beads): replace with real test invocation.
-      - name: Run smoke harness (placeholder)
+      - name: Resolve packed InitialForce.WPF version
+        id: pkgver
         run: |
-          echo "Smoke harness placeholder — test/InitialForce.WpfSmoke/ wired by other beads."
-          echo "Expected command:"
-          echo "  dotnet test test/InitialForce.WpfSmoke/ -c Release --logger trx --results-directory smoke-results/"
-          mkdir -p smoke-results
-          echo '<?xml version="1.0" encoding="UTF-8"?><TestRun id="placeholder"><Results/></TestRun>' > smoke-results/smoke-placeholder.xml
-        shell: bash
+          $pkg = Get-ChildItem artifacts/packages -Recurse -Filter 'InitialForce.WPF.*.nupkg' |
+                 Where-Object { $_.Name -match '^InitialForce\.WPF\.\d' } |
+                 Select-Object -First 1
+          if (-not $pkg) {
+            Write-Error "No InitialForce.WPF.<version>.nupkg under artifacts/packages — build-wpf did not pack."
+            Get-ChildItem artifacts/packages -Recurse | Format-Table FullName
+            exit 1
+          }
+          $ver = $pkg.Name -replace '^InitialForce\.WPF\.', '' -replace '\.nupkg$', ''
+          "version=$ver" | Out-File -Append $env:GITHUB_OUTPUT
+          Write-Host "Resolved InitialForce.WPF version: $ver (from $($pkg.Name))"
+        shell: pwsh
+
+      - name: Run smoke harness against packed nupkg
+        run: |
+          $ver = "${{ steps.pkgver.outputs.version }}"
+          $pkg = Get-ChildItem artifacts/packages -Recurse -Filter 'InitialForce.WPF.*.nupkg' |
+                 Where-Object { $_.Name -match '^InitialForce\.WPF\.\d' } |
+                 Select-Object -First 1
+          $feed = $pkg.DirectoryName
+          Write-Host "Local packed feed: $feed"
+          # Add the local packed feed and nuget.org onto the repo NuGet.config, which
+          # already carries the pinned dnceng feeds the net10 private/servicing
+          # transitive deps need. Using `dotnet nuget add source` (not stacked
+          # `--source` flags) keeps the feed URL from being path-normalized into a
+          # bogus local path (NU1301).
+          dotnet nuget add source $feed --name local-packed --configfile NuGet.config
+          dotnet nuget add source https://api.nuget.org/v3/index.json --name nuget.org --configfile NuGet.config
+          dotnet restore test/InitialForce.WpfSmoke/InitialForce.WpfSmoke.csproj `
+            -p:InitialForceWpfVersion=$ver
+          if ($LASTEXITCODE -ne 0) { throw "restore failed" }
+          # Publish self-contained win-x64 (the csproj pins the RID + SelfContained),
+          # which lays down a full runtime AND the patched WPF DLLs while stripping the
+          # stock ones — the exact production consumption path, so the patched WPF loads
+          # unambiguously. `dotnet test` cannot run a self-contained testhost from build
+          # output (hostpolicy.dll is not laid down there), so run the NUnitLite console
+          # entry point directly; it emits NUnit3 result XML.
+          dotnet publish test/InitialForce.WpfSmoke/InitialForce.WpfSmoke.csproj `
+            -c Release --no-restore `
+            -p:InitialForceWpfVersion=$ver `
+            -o smoke-publish/
+          if ($LASTEXITCODE -ne 0) { throw "publish failed" }
+          # The WPF Arcade SDK strips NuGet package assemblies from test-project output,
+          # so the NUnit assemblies are absent from the self-contained publish. Copy them
+          # from the restored package cache into the app directory; the self-contained host
+          # probes the application base directory, so they load without a deps.json entry.
+          $gp = ((dotnet nuget locals global-packages --list) -replace '^[^:]*:\s*','').Trim()
+          Write-Host "NuGet global packages: $gp"
+          foreach ($pkgId in 'nunit','nunitlite') {
+            $pkgDir = Join-Path $gp $pkgId
+            if (-not (Test-Path $pkgDir)) { throw "package cache missing '$pkgId' under $gp" }
+            $verDir = Get-ChildItem $pkgDir -Directory | Sort-Object Name -Descending | Select-Object -First 1
+            $libRoot = Join-Path $verDir.FullName 'lib'
+            $tfmDir = @('netstandard2.0','net6.0','net462') |
+                      ForEach-Object { Join-Path $libRoot $_ } |
+                      Where-Object { Test-Path $_ } | Select-Object -First 1
+            if (-not $tfmDir) { throw "no compatible lib TFM for '$pkgId' under $libRoot" }
+            Get-ChildItem $tfmDir -Filter '*.dll' | ForEach-Object {
+              Copy-Item $_.FullName smoke-publish/ -Force
+              Write-Host "  copied $($_.Name) from $pkgId ($($verDir.Name))"
+            }
+          }
+          Write-Host "Publish output nunit assemblies:"
+          Get-ChildItem smoke-publish -Filter 'nunit*' -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "  $($_.Name)" }
+          # A self-contained app resolves assemblies strictly from its deps.json TPA and
+          # does not probe the app base directory for files absent from it. The WPF Arcade
+          # SDK strips the NUnit package assemblies, and the InitialForce.WPF targets strip
+          # the patched WPF DLLs, from the generated deps.json (the WPF DLLs are still copied
+          # into the app directory by the package targets, just not registered). Register
+          # every assembly physically present in the publish directory that deps.json does
+          # not already list, so the host resolves them from the app base directory.
+          $depsPath = "smoke-publish/InitialForce.WpfSmoke.deps.json"
+          $deps = Get-Content $depsPath -Raw | ConvertFrom-Json
+          $rt = $deps.runtimeTarget.name
+          $existing = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+          foreach ($lib in $deps.targets.$rt.PSObject.Properties) {
+            $runtime = $lib.Value.runtime
+            if ($null -ne $runtime) {
+              foreach ($r in $runtime.PSObject.Properties) { [void]$existing.Add([System.IO.Path]::GetFileName($r.Name)) }
+            }
+          }
+          $appProp = $deps.targets.$rt.PSObject.Properties |
+                     Where-Object { $_.Name -like 'InitialForce.WpfSmoke/*' } | Select-Object -First 1
+          $runtimeObj = $deps.targets.$rt.($appProp.Name).runtime
+          $added = 0
+          foreach ($f in Get-ChildItem smoke-publish -Filter '*.dll') {
+            if (-not $existing.Contains($f.Name)) {
+              $runtimeObj | Add-Member -NotePropertyName $f.Name -NotePropertyValue ([pscustomobject]@{}) -Force
+              [void]$existing.Add($f.Name); $added++
+              Write-Host "  deps.json += $($f.Name)"
+            }
+          }
+          Write-Host "Registered $added assemblies in deps.json"
+          ($deps | ConvertTo-Json -Depth 100) | Set-Content $depsPath -Encoding utf8
+          New-Item -ItemType Directory -Force -Path smoke-results | Out-Null
+          & "smoke-publish/InitialForce.WpfSmoke.exe" --result:"smoke-results/smoke.xml"
+          $runExit = $LASTEXITCODE
+          Write-Host "NUnitLite exit code: $runExit"
+          if ($runExit -ne 0) { throw "smoke run reported failures or errors (exit $runExit)" }
+        shell: pwsh
+
+      - name: Enforce non-empty smoke run (NUnit3 floor gate)
+        if: always()
+        run: |
+          $floorFile = "test/InitialForce.WpfSmoke/expected-min-tests.txt"
+          $floor = [int]((Get-Content $floorFile) |
+                   Where-Object { $_ -match '^\s*\d+' } | Select-Object -First 1)
+          $xml = Get-ChildItem smoke-results -Recurse -Filter '*.xml' -ErrorAction SilentlyContinue |
+                 Select-Object -First 1
+          if (-not $xml) {
+            Write-Error "No NUnit3 result XML produced — the smoke harness did not run (the fabricated-empty-results failure mode). Failing hard."
+            exit 1
+          }
+          [xml]$doc = Get-Content $xml.FullName
+          $run = $doc.'test-run'
+          $total = [int]$run.total
+          Write-Host "Smoke results: total=$total passed=$($run.passed) failed=$($run.failed) (floor=$floor)"
+          if ($total -lt $floor) {
+            Write-Error "Smoke run reported $total tests, below the floor of $floor. Refusing to pass a hollow smoke run."
+            exit 1
+          }
+          if ([int]$run.failed -gt 0) {
+            Write-Error "Smoke run reported $($run.failed) failed tests."
+            exit 1
+          }
+        shell: pwsh
 
       - name: Upload smoke results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: smoke-${{ matrix.arch }}.xml
@@ -416,11 +542,40 @@ jobs:
           retention-days: 14
 
   # ---------------------------------------------------------------------------
+  # anti-stub-lint: ratchet-DOWN gate on placeholder Assert.That(true) stubs.
+  # Source-level grep; runs independently of the Windows build.
+  # ---------------------------------------------------------------------------
+  anti-stub-lint:
+    name: Anti-stub lint (smoke bodies)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fail if placeholder stubs exceed the allowlist
+        run: |
+          set -euo pipefail
+          # RATCHET-DOWN ceiling: the count of `Assert.That(true...` placeholder
+          # stubs in the smoke bodies must never exceed MAX_STUBS. Lower it as
+          # scenarios are un-stubbed; never raise it. Remaining stubs today are
+          # FrugalList (2 — internal FrugalList<T> needs a test-friend adapter)
+          # and PixelDiff (4 — needs golden PNGs committed on Windows).
+          MAX_STUBS=6
+          count=$(grep -rn --include='*.cs' 'Assert.That(true' test/InitialForce.WpfSmoke/Smoke/ | wc -l | tr -d ' ')
+          echo "Placeholder stubs found: $count (ceiling: $MAX_STUBS)"
+          grep -rn --include='*.cs' 'Assert.That(true' test/InitialForce.WpfSmoke/Smoke/ || true
+          if [ "$count" -gt "$MAX_STUBS" ]; then
+            echo "::error::$count Assert.That(true) stubs exceed the ceiling of $MAX_STUBS. Un-stub the scenario (move the body out of the /* Full implementation */ block) or lower MAX_STUBS deliberately."
+            exit 1
+          fi
+        shell: bash
+
+  # ---------------------------------------------------------------------------
   # perf: BenchmarkDotNet perf gate (needs build-wpf)
   # ---------------------------------------------------------------------------
   perf:
     name: Perf (${{ matrix.arch }})
-    runs-on: windows-latest
+    runs-on: windows-2022
     needs: build-wpf
     strategy:
       fail-fast: false
@@ -467,7 +622,7 @@ jobs:
   aggregate:
     name: Aggregate results
     runs-on: ubuntu-latest
-    needs: [lint-tools, lint-yaml, smoke, perf]
+    needs: [lint-tools, lint-yaml, anti-stub-lint, smoke, perf]
     if: always()
 
     steps:
@@ -520,16 +675,18 @@ jobs:
         run: |
           LINT_TOOLS="${{ needs.lint-tools.result }}"
           LINT_YAML="${{ needs.lint-yaml.result }}"
+          ANTI_STUB="${{ needs.anti-stub-lint.result }}"
           SMOKE="${{ needs.smoke.result }}"
           PERF="${{ needs.perf.result }}"
 
-          echo "lint-tools: $LINT_TOOLS"
-          echo "lint-yaml:  $LINT_YAML"
-          echo "smoke:      $SMOKE"
-          echo "perf:       $PERF"
+          echo "lint-tools:     $LINT_TOOLS"
+          echo "lint-yaml:      $LINT_YAML"
+          echo "anti-stub-lint: $ANTI_STUB"
+          echo "smoke:          $SMOKE"
+          echo "perf:           $PERF"
 
           FAILED=0
-          for result in "$LINT_TOOLS" "$LINT_YAML" "$SMOKE" "$PERF"; do
+          for result in "$LINT_TOOLS" "$LINT_YAML" "$ANTI_STUB" "$SMOKE" "$PERF"; do
             if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
               FAILED=1
             fi

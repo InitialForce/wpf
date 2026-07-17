@@ -1,66 +1,72 @@
 using NUnit.Framework;
 using System;
-using System.Collections.Generic;
+using System.Collections;
 using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
+using System.Reflection;
 
 namespace InitialForce.WpfSmoke;
 
 /// <summary>
-/// SMOKE-007: WeakReferenceListEnumerator is not boxed during enumeration.
+/// SMOKE-007: WeakReferenceListEnumerator is a struct enumerator, so iterating a
+/// WeakReferenceList does not box.
 /// Regression test for PR #6502 (stop boxing WeakReferenceListEnumerator in PresentationSource).
 /// </summary>
 [TestFixture]
 public class WeakReferenceListTests : SmokeBase
 {
     /// <summary>
-    /// SMOKE-007: Verifies that enumerating PresentationSource.CurrentSources
-    /// (which uses a WeakReferenceList internally) does not allocate any heap
-    /// memory over 10,000 iterations — i.e. the enumerator struct is not boxed.
-    /// Regression test for PR #6502.
+    /// SMOKE-007: Regression guard for PR #6502.
+    ///
+    /// The fix makes <c>MS.Internal.WeakReferenceList&lt;T&gt;</c> expose a public,
+    /// strongly-typed <c>GetEnumerator()</c> that returns a value-type
+    /// (<c>WeakReferenceListEnumerator&lt;T&gt;</c>) enumerator. A <c>foreach</c> over the
+    /// concrete list type then binds to that struct enumerator and allocates nothing —
+    /// no boxed <c>IEnumerator</c> per enumeration.
+    ///
+    /// This is verified structurally rather than by measuring
+    /// <c>PresentationSource.CurrentSources</c>: that public property is typed
+    /// <c>IEnumerable</c>, so <c>foreach</c> over it goes through
+    /// <c>IEnumerable.GetEnumerator()</c> and boxes the struct on every pass regardless
+    /// of warmup — the internal non-boxing path the fix optimizes is not observable
+    /// through it. Asserting that <c>GetEnumerator()</c> returns a value type catches a
+    /// revert to a boxed (class / interface-returning) enumerator deterministically.
     /// </summary>
     [Test]
     public void EnumeratorNotBoxed()
     {
-        // TODO(SMOKE-007): stub — deferred to Windows CI where WPF STA window
-        // creation is possible and PresentationSource.CurrentSources is available.
-        Assert.That(true, Is.True, "SMOKE-007 stub — deferred to Windows CI.");
-
-        /* Full implementation (from exec-docs/40 §3.3):
-        var windows = new List<System.Windows.Window>();
-        var tcs = new TaskCompletionSource<long>();
-        var staThread = new Thread(() =>
+        // WeakReferenceList<T> is shared source compiled into WindowsBase (and consumed by
+        // PresentationCore via InternalsVisibleTo). Resolve it from whichever WPF assembly
+        // defines it rather than assuming a single one.
+        var candidateAssemblies = new[]
         {
-            try
-            {
-                for (int i = 0; i < 10; i++)
-                {
-                    var w = new System.Windows.Window();
-                    w.Show();
-                    windows.Add(w);
-                }
-                // Warm up.
-                foreach (var _ in System.Windows.PresentationSource.CurrentSources) { }
+            typeof(System.Windows.DependencyObject).Assembly,  // WindowsBase
+            typeof(System.Windows.Media.Visual).Assembly,      // PresentationCore
+            typeof(System.Windows.Window).Assembly,            // PresentationFramework
+        };
 
-                // Measure.
-                long before = GC.GetAllocatedBytesForCurrentThread();
-                for (int iter = 0; iter < 10_000; iter++)
-                    foreach (var _ in System.Windows.PresentationSource.CurrentSources) { }
-                long after = GC.GetAllocatedBytesForCurrentThread();
+        Type? weakRefListOpen = candidateAssemblies
+            .Select(a => a.GetType("MS.Internal.WeakReferenceList`1"))
+            .FirstOrDefault(t => t is not null);
 
-                foreach (var w in windows) w.Close();
-                tcs.SetResult(after - before);
-            }
-            catch (Exception ex) { tcs.SetException(ex); }
-        });
-        staThread.SetApartmentState(ApartmentState.STA);
-        staThread.Start();
-        long allocated = tcs.Task.GetAwaiter().GetResult();
+        Assert.That(weakRefListOpen, Is.Not.Null,
+            "MS.Internal.WeakReferenceList<T> must exist in a patched WPF assembly.");
 
-        Assert.That(allocated, Is.EqualTo(0),
-            $"Enumerator boxed: {allocated} bytes allocated over 10k enumerations. " +
-            "Possible regression of PR #6502.");
-        */
+        // The public, strongly-typed GetEnumerator() — not the explicit
+        // IEnumerable[<T>].GetEnumerator() interface implementations, which are private.
+        MethodInfo? getEnumerator = weakRefListOpen!.GetMethod(
+            "GetEnumerator", BindingFlags.Public | BindingFlags.Instance, Type.EmptyTypes);
+
+        Assert.That(getEnumerator, Is.Not.Null,
+            "WeakReferenceList<T> must expose a public parameterless GetEnumerator().");
+
+        Type enumeratorType = getEnumerator!.ReturnType;
+        Assert.That(enumeratorType.IsValueType, Is.True,
+            $"WeakReferenceList<T>.GetEnumerator() must return a value type (struct) so " +
+            $"foreach does not box the enumerator; returned '{enumeratorType.Name}' " +
+            "(reference type). Possible regression of PR #6502.");
+
+        Assert.That(typeof(IEnumerator).IsAssignableFrom(enumeratorType), Is.True,
+            $"The struct enumerator '{enumeratorType.Name}' must implement IEnumerator so it " +
+            "is usable in a non-boxing foreach.");
     }
 }

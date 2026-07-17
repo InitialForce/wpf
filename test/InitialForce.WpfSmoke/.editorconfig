@@ -1,0 +1,15 @@
+# Local overrides for the InitialForce.WpfSmoke test harness.
+#
+# This project sits under the repo root, so it inherits the repo-root
+# .editorconfig, which encodes dotnet/wpf runtime-source conventions (mandatory
+# s_ prefixes on static fields, no System.Random) at error severity. Those rules
+# are appropriate for the shipping WPF assemblies, not for a small test harness
+# that legitimately uses Random for path fuzzing and plain static test fields.
+# Relax them here so runtime-source style does not gate the smoke build.
+[*.cs]
+
+# IDE1006: naming-style violations (e.g. static fields without an s_ prefix).
+dotnet_diagnostic.IDE1006.severity = none
+
+# CA5394: System.Random is fine for non-cryptographic test data generation.
+dotnet_diagnostic.CA5394.severity = none

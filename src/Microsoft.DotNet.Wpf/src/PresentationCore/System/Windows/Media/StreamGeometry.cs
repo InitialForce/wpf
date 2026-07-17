@@ -35,6 +35,24 @@ namespace System.Windows.Media
         {
             WritePreamble();
 
+            // Public callers may retain the returned context and Dispose it
+            // again later; IDisposable requires that to be a no-op. A fresh,
+            // never-pooled instance guarantees a stale reference only ever sees
+            // its own dead context, never a pooled instance a later Open() has
+            // revived.
+            return new StreamGeometryCallbackContext(this);
+        }
+
+        /// <summary>
+        /// Opens the StreamGeometry for population using the [ThreadStatic]
+        /// pooled callback context. Reserved for internal call sites whose
+        /// context lifetime is strictly scoped (using/finally in the same frame,
+        /// reference never retained) — e.g. the Geometry.Parse path.
+        /// </summary>
+        internal StreamGeometryContext OpenPooled()
+        {
+            WritePreamble();
+
             return StreamGeometryCallbackContext.Acquire(this);
         }
 
@@ -559,7 +577,7 @@ namespace System.Windows.Media
             StreamGeometryCallbackContext ctx = _pooled;
             if (ctx is null)
             {
-                return new StreamGeometryCallbackContext(owner);
+                return new StreamGeometryCallbackContext(owner, poolable: true);
             }
 
             _pooled = null;
@@ -572,8 +590,14 @@ namespace System.Windows.Media
         /// Creates a geometry stream context which is associated with a given owner
         /// </summary>
         internal StreamGeometryCallbackContext(StreamGeometry owner)
+            : this(owner, poolable: false)
+        {
+        }
+
+        private StreamGeometryCallbackContext(StreamGeometry owner, bool poolable)
         {
             _owner = owner;
+            _poolable = poolable;
         }
 
         /// <summary>
@@ -587,7 +611,27 @@ namespace System.Windows.Media
 
         internal override void DisposeCore()
         {
+            // Repeated Dispose on an already-closed context is a no-op, as it
+            // is for a fresh (unpooled) instance where only the _disposed-guarded
+            // base body could run. This guard covers only the parked window: a
+            // later Acquire runs ResetForReuse which clears _disposed, so it does
+            // NOT protect a revived instance. Safety across the revived window
+            // rests on confining OpenPooled to strictly-scoped internal call sites
+            // that never retain the context reference past their using scope.
+            if (IsDisposed)
+            {
+                return;
+            }
+
             base.DisposeCore();
+
+            // Only pool-eligible instances (created via Acquire for the internal
+            // strictly-scoped call sites) return to the pool; instances handed to
+            // public Open() callers die with their owner scope.
+            if (!_poolable)
+            {
+                return;
+            }
 
             // After base.DisposeCore, _chunkList[0] points at the FINAL byte[]
             // now owned by the StreamGeometry. Drop that reference and the
@@ -607,6 +651,7 @@ namespace System.Windows.Media
         }
 
         private StreamGeometry _owner;
+        private readonly bool _poolable;
     }
     #endregion StreamGeometryCallbackContext
 }
