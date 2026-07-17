@@ -2023,36 +2023,33 @@ namespace System.Windows
         /// </param>
         internal void InputHitTest(Point pt, out IInputElement enabledHit, out IInputElement rawHit, out HitTestResult rawHitResult)
         {
-            // Acquire pooled hit-test infrastructure ([ThreadStatic] single-slot
-            // pool keyed by the UI thread). The result instance and its bound
-            // HitTestResultCallback are paired in the pool — the callback's
-            // delegate target IS the result instance, so reuse keeps them
-            // consistent. The filter callback is stateless (no `this` capture
-            // in its body) and is cached in a static delegate field. The
-            // PointHitTestParameters wrapper is mutated via SetHitPoint on
-            // each acquire. Combined, this eliminates 4 heap allocations per
-            // InputHitTest call (PointHitTestParameters, InputHitTestResult,
-            // and two delegates).
-            PointHitTestParameters hitTestParameters = _pooledHitTestParameters;
-            if (hitTestParameters is null)
-            {
-                hitTestParameters = new PointHitTestParameters(pt);
-                _pooledHitTestParameters = hitTestParameters;
-            }
-            else
-            {
-                hitTestParameters.SetHitPoint(pt);
-            }
+            // Allocate the PointHitTestParameters fresh per call. It is handed to
+            // every visual's overridable HitTestCore during the walk, so pooling it
+            // would let a user override that retains the reference observe a later
+            // call's SetHitPoint mutation, and would let a re-entrant walk clobber
+            // the outer walk's hit point. Stock WPF allocates fresh here. Only the
+            // InputHitTestResult and its callback pair — internal machinery that
+            // never escapes to user code — stay pooled ([ThreadStatic] single slot,
+            // emptied during use so a re-entrant InputHitTest allocates its own).
+            PointHitTestParameters hitTestParameters = new PointHitTestParameters(pt);
 
             InputHitTestResult result = InputHitTestResult.Acquire(out HitTestResultCallback resultCallback);
-            VisualTreeHelper.HitTest(this,
-                                     s_inputHitTestFilterCallback,
-                                     resultCallback,
-                                     hitTestParameters);
+            DependencyObject candidate;
+            HitTestResult capturedHitTestResult;
+            try
+            {
+                VisualTreeHelper.HitTest(this,
+                                         s_inputHitTestFilterCallback,
+                                         resultCallback,
+                                         hitTestParameters);
 
-            DependencyObject candidate = result.Result;
-            HitTestResult capturedHitTestResult = result.HitTestResult;
-            result.Release(resultCallback);
+                candidate = result.Result;
+                capturedHitTestResult = result.HitTestResult;
+            }
+            finally
+            {
+                result.Release(resultCallback);
+            }
 
             rawHit = candidate as IInputElement;
             rawHitResult = capturedHitTestResult;
@@ -2131,14 +2128,6 @@ namespace System.Windows
         // state — so a single delegate suffices. Allocated once at class init.
         private static readonly HitTestFilterCallback s_inputHitTestFilterCallback
             = new HitTestFilterCallback(InputHitTestFilterCallback);
-
-        // Per-thread reusable PointHitTestParameters wrapper. SetHitPoint
-        // mutates the inner Point before each VisualTreeHelper.HitTest call,
-        // letting all InputHitTest invocations on this thread share one
-        // wrapper object. The UI thread does ~all hit-testing, so a
-        // [ThreadStatic] single-slot pool is sufficient.
-        [ThreadStatic]
-        private static PointHitTestParameters _pooledHitTestParameters;
 
         private static HitTestFilterBehavior InputHitTestFilterCallback(DependencyObject currentNode)
         {
