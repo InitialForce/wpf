@@ -28,45 +28,6 @@ namespace System.Windows.Threading
             int numArgs,
             DispatcherOperationTaskSource taskSource,
             bool useAsyncSemantics)
-            : this(dispatcher, method, priority, args, numArgs, taskSource, useAsyncSemantics, skipTaskAsyncStateMapping: false)
-        {
-        }
-
-        // Inner ctor — the `skipTaskAsyncStateMapping` switch lets the synchronous
-        // Dispatcher.Invoke(Action,...) slow path opt out of the per-op
-        // `new DispatcherOperationTaskMapping(this)` allocation (~24 B/op) that
-        // every DispatcherOperation otherwise pays inside `_taskSource.Initialize(this)`.
-        //
-        // The Mapping object exists solely as the Task.AsyncState discriminator for
-        // the public TaskExtensions API (`IsDispatcherOperationTask` / `DispatcherOperationWait`)
-        // — see DispatcherOperationTaskMapping.cs and System.Windows.Presentation/TaskExtensions.cs.
-        // On the sync void-Invoke slow path the caller is `Dispatcher.Invoke(Action,...)`,
-        // which returns `void`: the DispatcherOperation is constructed locally inside
-        // Invoke, waited on via op.Wait (which routes through the per-op Task /
-        // DispatcherOperationEvent), and goes out of scope when Invoke returns. The
-        // op + its Task are never exposed to user code, so Task.AsyncState is
-        // unobservable on that path — meaning the Mapping is pure waste.
-        //
-        // When skipTaskAsyncStateMapping is true the TaskSource creates a default
-        // `new TaskCompletionSource<TResult>()` with null state, so Task.AsyncState
-        // is null. Internal callers (DispatcherOperation.Wait's
-        // `Task.GetAwaiter().GetResult()`, InvokeCompletions' SetResult/SetException/
-        // SetCanceled) don't read AsyncState, so they are unaffected.
-        //
-        // Default false preserves the existing allocation behavior for every
-        // DispatcherOperation construction that exposes the op (BeginInvoke /
-        // InvokeAsync / LegacyBeginInvokeImpl / params-object[] BeginInvoke /
-        // the typed DispatcherOperation<TResult> ctor used by both Invoke<TResult>
-        // and InvokeAsync<TResult>).
-        internal DispatcherOperation(
-            Dispatcher dispatcher,
-            Delegate method,
-            DispatcherPriority priority,
-            object args,
-            int numArgs,
-            DispatcherOperationTaskSource taskSource,
-            bool useAsyncSemantics,
-            bool skipTaskAsyncStateMapping)
         {
             _dispatcher = dispatcher;
             _method = method;
@@ -77,10 +38,7 @@ namespace System.Windows.Threading
             _executionContext = CulturePreservingExecutionContext.Capture();
 
             _taskSource = taskSource;
-            if (skipTaskAsyncStateMapping)
-                _taskSource.InitializeWithoutMapping(this);
-            else
-                _taskSource.Initialize(this);
+            _taskSource.Initialize(this);
 
             _useAsyncSemantics = useAsyncSemantics;
         }
@@ -112,29 +70,6 @@ namespace System.Windows.Threading
                 0,
                 new DispatcherOperationTaskSource<object>(),
                 true)
-        {
-        }
-
-        // Internal-sync ctor used by Dispatcher.Invoke(Action,...) slow path.
-        // The op is constructed locally inside Invoke, waited on, and goes out of
-        // scope when Invoke returns — it is never exposed to user code. Skipping
-        // the per-op DispatcherOperationTaskMapping allocation that the Initialize
-        // path would otherwise create saves ~24 B/op on every cross-thread or
-        // non-Send-priority synchronous Dispatcher.Invoke(Action,...) call.
-        // See the inner ctor's comment for the safety argument.
-        internal DispatcherOperation(
-            Dispatcher dispatcher,
-            DispatcherPriority priority,
-            Action action,
-            bool internalSyncInvoke) : this(
-                dispatcher,
-                action,
-                priority,
-                null,
-                0,
-                new DispatcherOperationTaskSource<object>(),
-                true,
-                skipTaskAsyncStateMapping: internalSyncInvoke)
         {
         }
 
@@ -557,15 +492,6 @@ namespace System.Windows.Threading
                 // We are executing under the "foreign" execution context, but the
                 // SynchronizationContext must be for the correct dispatcher and
                 // priority.
-                //
-                // Under the .NET Core defaults (reuseInstance=false, flowPriority=true) this
-                // path used to allocate a fresh `new DispatcherSynchronizationContext(_dispatcher, _priority)`
-                // on every queued op — one ~32 B heap allocation per dispatcher pump iteration.
-                // Route through the per-Dispatcher per-priority DSC cache instead. The cache is
-                // pre-populated with the Normal and Send slots in the Dispatcher ctor (the two
-                // most common priorities for queued ops) and lazily fills the remaining slots on
-                // first use. Cross-thread DSC instances stay distinct because EC flow still goes
-                // through DispatcherSynchronizationContext.CreateCopy(), which is unchanged.
                 DispatcherSynchronizationContext newSynchronizationContext;
                 if(BaseCompatibilityPreferences.GetReuseDispatcherSynchronizationContextInstance())
                 {
@@ -575,13 +501,10 @@ namespace System.Windows.Threading
                 {
                     if(BaseCompatibilityPreferences.GetFlowDispatcherSynchronizationContextPriority())
                     {
-                        newSynchronizationContext = _dispatcher.GetOrCreatePrioritySyncContext(_priority);
+                        newSynchronizationContext = new DispatcherSynchronizationContext(_dispatcher, _priority);
                     }
                     else
                     {
-                        // Rare opt-out (reuseInstance=false && flow=false): preserve the per-call
-                        // Normal-priority alloc semantics so callers that key off DSC reference
-                        // identity in this config continue to see a unique instance per op.
                         newSynchronizationContext = new DispatcherSynchronizationContext(_dispatcher, DispatcherPriority.Normal);
                     }
                 }
@@ -708,6 +631,17 @@ namespace System.Windows.Threading
             [ThreadStatic]
             private static DispatcherOperationEvent s_pooled;
 
+            // Wrapper-owned lock guarding _operation and the event's signal state.
+            // OnCompletedOrAborted can be invoked from a captured handler snapshot at any
+            // time after this wrapper has detached — Invoke raises Completed outside the
+            // dispatcher lock, and Abort captures the handler list lock-free — so the
+            // callback must never rely on _operation being non-null and must never signal a
+            // registration this wrapper no longer belongs to. Keeping the discriminating
+            // state under the wrapper's own lock (rather than a dispatcher lock, whose
+            // identity changes when the wrapper recycles onto an op of another dispatcher)
+            // is what makes the callback safe in every pooled state.
+            private readonly object _stateLock = new object();
+
             public static DispatcherOperationEvent Acquire(DispatcherOperation op, TimeSpan timeout)
             {
                 DispatcherOperationEvent pooled = s_pooled;
@@ -734,24 +668,26 @@ namespace System.Windows.Threading
 
             private void Initialize(DispatcherOperation op, TimeSpan timeout)
             {
-                _operation = op;
                 _timeout = timeout;
-                _eventClosed = false;
                 // _event is guaranteed to be in the unsignaled state here: it's either a
                 // freshly-constructed ManualResetEvent(false) (cold-start path), or it was
-                // Reset() in the WaitOne tail before being pooled.
+                // Reset() under _stateLock in the WaitOne tail before being pooled.
+                lock(_stateLock)
+                {
+                    _operation = op;
+                }
 
-                lock(DispatcherLock)
+                lock(op.DispatcherLock)
                 {
                     // We will set our event once the operation is completed or aborted.
-                    _operation.Aborted += _completedOrAbortedHandler;
-                    _operation.Completed += _completedOrAbortedHandler;
+                    op.Aborted += _completedOrAbortedHandler;
+                    op.Completed += _completedOrAbortedHandler;
 
                     // Since some other thread is dispatching this operation, it could
                     // have been dispatched while we were setting up the handlers.
                     // We check the state again and set the event ourselves if this
                     // happened.
-                    if(_operation._status != DispatcherOperationStatus.Pending && _operation._status != DispatcherOperationStatus.Executing)
+                    if(op._status != DispatcherOperationStatus.Pending && op._status != DispatcherOperationStatus.Executing)
                     {
                         _event.Set();
                     }
@@ -760,9 +696,14 @@ namespace System.Windows.Threading
 
             private void OnCompletedOrAborted(object sender, EventArgs e)
             {
-                lock(DispatcherLock)
+                // `sender` is always the operation raising Completed/Aborted (Invoke and
+                // Abort both pass `this`). Signal only if this wrapper is still registered to
+                // exactly that operation; a parked wrapper (_operation == null) and a wrapper
+                // recycled onto a different operation both fail the identity check and no-op.
+                // This never dereferences _operation, so it cannot NRE in any state.
+                lock(_stateLock)
                 {
-                    if(!_eventClosed)
+                    if(ReferenceEquals(sender, _operation))
                     {
                         _event.Set();
                     }
@@ -776,29 +717,22 @@ namespace System.Windows.Threading
                 DispatcherOperation op = _operation;
                 lock(op.DispatcherLock)
                 {
-                    if(!_eventClosed)
-                    {
-                        // Cleanup the events.
-                        op.Aborted -= _completedOrAbortedHandler;
-                        op.Completed -= _completedOrAbortedHandler;
-
-                        // Mark the wrapper as detached. Any in-flight OnCompletedOrAborted
-                        // invocation that was captured (by the dispatcher's `handler = _completed`
-                        // snapshot under DispatcherLock) before we got here has ALREADY run to
-                        // completion before _event.WaitOne returned — OCA Sets _event inside the
-                        // lock and the dispatcher's synchronous `handler(this, args)` call only
-                        // returns AFTER the captured invocation list has fully run. So after we
-                        // remove the subscription above, no deferred OCA invocation for this
-                        // operation can target this wrapper.
-                        _eventClosed = true;
-                    }
+                    // Unsubscribing prevents future captures of our handler; it cannot retract
+                    // a snapshot the dispatcher already captured. Any such stale invocation is
+                    // neutralized by the sender-identity check in OnCompletedOrAborted.
+                    op.Aborted -= _completedOrAbortedHandler;
+                    op.Completed -= _completedOrAbortedHandler;
                 }
 
-                // Reset the kernel event so the next Initialize-then-WaitOne cycle on this
-                // pooled instance starts unsignaled. Done outside the dispatcher lock to keep
-                // the critical section minimal.
-                _event.Reset();
-                _operation = null;
+                // Detach and reset atomically with respect to OnCompletedOrAborted: once
+                // _operation is null the identity check fails, and any Set that raced in before
+                // this block is cleared by the Reset serialized after it under the same lock.
+                // The wrapper is always returned to the pool unsignaled and unregistered.
+                lock(_stateLock)
+                {
+                    _operation = null;
+                    _event.Reset();
+                }
 
                 // Return to the per-thread pool. Single-slot: only the innermost wait on this
                 // thread gets pooled — nested waits fall back to allocation, which mirrors the
@@ -807,18 +741,21 @@ namespace System.Windows.Threading
                 {
                     s_pooled = this;
                 }
-            }
-
-            private object DispatcherLock
-            {
-                get { return _operation.DispatcherLock; }
+                else
+                {
+                    // A nested-wait fallback wrapper that will not be pooled: release its kernel
+                    // event handle now rather than leaving it for finalization, preserving the
+                    // original code's per-wait handle hygiene. No further Set can target it — the
+                    // handlers are unsubscribed and _operation is null, so OnCompletedOrAborted's
+                    // identity check fails for any stale snapshot.
+                    _event.Dispose();
+                }
             }
 
             private DispatcherOperation _operation;
             private TimeSpan _timeout;
             private readonly ManualResetEvent _event;
             private readonly EventHandler _completedOrAbortedHandler;
-            private bool _eventClosed;
         }
 
         private object DispatcherLock
