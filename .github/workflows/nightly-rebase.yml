@@ -94,7 +94,7 @@ jobs:
           python-version: "3.12"
 
       - name: Import bot GPG key (also sets user.name/email)
-        uses: ./.github/actions/import-bot-gpg
+        uses: InitialForce/wpf/.github/actions/import-bot-gpg@if/main
         with:
           gpg-private-key: ${{ secrets.GH_BOT_GPG_KEY }}
           gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
@@ -289,7 +289,7 @@ jobs:
           python-version: "3.12"
 
       - name: Import bot GPG key
-        uses: ./.github/actions/import-bot-gpg
+        uses: InitialForce/wpf/.github/actions/import-bot-gpg@if/main
         with:
           gpg-private-key: ${{ secrets.GH_BOT_GPG_KEY }}
           gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
