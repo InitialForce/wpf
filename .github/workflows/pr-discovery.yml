@@ -72,7 +72,7 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: ${{ steps.load-prompt.outputs.prompt }}
           claude_args: >-
-            --max-turns 8
+            --max-turns 50
             --model claude-haiku-4-5
             --allowedTools Bash,Read,Grep,mcp__github__list_pull_requests,mcp__github__search_pull_requests,mcp__github__issue_write
             --disallowedTools Edit,Write
