@@ -111,9 +111,17 @@ namespace System.Windows.Documents
             internal GeneralTransform GetTransformForArrange()
             {
                 if (HasSimpleTransform)
-                    return SimpleTransform.IsIdentity
-                        ? System.Windows.Media.Transform.Identity
-                        : new MatrixTransform(SimpleTransform);
+                {
+                    if (SimpleTransform.IsIdentity)
+                        return System.Windows.Media.Transform.Identity;
+                    // Freeze to match TransformToAncestor, which hands back a frozen
+                    // transform. GetDesiredTransform/RenderTransform are user-overridable
+                    // and must not receive a mutable instance whose mutation would
+                    // silently succeed here but throw against stock.
+                    MatrixTransform matrixTransform = new MatrixTransform(SimpleTransform);
+                    matrixTransform.Freeze();
+                    return matrixTransform;
+                }
                 return _transform;
             }
 
@@ -883,8 +891,12 @@ namespace System.Windows.Documents
 
                     dirty = true;
                 }
-                else if (adornerInfo.Adorner.ArrangeDirty)
+                else if (adornerInfo.Adorner.ArrangeDirty && adornerInfo.Adorner.Visibility != Visibility.Collapsed)
                 {
+                    // A collapsed adorner's Measure/Arrange short-circuit without
+                    // clearing ArrangeDirty, so re-invalidating here would latch a
+                    // non-decaying layout pass every frame until it becomes visible.
+                    // Only visible adorners actually consume the invalidation.
                     adornerInfo.Adorner.InvalidateMeasure();
 
                     dirty = true;
