@@ -169,6 +169,19 @@ namespace MS.Internal
                 return;
             }
 
+            // Re-entrant Run on the same instance (e.g. a nested dispatcher frame
+            // pumped during shutdown re-invoking an operation whose CPEC is still on
+            // the stack). Running the normal path would overwrite the outer Run's
+            // stashed callback/state/culture and double-return the instance to the
+            // pool. Defer directly to EC.Run and let the outer Run own culture
+            // preservation and pooling.
+            if (executionContext._inRun)
+            {
+                ExecutionContext.Run(executionContext._context, callback, state);
+                return;
+            }
+            executionContext._inRun = true;
+
             // Stash the user callback + state on the CPEC itself and snapshot the
             // current culture infos. CallbackWrapper will restore them just before
             // invoking the user callback. (Single-Run-per-CPEC lifecycle assumed.)
@@ -198,17 +211,34 @@ namespace MS.Internal
                 // chain) plus the ref-equals comparisons. The flag is set in
                 // CallbackWrapper iff the post-callback recapture wrote a fresh
                 // CultureInfo into _culture / _uICulture.
-                if (executionContext._callbackTouchedCulture)
+                if (executionContext._callbackTouchedCulture || !s_culturePinnedOnThread)
                 {
                     CultureInfo finalCulture = executionContext._culture;
                     CultureInfo finalUICulture = executionContext._uICulture;
-                    if (!ReferenceEquals(thread.CurrentCulture, finalCulture))
+                    if (!s_culturePinnedOnThread)
+                    {
+                        // First dispatch on this thread: write unconditionally, exactly
+                        // as stock's finally does. On .NET 10 the CurrentCulture setter
+                        // converts an implicit/default culture into an explicitly pinned
+                        // AsyncLocal value; the ref-equal skip below would leave it
+                        // implicit, so a later DefaultThreadCurrentCulture change would
+                        // silently retarget this thread. After the pin the AsyncLocal
+                        // holds an explicit value and the skips are true no-ops.
                         thread.CurrentCulture = finalCulture;
-                    if (!ReferenceEquals(thread.CurrentUICulture, finalUICulture))
                         thread.CurrentUICulture = finalUICulture;
+                        s_culturePinnedOnThread = true;
+                    }
+                    else
+                    {
+                        if (!ReferenceEquals(thread.CurrentCulture, finalCulture))
+                            thread.CurrentCulture = finalCulture;
+                        if (!ReferenceEquals(thread.CurrentUICulture, finalUICulture))
+                            thread.CurrentUICulture = finalUICulture;
+                    }
                 }
             }
 
+            executionContext._inRun = false;
             ReturnToPool(executionContext);
 }
 
@@ -225,6 +255,7 @@ namespace MS.Internal
             ctx._culture = null;
             ctx._uICulture = null;
             ctx._callbackTouchedCulture = false;
+            ctx._inRun = false;
             ctx._disposed = true;
 
             if (s_pooled == null)
@@ -274,10 +305,20 @@ namespace MS.Internal
             Thread thread = Thread.CurrentThread;
             CultureInfo savedCulture = executionContext._culture;
             CultureInfo savedUICulture = executionContext._uICulture;
-            if (!ReferenceEquals(thread.CurrentCulture, savedCulture))
+            if (!s_culturePinnedOnThread)
+            {
+                // Match stock's unconditional pre-callback restore until the thread's
+                // culture has been explicitly pinned (see the finally block in Run).
                 thread.CurrentCulture = savedCulture;
-            if (!ReferenceEquals(thread.CurrentUICulture, savedUICulture))
                 thread.CurrentUICulture = savedUICulture;
+            }
+            else
+            {
+                if (!ReferenceEquals(thread.CurrentCulture, savedCulture))
+                    thread.CurrentCulture = savedCulture;
+                if (!ReferenceEquals(thread.CurrentUICulture, savedUICulture))
+                    thread.CurrentUICulture = savedUICulture;
+            }
 
             callback.Invoke(state);
 
@@ -369,6 +410,13 @@ namespace MS.Internal
         // Capture-Run cycle on this pooled instance starts clean.
         private bool _callbackTouchedCulture;
 
+        // Guards against a re-entrant Run on this same instance (a nested dispatcher
+        // frame re-invoking an operation whose CPEC is still on the stack). Set for the
+        // duration of the outer Run; a nested Run observing it true defers straight to
+        // ExecutionContext.Run so it cannot overwrite the outer Run's stashed state or
+        // return the instance to the pool twice.
+        private bool _inRun;
+
         // static delegate to prevent repeated implicit allocations during Run
         private static ContextCallback CallbackWrapperDelegate;
 
@@ -380,6 +428,17 @@ namespace MS.Internal
         // (dispatcher) thread refills its own [ThreadStatic].
         [ThreadStatic]
         private static CulturePreservingExecutionContext s_pooled;
+
+        // False until this thread's dispatcher culture has been explicitly pinned into
+        // the ambient AsyncLocal<CultureInfo> at least once. Stock WPF pins on every Run
+        // via unconditional Thread.Current(UI)Culture setters; the ref-equal fast-paths
+        // above would skip that pin, so an app that only sets DefaultThreadCurrentCulture
+        // would see the dispatcher thread follow later default changes instead of holding
+        // the pinned value. The first Run per thread therefore writes unconditionally to
+        // reproduce the pin; every Run afterwards uses the ref-equal skips, which are true
+        // no-ops once an explicit value is stored.
+        [ThreadStatic]
+        private static bool s_culturePinnedOnThread;
 
         #endregion
     }
