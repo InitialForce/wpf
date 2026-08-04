@@ -146,35 +146,46 @@ namespace MS.Internal
             branchNodeStack.Clear(); // defensive: guard against unexpected residue from any prior walk
             bool continueInvalidation = true;
 
-            while (o != null && continueInvalidation)
+            try
             {
-                continueInvalidation &= InvalidateAutomationPeer(o, out e, out ce, out e3d);
-
-                //
-                // Invoke InvalidateAutomationAncestorsCore
-                //
-                bool continuePastVisualTree = false;
-                if (e != null)
+                while (o != null && continueInvalidation)
                 {
-                    continueInvalidation &= e.InvalidateAutomationAncestorsCore(branchNodeStack, out continuePastVisualTree);
+                    continueInvalidation &= InvalidateAutomationPeer(o, out e, out ce, out e3d);
 
-                    // Get element's visual parent
-                    o = e.GetUIParent(continuePastVisualTree);
-                }
-                else if (ce != null)
-                {
-                    continueInvalidation &= ce.InvalidateAutomationAncestorsCore(branchNodeStack, out continuePastVisualTree);
+                    //
+                    // Invoke InvalidateAutomationAncestorsCore
+                    //
+                    bool continuePastVisualTree = false;
+                    if (e != null)
+                    {
+                        continueInvalidation &= e.InvalidateAutomationAncestorsCore(branchNodeStack, out continuePastVisualTree);
 
-                    // Get element's visual parent
-                    o = (DependencyObject)ce.GetUIParent(continuePastVisualTree);
-                }
-                else if (e3d != null)
-                {
-                    continueInvalidation &= e3d.InvalidateAutomationAncestorsCore(branchNodeStack, out continuePastVisualTree);
+                        // Get element's visual parent
+                        o = e.GetUIParent(continuePastVisualTree);
+                    }
+                    else if (ce != null)
+                    {
+                        continueInvalidation &= ce.InvalidateAutomationAncestorsCore(branchNodeStack, out continuePastVisualTree);
 
-                    // Get element's visual parent
-                    o = e3d.GetUIParent(continuePastVisualTree);
+                        // Get element's visual parent
+                        o = (DependencyObject)ce.GetUIParent(continuePastVisualTree);
+                    }
+                    else if (e3d != null)
+                    {
+                        continueInvalidation &= e3d.InvalidateAutomationAncestorsCore(branchNodeStack, out continuePastVisualTree);
+
+                        // Get element's visual parent
+                        o = e3d.GetUIParent(continuePastVisualTree);
+                    }
                 }
+            }
+            finally
+            {
+                // A walk that ends with an element having both a visual and a model parent
+                // leaves branch nodes on the stack. Clear them so the thread-static pool does
+                // not root those DependencyObjects (and the trees they reference) until the
+                // next automation-driven walk on this thread.
+                branchNodeStack.Clear();
             }
         }
 
