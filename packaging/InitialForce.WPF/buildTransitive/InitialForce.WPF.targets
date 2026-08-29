@@ -125,4 +125,41 @@
              Condition="'$(RuntimeIdentifier)' == 'win-x64'" />
   </Target>
 
+  <!-- Target 3: Self-contained publish path. InjectIfWpfAssemblies (Target 2) adds our DLLs to
+       ResolvedFileToPublish from a Build-time target, but a self-contained publish recomputes
+       that list later in ComputeResolvedFilesToPublishList and re-adds the runtime-pack stock
+       WPF DLLs, so the published app ships stock WPF (the installer harvests the publish output).
+       Run AFTER the publish list is computed and BEFORE it is copied: strip the stock WPF entries
+       and add our patched copies. -->
+  <Target Name="ReplaceWpfInPublish"
+          AfterTargets="ComputeResolvedFilesToPublishList"
+          BeforeTargets="_CopyResolvedFilesToPublishPreserveNewest;CopyFilesToPublishDirectory"
+          Condition="'$(RuntimeIdentifier)' == 'win-x64'">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+        Condition="'%(Filename)%(Extension)' == 'PresentationCore.dll'
+                or '%(Filename)%(Extension)' == 'PresentationFramework.dll'
+                or '%(Filename)%(Extension)' == 'WindowsBase.dll'
+                or '%(Filename)%(Extension)' == 'System.Xaml.dll'" />
+      <ResolvedFileToPublish Include="$(_IFWpfRuntimeDir)PresentationCore.dll">
+        <RelativePath>PresentationCore.dll</RelativePath>
+        <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+      <ResolvedFileToPublish Include="$(_IFWpfRuntimeDir)PresentationFramework.dll">
+        <RelativePath>PresentationFramework.dll</RelativePath>
+        <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+      <ResolvedFileToPublish Include="$(_IFWpfRuntimeDir)WindowsBase.dll">
+        <RelativePath>WindowsBase.dll</RelativePath>
+        <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+      <ResolvedFileToPublish Include="$(_IFWpfRuntimeDir)System.Xaml.dll">
+        <RelativePath>System.Xaml.dll</RelativePath>
+        <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+    <Message Importance="high"
+             Text="ReplaceWpfInPublish: replaced stock WPF with InitialForce.WPF patched DLLs in the publish set" />
+  </Target>
+
 </Project>
