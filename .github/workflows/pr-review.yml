@@ -3,25 +3,32 @@
 #
 # Triggered by:
 #   - repository_dispatch "pr-discovered" from pr-discovery.yml.
-#     client_payload: {pr_number: <int>, head_sha: <sha>}
+#     client_payload: {pr_number: <int>, head_sha: <40-hex sha>}
 #   - workflow_dispatch with pr_number + head_sha inputs (manual / R4-4 fix)
 #
 # Models and the turn budget come from .if-fork/config.yaml
 # (claude_models.review_1, claude_models.review_2, claude_limits.max_turns_review).
 #
 # Job topology:
-#   gate → review-1  ──┐
-#          review-2  ──┤─→ merge-verdict
+#   gate → prepare → review-1 ──┐
+#                    review-2 ──┤─→ merge-verdict
 #                       (review-2 runs independently; no shared cache or output
 #                        with review-1 until both are complete)
 #
-# The reviewers only write verdict files. merge-verdict records everything in
-# the ledger in ONE commit ([skip ci]): review_1, review_2, merged_verdict and
-# the outcome event (approved / rejected / escalated). It pushes that commit
-# BEFORE dispatching pr-ingestion, because pr-ingestion's SHA check reads the
-# review_N head_sha from the ledger. A reviewer that crashes or runs out of
-# turns counts as escalate-to-human, so every run ends with a recorded outcome
-# and pr-discovery does not re-dispatch the same head_sha.
+# prepare pins what is reviewed: it fetches refs/pull/N/head from dotnet/wpf,
+# checks that it equals HEAD_SHA, and writes the diff from the merge base,
+# the file list and the changed files' content to the `review-input`
+# artifact. Reviewers read only that artifact. They have Read/Grep/Glob and
+# Write (for the verdict file), no shell, no network tools and a read-only
+# token, because they read untrusted PR content.
+#
+# merge-verdict applies code checks on the same pinned diff (hard-fail
+# patterns, file denylist, confidence threshold; see tools/merge-verdicts.py)
+# and records the whole review in ONE ledger commit ([skip ci]). It pushes that
+# commit BEFORE dispatching pr-ingestion, because pr-ingestion's SHA check
+# reads the review_N head_sha from the ledger. A reviewer that left no verdict
+# ends the run as review_error, which pr-discovery retries (3 attempts, then
+# escalated).
 #
 # IF_REVIEW_DOUBLE_REQUIRED repo variable:
 #   unset / "true" (default) → both review-1 AND review-2 must complete before merge-verdict
@@ -55,10 +62,9 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: read
-  issues: write
-  id-token: write
 
+# Payload values reach scripts only through these env vars, and every job
+# validates them before using them.
 env:
   IF_REPO_ROOT: ${{ github.workspace }}
   PR_NUMBER: ${{ github.event.client_payload.pr_number || inputs.pr_number }}
@@ -76,27 +82,126 @@ jobs:
       bypass_for_human_dispatch: ${{ github.event_name == 'workflow_dispatch' }}
 
   # ---------------------------------------------------------------------------
-  # Job 2: review-1 — Reviewer 1 (temperature 0.0, diff only)
+  # Job 2: prepare — pin the exact change both reviewers see
+  # ---------------------------------------------------------------------------
+  prepare:
+    name: Pin PR head and write the review input
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+
+    steps:
+      - name: Validate dispatch payload
+        run: |
+          if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::pr_number/head_sha missing or malformed"
+            exit 1
+          fi
+
+      - name: Fetch pinned head from dotnet/wpf and write diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/review-input"
+          mkdir -p "$OUT/head"
+          gh api "repos/dotnet/wpf/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"
+          BASE_SHA=$(jq -r .base.sha "$RUNNER_TEMP/pr.json")
+          if ! [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Upstream PR #$PR_NUMBER has no usable base SHA"
+            exit 1
+          fi
+
+          # Commits and trees only; blobs are fetched on demand by git diff/show.
+          git clone --quiet --bare --filter=blob:none --no-tags --single-branch \
+            --branch main https://github.com/dotnet/wpf.git "$RUNNER_TEMP/upstream.git"
+          export GIT_DIR="$RUNNER_TEMP/upstream.git"
+          git fetch --quiet --no-tags origin "+refs/pull/$PR_NUMBER/head:refs/pr/head"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --no-tags origin "$BASE_SHA"
+
+          FETCHED=$(git rev-parse refs/pr/head)
+          if [ "$FETCHED" != "$HEAD_SHA" ]; then
+            echo "::error::Upstream PR #$PR_NUMBER head is $FETCHED, not the pinned $HEAD_SHA. Not reviewing; discovery records the new head."
+            exit 1
+          fi
+          MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+
+          git diff --no-color --no-ext-diff --no-renames "$MERGE_BASE" "$HEAD_SHA" > "$OUT/pr.diff"
+          git diff --name-only --no-renames -z "$MERGE_BASE" "$HEAD_SHA" > "$RUNNER_TEMP/files.z"
+          if [ "$(tr -dc '\n' < "$RUNNER_TEMP/files.z" | wc -c)" -gt 0 ]; then
+            echo "::error::A changed file name contains a newline; refusing to review."
+            exit 1
+          fi
+          tr '\0' '\n' < "$RUNNER_TEMP/files.z" > "$OUT/files.txt"
+          if [ ! -s "$OUT/pr.diff" ] || [ ! -s "$OUT/files.txt" ]; then
+            echo "::error::Empty diff between merge base $MERGE_BASE and $HEAD_SHA"
+            exit 1
+          fi
+
+          # Full content of up to 40 changed files at the pinned head, 512 KB max each.
+          COPIED=0
+          while IFS= read -r -d '' path; do
+            [ "$COPIED" -ge 40 ] && break
+            git cat-file -e "$HEAD_SHA:$path" 2>/dev/null || continue
+            SIZE=$(git cat-file -s "$HEAD_SHA:$path")
+            [ "$SIZE" -le 524288 ] || continue
+            mkdir -p "$OUT/head/$(dirname -- "$path")"
+            git show "$HEAD_SHA:$path" > "$OUT/head/$path"
+            COPIED=$((COPIED + 1))
+          done < "$RUNNER_TEMP/files.z"
+
+          jq -n --slurpfile pr "$RUNNER_TEMP/pr.json" \
+            --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --arg mb "$MERGE_BASE" \
+            --argjson files "$(grep -c . "$OUT/files.txt")" \
+            '{pr_number: $pr[0].number, head_sha: $head, base_sha: $base, merge_base: $mb,
+              title: $pr[0].title, author: $pr[0].user.login, state: $pr[0].state,
+              merged: $pr[0].merged, files_touched: $files}' > "$OUT/meta.json"
+          cat "$OUT/meta.json"
+
+      - name: Upload review input
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-input
+          path: ${{ runner.temp }}/review-input
+          retention-days: 30
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Job 3: review-1 — Reviewer 1 (temperature 0.0, diff only)
   # Runs independently of review-2; no output shared until merge-verdict.
   # ---------------------------------------------------------------------------
   review-1:
     name: Reviewer 1 (temp=0.0, diff-only)
-    needs: gate
+    needs: [gate, prepare]
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     environment: bot-credentials
+    # The reviewer reads untrusted PR content: read-only token, no issue or
+    # OIDC rights, never the bot App token.
+    permissions:
+      contents: read
+      pull-requests: read
 
-    # The reviewer reads untrusted PR content with a Bash tool, so it gets the
-    # read-only workflow token, never the bot App token (which can push).
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Check dispatch payload
+      - name: Validate dispatch payload
         run: |
-          if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
-            echo "::error::pr_number/head_sha missing or malformed (pr_number='$PR_NUMBER' head_sha='$HEAD_SHA')"
+          if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::pr_number/head_sha missing or malformed"
             exit 1
           fi
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download pinned review input
+        uses: actions/download-artifact@v4
+        with:
+          name: review-input
+          path: review-input
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -117,11 +222,20 @@ jobs:
       - name: Load pr-review-1 prompt
         id: load-prompt-1
         shell: bash
+        env:
+          MODEL: ${{ steps.settings.outputs.model }}
         run: |
+          mkdir -p review-output
           {
             echo 'prompt<<__EOF_PROMPT__'
             cat .if-fork/prompts/pr-review-1.md
             echo
+            echo '## Run inputs'
+            echo
+            echo "- PR number: $PR_NUMBER (https://github.com/dotnet/wpf/pull/$PR_NUMBER)"
+            echo "- Pinned head SHA: $HEAD_SHA"
+            echo "- Reviewer ID: $MODEL-review-1"
+            echo "- Verdict file: review-output/review-1.json"
             echo '__EOF_PROMPT__'
           } >> "$GITHUB_OUTPUT"
 
@@ -134,40 +248,31 @@ jobs:
           claude_args: >-
             --max-turns ${{ steps.settings.outputs.max_turns }}
             --model ${{ steps.settings.outputs.model }}
-            --allowedTools Bash,Read,Grep,mcp__github__pull_request_read,mcp__github__get_file_contents
-            --disallowedTools Edit,Write,mcp__github__create_pull_request,mcp__github__push_files
+            --allowedTools Read,Grep,Glob,Write
+            --disallowedTools Bash,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task
           github_token: ${{ github.token }}
-        env:
-          CONFIG_PATH: .if-fork/config.yaml
-          PR_URL: https://github.com/dotnet/wpf/pull/${{ env.PR_NUMBER }}
-          PR_NUMBER: ${{ env.PR_NUMBER }}
-          HEAD_SHA: ${{ env.HEAD_SHA }}
-          REVIEWER_ID: ${{ steps.settings.outputs.model }}-review-1
-          VERDICT_OUTPUT_PATH: /tmp/review-1.json
-          REVIEW_TEMPERATURE: "0.0"
-          GH_TOKEN: ${{ github.token }}
 
       # Upload whatever verdict exists, even when the reviewer hit its turn
-      # limit after writing it. merge-verdict treats a missing file as
-      # escalate-to-human.
+      # limit after writing it. merge-verdict treats a missing file as a
+      # review_error, which pr-discovery retries.
       - name: Upload review-1 artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: review-1.json
-          path: /tmp/review-1.json
+          path: review-output/review-1.json
           retention-days: 30
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
-  # Job 3: review-2 — Reviewer 2 (temperature 0.7, diff + source context)
-  # Runs INDEPENDENTLY from review-1 (both need only gate, not each other).
+  # Job 4: review-2 — Reviewer 2 (temperature 0.7, diff + source context)
+  # Runs INDEPENDENTLY from review-1 (both need only gate and prepare).
   # Skipped when IF_REVIEW_DOUBLE_REQUIRED is "false" (single-review fast path).
   # The fast path additionally requires a manual approval via environment: branch-promotion.
   # ---------------------------------------------------------------------------
   review-2:
     name: Reviewer 2 (temp=0.7, diff+context, isolated)
-    needs: gate
+    needs: [gate, prepare]
     # NOTE: review-2 intentionally does NOT need review-1.
     # Independence is the core security property: two reviewers with no shared
     # state before merge-verdict collapses the results.
@@ -177,18 +282,27 @@ jobs:
     if: needs.gate.outputs.proceed == 'true' && vars.IF_REVIEW_DOUBLE_REQUIRED != 'false'
     runs-on: ubuntu-latest
     environment: bot-credentials
+    permissions:
+      contents: read
+      pull-requests: read
 
-    # The reviewer reads untrusted PR content with a Bash tool, so it gets the
-    # read-only workflow token, never the bot App token (which can push).
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Check dispatch payload
+      - name: Validate dispatch payload
         run: |
-          if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
-            echo "::error::pr_number/head_sha missing or malformed (pr_number='$PR_NUMBER' head_sha='$HEAD_SHA')"
+          if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::pr_number/head_sha missing or malformed"
             exit 1
           fi
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download pinned review input
+        uses: actions/download-artifact@v4
+        with:
+          name: review-input
+          path: review-input
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -209,11 +323,20 @@ jobs:
       - name: Load pr-review-2 prompt
         id: load-prompt-2
         shell: bash
+        env:
+          MODEL: ${{ steps.settings.outputs.model }}
         run: |
+          mkdir -p review-output
           {
             echo 'prompt<<__EOF_PROMPT__'
             cat .if-fork/prompts/pr-review-2.md
             echo
+            echo '## Run inputs'
+            echo
+            echo "- PR number: $PR_NUMBER (https://github.com/dotnet/wpf/pull/$PR_NUMBER)"
+            echo "- Pinned head SHA: $HEAD_SHA"
+            echo "- Reviewer ID: $MODEL-review-2"
+            echo "- Verdict file: review-output/review-2.json"
             echo '__EOF_PROMPT__'
           } >> "$GITHUB_OUTPUT"
 
@@ -226,30 +349,21 @@ jobs:
           claude_args: >-
             --max-turns ${{ steps.settings.outputs.max_turns }}
             --model ${{ steps.settings.outputs.model }}
-            --allowedTools Bash,Read,Grep,mcp__github__pull_request_read,mcp__github__get_file_contents
-            --disallowedTools Edit,Write,mcp__github__create_pull_request,mcp__github__push_files
+            --allowedTools Read,Grep,Glob,Write
+            --disallowedTools Bash,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task
           github_token: ${{ github.token }}
-        env:
-          CONFIG_PATH: .if-fork/config.yaml
-          PR_URL: https://github.com/dotnet/wpf/pull/${{ env.PR_NUMBER }}
-          PR_NUMBER: ${{ env.PR_NUMBER }}
-          HEAD_SHA: ${{ env.HEAD_SHA }}
-          REVIEWER_ID: ${{ steps.settings.outputs.model }}-review-2
-          VERDICT_OUTPUT_PATH: /tmp/review-2.json
-          REVIEW_TEMPERATURE: "0.7"
-          GH_TOKEN: ${{ github.token }}
 
       - name: Upload review-2 artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: review-2.json
-          path: /tmp/review-2.json
+          path: review-output/review-2.json
           retention-days: 30
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
-  # Job 4: single-review-approval — manual gate when fast path is active
+  # Job 5: single-review-approval — manual gate when fast path is active
   # Required only when IF_REVIEW_DOUBLE_REQUIRED == "false".
   # environment: branch-promotion enforces a human approver before merge-verdict runs.
   # ---------------------------------------------------------------------------
@@ -261,6 +375,13 @@ jobs:
     environment: branch-promotion
 
     steps:
+      - name: Validate dispatch payload
+        run: |
+          if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::pr_number/head_sha missing or malformed"
+            exit 1
+          fi
+
       - name: Generate GH App token
         id: app-token
         uses: tibdex/github-app-token@v2
@@ -289,31 +410,32 @@ jobs:
           echo "::warning::IF_REVIEW_DOUBLE_REQUIRED is 'false' — single-review fast path active. This bypasses the two-reviewer independence guarantee. Use only in emergencies."
           python tools/ledger-event.py \
             --event review_single_path_warning \
-            --pr-number "${{ env.PR_NUMBER }}" \
-            --head-sha "${{ env.HEAD_SHA }}" \
+            --pr-number "$PR_NUMBER" \
+            --head-sha "$HEAD_SHA" \
             --actor pr-review \
-            --details-json '{"reason": "IF_REVIEW_DOUBLE_REQUIRED_false", "fast_path": true, "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
+            --details-json "{\"reason\": \"IF_REVIEW_DOUBLE_REQUIRED_false\", \"fast_path\": true, \"run_url\": \"$RUN_URL\"}" \
             --push
         env:
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
   # ---------------------------------------------------------------------------
-  # Job 5: merge-verdict — Collapse both reviewer outputs into a final decision,
-  # record it in the ledger (one commit), then hand off.
-  # Runs after BOTH review-1 and review-2 complete (or review-2 is skipped and
-  # single-review-approval has been manually approved).
+  # Job 6: merge-verdict — Collapse both reviewer outputs into a final decision,
+  # apply the code checks, record it in the ledger (one commit), then hand off.
   # ---------------------------------------------------------------------------
   merge-verdict:
     name: Merge verdicts and emit outcome
-    needs: [gate, review-1, review-2, single-review-approval]
-    # Run even when a reviewer failed (its missing verdict becomes an
-    # escalation), but not when the run was cancelled or the gate said no.
+    needs: [gate, prepare, review-1, review-2, single-review-approval]
+    # Run even when a reviewer failed (its missing verdict becomes a
+    # review_error), but only after prepare pinned and validated the input,
+    # and not when the run was cancelled or the gate said no.
     # If single-review-approval ran (fast path active), it must have succeeded or been skipped.
     if: >-
       always() &&
       needs.gate.outputs.proceed == 'true' &&
+      needs.prepare.result == 'success' &&
       (needs.review-1.result == 'success' || needs.review-1.result == 'failure') &&
       needs.review-2.result != 'cancelled' &&
       (needs.single-review-approval.result == 'success' || needs.single-review-approval.result == 'skipped')
@@ -321,6 +443,13 @@ jobs:
     environment: bot-credentials
 
     steps:
+      - name: Validate dispatch payload
+        run: |
+          if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::pr_number/head_sha missing or malformed"
+            exit 1
+          fi
+
       - name: Generate GH App token
         id: app-token
         uses: tibdex/github-app-token@v2
@@ -337,13 +466,22 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Download review artifacts
+      - name: Install Python dependencies
+        run: pip install pyyaml
+
+      - name: Download pinned review input
+        uses: actions/download-artifact@v4
+        with:
+          name: review-input
+          path: ${{ runner.temp }}/review-input
+
+      - name: Download review verdicts
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
           pattern: "review-*.json"
           merge-multiple: true
-          path: /tmp/verdicts/
+          path: ${{ runner.temp }}/verdicts/
 
       - name: Import bot GPG key
         uses: ./.github/actions/import-bot-gpg
@@ -352,58 +490,66 @@ jobs:
           gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
           gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
 
-      # merge-verdicts.py exits 0 approved, 1 rejected, 2 escalated, 3 error.
-      # 1 and 2 are normal outcomes here, not step failures.
+      # merge-verdicts.py exits 0 approved, 1 rejected, 2 escalated, 3 error,
+      # 4 review_error. Only 3 fails the step.
       - name: Merge verdicts
         id: merge
+        env:
+          DOUBLE_REQUIRED: ${{ vars.IF_REVIEW_DOUBLE_REQUIRED }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          REVIEW_2_ARGS=(--review-2 /tmp/verdicts/review-2.json)
-          if [ "${{ vars.IF_REVIEW_DOUBLE_REQUIRED }}" = "false" ]; then
+          REVIEW_2_ARGS=(--review-2 "$RUNNER_TEMP/verdicts/review-2.json")
+          if [ "$DOUBLE_REQUIRED" = "false" ]; then
             REVIEW_2_ARGS=(--single-review)
           fi
           set +e
           python tools/merge-verdicts.py \
-            --review-1 /tmp/verdicts/review-1.json \
+            --review-1 "$RUNNER_TEMP/verdicts/review-1.json" \
             "${REVIEW_2_ARGS[@]}" \
-            --missing-as-escalate \
-            --pr-number "${{ env.PR_NUMBER }}" \
-            --head-sha "${{ env.HEAD_SHA }}" \
-            --output /tmp/merged-verdict.json \
-            --events-out /tmp/review-events.jsonl \
-            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            --config .if-fork/config.yaml \
+            --diff "$RUNNER_TEMP/review-input/pr.diff" \
+            --files "$RUNNER_TEMP/review-input/files.txt" \
+            --retry-missing \
+            --ledger-path .if-fork/patch-ledger.jsonl \
+            --pr-number "$PR_NUMBER" \
+            --head-sha "$HEAD_SHA" \
+            --output "$RUNNER_TEMP/merged-verdict.json" \
+            --events-out "$RUNNER_TEMP/review-events.jsonl" \
+            --run-url "$RUN_URL"
           rc=$?
           set -e
-          if [ "$rc" -gt 2 ]; then
+          if [ "$rc" -eq 3 ] || [ "$rc" -gt 4 ]; then
             echo "::error::merge-verdicts.py failed (exit $rc)"
             exit "$rc"
           fi
-          VERDICT=$(python -c "import json; print(json.load(open('/tmp/merged-verdict.json'))['verdict'])")
+          VERDICT=$(jq -r .verdict "$RUNNER_TEMP/merged-verdict.json")
           echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
-          echo "::notice::PR #${{ env.PR_NUMBER }} @ ${{ env.HEAD_SHA }}: $VERDICT"
+          echo "::notice::PR #$PR_NUMBER @ $HEAD_SHA: $VERDICT"
 
-      # One ledger commit for the whole review: review_1, review_2,
-      # merged_verdict and the outcome event. Must land before the ingestion
+      # One ledger commit for the whole review. Must land before the ingestion
       # dispatch below.
       - name: Record review outcome in ledger (one commit)
-        run: |
-          python tools/ledger-event.py \
-            --events-file /tmp/review-events.jsonl \
-            --actor pr-review \
-            --message "ledger: review pr#${{ env.PR_NUMBER }} ${{ steps.merge.outputs.verdict }}" \
-            --push
         env:
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-
-      # approved  → repository_dispatch pr-ingestion-requested {pr_number, head_sha}
-      # escalated → review-disagreement issue (needs-human)
-      # rejected  → nothing more (already recorded above)
-      - name: Hand off (ingestion dispatch or escalation issue)
+          VERDICT: ${{ steps.merge.outputs.verdict }}
         run: |
-          python tools/dispatch-approved.py \
-            --verdict /tmp/merged-verdict.json \
-            --repo "${{ github.repository }}" \
-            --token-env GH_TOKEN
+          python tools/ledger-event.py \
+            --events-file "$RUNNER_TEMP/review-events.jsonl" \
+            --actor pr-review \
+            --message "ledger: review pr#$PR_NUMBER $VERDICT" \
+            --push
+
+      # approved     → repository_dispatch pr-ingestion-requested {pr_number, head_sha}
+      # escalated    → one review-disagreement issue per PR (needs-human, automated)
+      # rejected     → nothing more (already recorded above)
+      # review_error → nothing more; pr-discovery retries the review
+      - name: Hand off (ingestion dispatch or escalation issue)
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          python tools/dispatch-approved.py \
+            --verdict "$RUNNER_TEMP/merged-verdict.json" \
+            --repo "$GITHUB_REPOSITORY" \
+            --token-env GH_TOKEN

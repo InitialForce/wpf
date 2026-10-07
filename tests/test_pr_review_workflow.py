@@ -317,25 +317,18 @@ def test_permissions_contents_read(workflow):
     )
 
 
-def test_permissions_pull_requests_read(workflow):
+def test_workflow_permissions_have_no_write(workflow):
+    """Issues are opened with the bot App token in merge-verdict, so the
+    workflow token needs no write scope and no OIDC."""
     perms = workflow.get("permissions", {})
-    assert perms.get("pull-requests") == "read", (
-        f"permissions.pull-requests must be 'read'; got {perms.get('pull-requests')!r}"
-    )
+    assert "write" not in perms.values(), f"workflow permissions must be read-only: {perms}"
 
 
-def test_permissions_issues_write(workflow):
-    perms = workflow.get("permissions", {})
-    assert perms.get("issues") == "write", (
-        "permissions.issues must be 'write' (to open disagreement issues); "
-        f"got {perms.get('issues')!r}"
-    )
-
-
-def test_permissions_id_token_write(workflow):
-    perms = workflow.get("permissions", {})
-    assert perms.get("id-token") == "write", (
-        f"permissions.id-token must be 'write'; got {perms.get('id-token')!r}"
+@pytest.mark.parametrize("job", ["prepare", "review-1", "review-2"])
+def test_untrusted_content_jobs_are_read_only(workflow, job):
+    perms = workflow["jobs"][job].get("permissions")
+    assert perms == {"contents": "read", "pull-requests": "read"}, (
+        f"{job} reads untrusted PR content and must have read-only job permissions; got {perms}"
     )
 
 
@@ -373,10 +366,10 @@ def test_merge_verdict_records_before_dispatch(workflow):
 
 def test_merge_verdict_tolerates_rejected_and_escalated_exit_codes(workflow):
     runs = _runs(workflow, "merge-verdict")
-    assert "set +e" in runs and '"$rc" -gt 2' in runs, (
-        "merge-verdicts.py exit 1 (rejected) and 2 (escalated) must not fail the step"
+    assert "set +e" in runs and '"$rc" -eq 3' in runs, (
+        "merge-verdicts.py exits 1, 2 and 4 are outcomes; only 3 fails the step"
     )
-    assert "--missing-as-escalate" in runs
+    assert "--retry-missing" in runs
 
 
 def test_review_models_come_from_config(workflow_text):
@@ -590,3 +583,59 @@ def test_ledger_event_uses_head_sha_flag(workflow_text):
         assert "--head-sha" in inv or "--events-file" in inv, (
             f"ledger-event.py invocation missing --head-sha:\n{inv}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Pinned review input: reviewers never fetch the live PR
+# ---------------------------------------------------------------------------
+
+def test_prepare_pins_head_and_writes_diff(workflow):
+    runs = _runs(workflow, "prepare")
+    assert "refs/pull/$PR_NUMBER/head" in runs
+    assert '"$FETCHED" != "$HEAD_SHA"' in runs, "prepare must refuse a moved PR head"
+    assert "git merge-base" in runs
+    assert "pr.diff" in runs and "files.txt" in runs
+
+
+@pytest.mark.parametrize("job", ["review-1", "review-2"])
+def test_reviewers_need_prepare_and_have_no_shell(workflow, job):
+    j = workflow["jobs"][job]
+    assert "prepare" in j["needs"]
+    action = next(s for s in j["steps"] if "claude-code-action" in s.get("uses", ""))
+    args = action["with"]["claude_args"]
+    assert "--allowedTools Read,Grep,Glob,Write" in args
+    assert "Bash" in args.split("--disallowedTools", 1)[1]
+    assert "WebFetch" in args.split("--disallowedTools", 1)[1]
+
+
+def test_prompts_do_not_fetch_the_diff():
+    for n in (1, 2):
+        text = (REPO_ROOT / ".if-fork" / "prompts" / f"pr-review-{n}.md").read_text()
+        assert "gh api" not in text and "gh pr view" not in text
+        assert "review-input/pr.diff" in text
+
+
+def test_merge_verdict_requires_prepare_success(workflow):
+    cond = workflow["jobs"]["merge-verdict"]["if"]
+    assert "needs.prepare.result == 'success'" in cond
+
+
+def test_merge_verdict_uses_pinned_diff_for_policy(workflow):
+    runs = _runs(workflow, "merge-verdict")
+    assert '--diff "$RUNNER_TEMP/review-input/pr.diff"' in runs
+    assert '--files "$RUNNER_TEMP/review-input/files.txt"' in runs
+
+
+def test_payload_never_interpolated_into_run(workflow_text):
+    assert "${{ env.PR_NUMBER }}" not in workflow_text
+    assert "${{ env.HEAD_SHA }}" not in workflow_text
+    assert "client_payload" not in workflow_text.split("jobs:", 1)[1]
+
+
+@pytest.mark.parametrize(
+    "job", ["prepare", "review-1", "review-2", "single-review-approval", "merge-verdict"]
+)
+def test_every_job_validates_payload(workflow, job):
+    first = workflow["jobs"][job]["steps"][0]
+    assert first["name"] == "Validate dispatch payload"
+    assert "^[0-9a-f]{40}$" in first["run"]
