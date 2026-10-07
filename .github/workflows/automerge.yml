@@ -1,0 +1,137 @@
+# .github/workflows/automerge.yml
+#
+# Merges the pipeline's own PRs into if/main once the Build workflow has
+# passed on the exact head commit. This replaces GitHub auto-merge, which
+# would merge at once when the branch has no required status checks.
+#
+# A PR is merged only when all of these hold:
+#   - Build concluded "success" for a pull_request event
+#   - the PR is open, from this repository, based on if/main
+#   - the head branch is if/staging (nightly upstream sync) or
+#     claude/cherry-pick-pr-<N> (pr-ingestion.yml)
+#   - the PR carries the "automated" label and was opened by a bot account
+#   - the PR head is still the commit the build ran on
+#   - autonomy-check allows "auto-merge" (IF_AUTONOMY_ENABLED=true and
+#     IF_AUTOMERGE_FROZEN is not "true")
+# The merge uses a merge commit so upstream history and the
+# "(cherry picked from commit ...)" trailers stay intact.
+#
+# When the build fails on such a PR, the workflow comments on the PR once per
+# head commit and leaves it open.
+name: Auto-merge on green
+
+on:
+  workflow_run:
+    workflows: [Build]
+    types: [completed]
+
+concurrency:
+  group: automerge-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  gate:
+    name: Autonomy gate
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      (github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure') &&
+      (github.event.workflow_run.head_branch == 'if/staging' || startsWith(github.event.workflow_run.head_branch, 'claude/cherry-pick-pr-'))
+    uses: ./.github/workflows/autonomy-check.yml
+    with:
+      requested_action: auto-merge
+
+  merge:
+    name: Merge or report
+    needs: gate
+    # Runs even when auto-merge is frozen, so failed builds are still reported.
+    if: needs.gate.result == 'success'
+    runs-on: ubuntu-latest
+    environment: branch-promotion
+
+    steps:
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Find the PR for this build
+        id: pr
+        run: |
+          set -euo pipefail
+          # workflow_run.pull_requests is empty for some events; fall back to
+          # looking the PR up by head branch.
+          PR=$(jq -r '.workflow_run.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH")
+          if [ -z "$PR" ]; then
+            PR=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --head "$HEAD_BRANCH" \
+                   --base if/main --json number --jq '.[0].number // empty')
+          fi
+          if [ -z "$PR" ]; then
+            echo "::notice::No open PR for $HEAD_BRANCH. Nothing to do."
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" > "$RUNNER_TEMP/pr.json"
+          REASON=$(jq -r --arg repo "$GITHUB_REPOSITORY" --arg sha "$HEAD_SHA" '
+            if .state != "open" then "PR is not open"
+            elif .base.ref != "if/main" then "base is \(.base.ref), not if/main"
+            elif .head.repo.full_name != $repo then "head is not in this repository"
+            elif .user.type != "Bot" then "PR was opened by \(.user.login), not a bot"
+            elif ([.labels[].name] | index("automated")) == null then "PR has no automated label"
+            elif .head.sha != $sha then "PR head moved to \(.head.sha) after the build"
+            else "" end' "$RUNNER_TEMP/pr.json")
+          echo "number=$PR" >> "$GITHUB_OUTPUT"
+          if [ -n "$REASON" ]; then
+            echo "::notice::Not merging PR #$PR: $REASON"
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "eligible=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Merge PR (build passed)
+        if: >-
+          steps.pr.outputs.eligible == 'true' &&
+          github.event.workflow_run.conclusion == 'success' &&
+          needs.gate.outputs.proceed == 'true'
+        run: |
+          gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --merge --match-head-commit "$HEAD_SHA"
+          echo "::notice::Merged PR #$PR at $HEAD_SHA."
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR: ${{ steps.pr.outputs.number }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Note frozen auto-merge
+        if: >-
+          steps.pr.outputs.eligible == 'true' &&
+          github.event.workflow_run.conclusion == 'success' &&
+          needs.gate.outputs.proceed != 'true'
+        run: echo "::notice::Build passed on PR #${{ steps.pr.outputs.number }} but auto-merge is blocked (${{ needs.gate.outputs.reason }}). Merge it by hand."
+
+      - name: Comment once on a failed build
+        if: steps.pr.outputs.eligible == 'true' && github.event.workflow_run.conclusion == 'failure'
+        run: |
+          set -euo pipefail
+          MARKER="<!-- automerge-build-failed:$HEAD_SHA -->"
+          if gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate --jq '.[].body' | grep -qF "$MARKER"; then
+            echo "::notice::Already reported the failed build for $HEAD_SHA."
+            exit 0
+          fi
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "$MARKER
+          The Build workflow failed on \`$HEAD_SHA\`, so this PR was not merged: $RUN_URL
+
+          It merges on its own when a later build of this PR passes."
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR: ${{ steps.pr.outputs.number }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
