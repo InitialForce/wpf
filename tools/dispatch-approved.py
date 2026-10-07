@@ -16,9 +16,14 @@ Behaviour
                                  client_payload: {pr_number, head_sha,
                                                   review_1_summary, review_2_summary}
 
-- ``verdict == "escalated"``  → POST /repos/<repo>/issues
+- ``verdict == "escalated"``  → One open issue per upstream PR. If an open
+                                 issue with the PR's marker exists, add a comment;
+                                 otherwise POST /repos/<repo>/issues
                                  title: "review-disagreement: PR #<N>"
-                                 labels: ["review-disagreement", "needs-human"]
+                                 labels: ["review-disagreement", "needs-human",
+                                          "automated"]
+
+- ``verdict == "review_error"`` → Nothing. pr-discovery retries the review.
 
 - ``verdict == "rejected"``   → Nothing to dispatch. pr-review.yml records the
                                  ``rejected`` ledger event itself (one commit with
@@ -84,9 +89,45 @@ def _github_post(
             raise RuntimeError(f"Unexpected HTTP {status} from {url}")
 
 
+def _github_get(*, url: str, token: str) -> Any:
+    """GET *url* and return the parsed JSON body."""
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        method="GET",
+    )
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
 # ---------------------------------------------------------------------------
 # Verdict handlers
 # ---------------------------------------------------------------------------
+
+ESCALATION_LABELS = ["review-disagreement", "needs-human", "automated"]
+
+
+def _escalation_marker(pr_number: int) -> str:
+    """Hidden marker that identifies the one escalation issue per upstream PR."""
+    return f"<!-- if-fork:review-escalation pr={pr_number} -->"
+
+
+def _find_open_escalation(repo: str, token: str, pr_number: int) -> int | None:
+    """Return the number of the open escalation issue for *pr_number*, if any."""
+    marker = _escalation_marker(pr_number)
+    url = (
+        f"https://api.github.com/repos/{repo}/issues"
+        "?state=open&labels=review-disagreement&per_page=100"
+    )
+    for issue in _github_get(url=url, token=token):
+        if marker in (issue.get("body") or ""):
+            return int(issue["number"])
+    return None
+
 
 def _summary(verdict: Verdict, n: int) -> str:
     """Return reviewer *n*'s summary: an explicit summary field, else its reasoning."""
@@ -141,17 +182,15 @@ def _handle_escalated(
     token: str,
     dry_run: bool,
 ) -> int:
-    """Open a review-disagreement issue on GitHub."""
+    """Open the escalation issue for this PR, or comment on the open one."""
     pr_number: int = verdict["pr_number"]
+    head_sha: str = verdict.get("head_sha", "")
     review_1_summary = _summary(verdict, 1)
     review_2_summary = _summary(verdict, 2)
-
-    title = f"review-disagreement: PR #{pr_number}"
-    body_lines = [
-        f"## Review disagreement on upstream PR #{pr_number}",
+    details_lines = [
+        f"**Head SHA:** `{head_sha}`",
         "",
-        "The two independent reviewers could not reach a unanimous decision.",
-        "Human review is required before this PR can be ingested.",
+        f"**Reason:** {str(verdict.get('reasoning', ''))[:3000]}",
         "",
         "### Reviewer 1 summary",
         review_1_summary,
@@ -159,17 +198,52 @@ def _handle_escalated(
         "### Reviewer 2 summary",
         review_2_summary,
     ]
+
+    existing = None if dry_run else _find_open_escalation(repo, token, pr_number)
+    if existing is not None:
+        url = f"https://api.github.com/repos/{repo}/issues/{existing}/comments"
+        comment = "\n".join(["Escalated again.", "", *details_lines])
+        _github_post(url=url, payload={"body": comment}, token=token, dry_run=dry_run)
+        print(json.dumps({"status": "issue_commented", "issue": existing}))
+        return 0
+
+    title = f"review-disagreement: PR #{pr_number}"
+    body_lines = [
+        _escalation_marker(pr_number),
+        f"## Upstream PR #{pr_number} needs a human decision",
+        "",
+        f"https://github.com/dotnet/wpf/pull/{pr_number}",
+        "",
+        "The automatic review did not approve or reject this PR. The reviewers",
+        "disagreed, one asked for a human, a safe verdict was below the tier's",
+        "confidence threshold, or a deterministic check (hard-fail pattern or",
+        "denylisted file) fired. Nothing is applied until a human decides.",
+        "",
+        *details_lines,
+    ]
     issue_body = "\n".join(body_lines)
 
     url = f"https://api.github.com/repos/{repo}/issues"
     payload: dict[str, Any] = {
         "title": title,
         "body": issue_body,
-        "labels": ["review-disagreement", "needs-human"],
+        "labels": ESCALATION_LABELS,
     }
     _github_post(url=url, payload=payload, token=token, dry_run=dry_run)
     if not dry_run:
         print(json.dumps({"status": "issue_opened", "title": title}))
+    return 0
+
+
+def _handle_review_error(
+    verdict: Verdict,
+    repo: str,  # noqa: ARG001
+    token: str,  # noqa: ARG001
+    dry_run: bool,  # noqa: ARG001
+) -> int:
+    """A reviewer left no verdict: nothing to dispatch; pr-discovery retries."""
+    print(json.dumps({"status": "review_error", "pr_number": verdict["pr_number"],
+                      "note": "no dispatch; pr-discovery retries the review"}))
     return 0
 
 
@@ -302,6 +376,7 @@ def main(argv: list[str] | None = None) -> int:
         "approved": _handle_approved,
         "escalated": _handle_escalated,
         "rejected": _handle_rejected,
+        "review_error": _handle_review_error,
     }
 
     handler = handlers.get(verdict_value)
