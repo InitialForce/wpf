@@ -10,9 +10,9 @@ on:
       - "docs/**"
       - "*.md"
   push:
+    # if/staging reaches if/main through a PR, so its PR build covers it.
     branches:
       - if/main
-      - if/staging
     # Ledger, discovery and docs commits change nothing that goes into the
     # packages, so they must not start a Windows build. A push that also
     # touches any other path still builds.
