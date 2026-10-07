@@ -13,18 +13,32 @@ on:
     branches:
       - if/main
       - if/staging
+    # Ledger, discovery and docs commits change nothing that goes into the
+    # packages, so they must not start a Windows build. A push that also
+    # touches any other path still builds.
+    paths-ignore:
+      - ".if-fork/**"
+      - "docs/**"
+      - "**/*.md"
   workflow_dispatch:
+  # release.yml calls this workflow so a release runs exactly the same build,
+  # smoke and perf gates as if/main, packed with the release version.
+  workflow_call:
+    inputs:
+      package_version:
+        description: "NuGet version to pack (release builds). Empty = CI version."
+        type: string
+        required: false
+        default: ""
 
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
+# This workflow only builds and tests. It never publishes: release.yml owns
+# publishing, after every gate has passed.
 permissions:
   contents: read
-  pull-requests: read
-  checks: write
-  id-token: write
-  packages: write
 
 env:
   IF_REPO_ROOT: ${{ github.workspace }}
@@ -300,10 +314,18 @@ jobs:
 
       - name: Compute package version
         id: version
+        env:
+          RELEASE_VERSION: ${{ inputs.package_version }}
         run: |
-          # Pre-release version in the form 10.0.0-if.<run_number>+<short_sha>
-          $sha = "${{ github.sha }}".Substring(0, 7)
-          $version = "10.0.0-if.${{ github.run_number }}+$sha"
+          # Release builds (called from release.yml) pack the version derived
+          # from the release tag. CI builds pack a throw-away version in the
+          # form 10.0.0-ci.<run_number>+<short_sha>; it is never published.
+          if ($env:RELEASE_VERSION) {
+            $version = $env:RELEASE_VERSION
+          } else {
+            $sha = "${{ github.sha }}".Substring(0, 7)
+            $version = "10.0.0-ci.${{ github.run_number }}+$sha"
+          }
           "PKG_VERSION=$version" | Out-File -Append $env:GITHUB_ENV
           Write-Host "Package version: $version"
         shell: powershell
@@ -331,33 +353,12 @@ jobs:
           Get-ChildItem -Recurse artifacts\packages | Format-Table FullName, Length
         shell: powershell
 
-      # Publish the just-packed nupkgs to nuget.org (public).
-      # Conditions:
-      #   - Only on push events (skip pull_request) so PRs don't churn the feed
-      #   - Only on if/main (skip if/staging)
-      #   - Only on x64 (matches the existing pack gate)
-      # --skip-duplicate makes the step idempotent if a previous run already
-      # pushed a package with the same exact version.
-      - name: Publish to nuget.org
-        if: matrix.arch == 'x64' && github.event_name == 'push' && github.ref == 'refs/heads/if/main'
-        run: |
-          $files = Get-ChildItem artifacts\packages -Filter '*.nupkg'
-          foreach ($f in $files) {
-            Write-Host "Pushing $($f.Name) to nuget.org..."
-            dotnet nuget push $f.FullName `
-              --source "https://api.nuget.org/v3/index.json" `
-              --api-key "${{ secrets.NUGET_ORG_API_KEY }}" `
-              --skip-duplicate
-          }
-        shell: powershell
-
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-${{ matrix.arch }}
           path: |
             artifacts/packages/**/*.nupkg
-            artifacts/packages/**/*.snupkg
             packaging/InitialForce.WPF/runtimes/**
           if-no-files-found: error
           retention-days: 14
