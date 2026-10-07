@@ -84,18 +84,20 @@ jobs:
       - name: Close issue (workflow is green again)
         if: steps.find.outputs.action == 'close'
         run: |
-          gh issue close "${{ steps.find.outputs.issue }}" --repo "$GITHUB_REPOSITORY" \
+          gh issue close "$ISSUE" --repo "$GITHUB_REPOSITORY" \
             --comment "$FAILED_WORKFLOW passed again: $FAILED_RUN_URL"
         env:
           GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ steps.find.outputs.issue }}
 
       - name: Comment on existing issue (repeat failure)
         if: steps.find.outputs.action == 'comment'
         run: |
-          gh issue comment "${{ steps.find.outputs.issue }}" --repo "$GITHUB_REPOSITORY" \
+          gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" \
             --body "Failed again: $FAILED_RUN_URL"
         env:
           GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ steps.find.outputs.issue }}
 
   # ---------------------------------------------------------------------------
   # Job 2 — gate: autonomy kill-switch check (only for a new failure)
@@ -116,10 +118,16 @@ jobs:
     needs: [triage, gate]
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
-    environment: bot-credentials
+    # The log can carry text from upstream PRs. Claude gets read-only access
+    # and no stored credentials; the record job writes the issue and ledger.
+    permissions:
+      actions: read
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Download failed run log
         run: |
@@ -253,9 +261,10 @@ jobs:
           python tools/ledger-event.py \
             --event failure_analyzed \
             --pr-number 0 \
-            --head-sha "${{ github.event.workflow_run.head_sha }}" \
+            --head-sha "$FAILED_HEAD_SHA" \
             --actor claude-on-failure \
             --details-json "{\"workflow\": \"$FAILED_WORKFLOW\", \"failed_run_id\": \"$FAILED_RUN_ID\", \"run_url\": \"$FAILED_RUN_URL\"}" \
             --push
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          FAILED_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
