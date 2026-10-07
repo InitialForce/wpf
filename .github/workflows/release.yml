@@ -229,17 +229,19 @@ jobs:
 
       - name: Check perf regression (hard on Allocated, warn-only on time)
         run: |
+          # BenchmarkDotNet writes one JSON report per benchmark class. Pass
+          # all of them; check-regression fails on any baseline scenario that
+          # is missing or has no measurement.
           $bdn = Join-Path $env:RUNNER_TEMP "bdn-artifacts"
-          $json = Get-ChildItem $bdn -Recurse -Filter '*-report-full-compressed.json' -ErrorAction SilentlyContinue |
-                  Select-Object -First 1
-          if (-not $json) {
-            $json = Get-ChildItem $bdn -Recurse -Filter '*.json' -ErrorAction SilentlyContinue |
-                    Select-Object -First 1
+          $reports = @(Get-ChildItem $bdn -Recurse -Filter '*-report-full-compressed.json' -ErrorAction SilentlyContinue)
+          if ($reports.Count -eq 0) {
+            $reports = @(Get-ChildItem $bdn -Recurse -Filter '*-report-full.json' -ErrorAction SilentlyContinue)
           }
-          if (-not $json) { throw "No BenchmarkDotNet JSON export produced under $bdn." }
+          if ($reports.Count -eq 0) { throw "No BenchmarkDotNet JSON report under $bdn." }
+          Write-Host "Reports: $($reports.Name -join ', ')"
           $out = Join-Path $env:RUNNER_TEMP "perf-result.json"
           python tools/check-regression.py `
-            --current $json.FullName `
+            --current @($reports.FullName) `
             --baseline perf/baseline.json `
             --current-sha $env:TAG_SHA `
             --output $out `
@@ -328,18 +330,21 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "BenchmarkDotNet run failed" }
         shell: pwsh
 
-      - name: Copy the report into the baseline
+      - name: Merge all reports into the baseline
         run: |
           $bdn = Join-Path $env:RUNNER_TEMP "bdn-artifacts"
-          $json = Get-ChildItem $bdn -Recurse -Filter '*-report-full-compressed.json' -ErrorAction SilentlyContinue |
-                  Select-Object -First 1
-          if (-not $json) {
-            $json = Get-ChildItem $bdn -Recurse -Filter '*.json' -ErrorAction SilentlyContinue |
-                    Select-Object -First 1
+          $reports = @(Get-ChildItem $bdn -Recurse -Filter '*-report-full-compressed.json' -ErrorAction SilentlyContinue)
+          if ($reports.Count -eq 0) {
+            $reports = @(Get-ChildItem $bdn -Recurse -Filter '*-report-full.json' -ErrorAction SilentlyContinue)
           }
-          if (-not $json) { throw "No BenchmarkDotNet JSON export produced." }
+          if ($reports.Count -eq 0) { throw "No BenchmarkDotNet JSON report under $bdn." }
           New-Item -ItemType Directory -Force -Path perf | Out-Null
-          Copy-Item $json.FullName perf/baseline.json -Force
+          python tools/check-regression.py `
+            --current @($reports.FullName) `
+            --current-sha $env:TAG_SHA `
+            --merge-only `
+            --merged-output perf/baseline.json
+          if ($LASTEXITCODE -ne 0) { throw "baseline merge failed (exit $LASTEXITCODE)" }
           Write-Host "Review and commit perf/baseline.json to update the checked-in baseline."
         shell: pwsh
 

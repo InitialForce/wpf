@@ -347,3 +347,17 @@ def test_release_notes_agent_has_no_bash_and_read_only_token(workflow: dict) -> 
     assert claude["with"]["github_token"] == "${{ github.token }}"
     combined = _steps_combined_run(job)
     assert "git log" in combined, "the commit list is prepared before the agent runs"
+
+
+def test_perf_gate_passes_every_report(workflow: dict) -> None:
+    """BenchmarkDotNet writes one report per class; all must reach the gate."""
+    combined = _steps_combined_run(workflow["jobs"]["perf-on-pack"])
+    assert "Select-Object -First 1" not in combined
+    assert "--current @($reports.FullName)" in combined
+
+
+def test_baseline_regeneration_merges_every_report(workflow: dict) -> None:
+    combined = _steps_combined_run(workflow["jobs"]["regenerate-perf-baseline"])
+    assert "Select-Object -First 1" not in combined
+    assert "--merge-only" in combined
+    assert "--merged-output perf/baseline.json" in combined
