@@ -397,3 +397,28 @@ def test_workflow_call_package_version_input(workflow: dict) -> None:
     build_steps = workflow["jobs"]["build-wpf"]["steps"]
     version_step = next(s for s in build_steps if s.get("id") == "version")
     assert "inputs.package_version" in str(version_step.get("env", {}))
+
+
+def test_workflow_call_ref_input_used_by_every_checkout(workflow: dict) -> None:
+    """A release build must build the verified tag commit in every job, and no
+    checkout may leave a token in .git/config."""
+    call = workflow["on"].get("workflow_call") or {}
+    assert "ref" in (call.get("inputs") or {})
+    for job_name, job in workflow["jobs"].items():
+        for step in job.get("steps", []):
+            if str(step.get("uses", "")).startswith("actions/checkout"):
+                with_block = step.get("with") or {}
+                assert with_block.get("ref") == "${{ inputs.ref }}", job_name
+                assert with_block.get("persist-credentials") is False, job_name
+
+
+def test_release_call_has_its_own_concurrency_group(workflow: dict) -> None:
+    """A push build on if/main must not cancel a release build (or vice versa)."""
+    assert "inputs.ref" in workflow["concurrency"]["group"]
+
+
+def test_perf_job_is_labelled_placeholder(workflow: dict) -> None:
+    perf = workflow["jobs"]["perf"]
+    assert "placeholder" in perf["name"].lower()
+    runs = "\n".join(str(s.get("run", "")) for s in perf["steps"])
+    assert "dotnet" not in runs, "the placeholder must not look like it runs benchmarks"
