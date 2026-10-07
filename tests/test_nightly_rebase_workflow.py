@@ -162,6 +162,7 @@ def test_no_dated_branches() -> None:
 def test_denylisted_conflicts_skip_claude(sync_steps: list[dict]) -> None:
     deny = _step(sync_steps, "Refuse conflicts on denylisted files")
     assert "tools/check-denylist.py" in deny["run"]
+    assert "--changed-files" in deny["run"]
     resolve = _step(sync_steps, "Resolve conflicts")
     assert resolve["if"] == "steps.denylist.outputs.allowed == 'true'"
     assert resolve.get("continue-on-error") is True

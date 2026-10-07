@@ -179,7 +179,7 @@ jobs:
         run: |
           set +e
           python3 tools/check-denylist.py --config .if-fork/config.yaml \
-            --files "$RUNNER_TEMP/conflicts.txt" > "$RUNNER_TEMP/denylist.json"
+            --changed-files "$RUNNER_TEMP/conflicts.txt" > "$RUNNER_TEMP/denylist.json"
           RC=$?
           set -e
           cat "$RUNNER_TEMP/denylist.json"
