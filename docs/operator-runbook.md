@@ -1,7 +1,7 @@
 # Operator Runbook — InitialForce WPF Fork
 
 **Owner:** Øystein Krog (Initial Force)
-**Date:** 2026-04-27
+**Date:** 2026-04-27, pipeline sections updated 2026-10-07
 **Authoritative for:** Steady-state operations and incident response post-bootstrap.
 **Not authoritative for:** Bootstrap steps (see `exec-docs/50-runbooks.md` §50.1).
 
@@ -14,66 +14,71 @@ Honest load estimate: 6 predictable hours/month (daily + weekly) plus 2–14 hou
 | Signal | Where |
 |---|---|
 | Workflow run history | `https://github.com/InitialForce/wpf/actions` |
-| Latest triage-summary issue | `gh issue list --label triage-summary --repo InitialForce/wpf --limit 1` |
+| Open pipeline issues | `gh issue list --label automated --state open --repo InitialForce/wpf` |
+| Open pipeline PRs | `gh pr list --label automated --repo InitialForce/wpf` |
 | Kill-switch state | `gh variable get IF_AUTONOMY_ENABLED --repo InitialForce/wpf` |
 | Freeze state | `gh variable get IF_AUTOMERGE_FROZEN --repo InitialForce/wpf` |
-| Ledger current state | `.if-fork/patch-state.json` on `if/release/10.0` |
+| Ledger | `.if-fork/patch-ledger.jsonl` on `if/main` |
 | Audit branch | `git log audit --oneline` |
 | Perf series | `perf/series.jsonl` (last entry = most recent benchmark) |
 
 ---
 
-## Daily Checklist (~5 min; ~15 min if issues flagged)
+## How the pipeline runs
 
-1. Scan for flagged labels:
-   ```bash
-   # NOTE: --label with a comma-separated list applies AND logic (all labels must be present).
-   # Use --search with label: filters for OR semantics so a security-only issue is not missed.
-   gh search issues --repo InitialForce/wpf \
-     --label security --state open
-   gh search issues --repo InitialForce/wpf \
-     --label review-disagreement --state open
-   gh search issues --repo InitialForce/wpf \
-     --label rebase-conflict --state open
-   ```
-   Any hit requires action before end of day. `security` issues with no human comment after 48 hours trigger an email to oncall — do not let that fire.
+The pipeline runs without a person in the loop; [FORK.md](../FORK.md#pipeline) describes each stage. In short:
 
-2. Skim the weekly health-pulse line in the latest `triage-summary` issue:
-   ```bash
-   gh issue list --label "triage-summary" --repo InitialForce/wpf --limit 1
-   ```
-   If the summary line says `cost: $XX > $60` or flags a perf regression, investigate before leaving.
+- Every change reaches `if/main` through a PR labelled `automated`: one sync PR `if/staging -> if/main` for upstream `release/10.0`, and one `claude/cherry-pick-pr-<N>` PR per approved upstream PR. `automerge.yml` merges each one when its `Build` run passes.
+- `auto-release.yml` tags and publishes to nuget.org at most once a day, and only when `src/` changed since the last release.
+- Every problem that needs a person is one open issue labelled `automated`. Repeats add a comment instead of a new issue, and the issue closes itself when the problem is gone:
 
-3. Nothing to do if: no flagged labels, health pulse is green, cost under $60/month.
+| Issue title | Opened by | Closes when |
+|---|---|---|
+| `CI failure: <workflow>` | `claude-on-failure.yml`, with a Claude analysis | that workflow passes again |
+| `Nightly upstream sync blocked` | `nightly-rebase.yml` | a later sync succeeds |
+| `Weekly differential: fork smoke results differ from upstream` | `weekly-differential.yml` | a clean weekly run |
+| `review-disagreement: PR #<N> ...` | `pr-review.yml` | a person closes it (see below) |
+
+A failed build on a pipeline PR is reported as one comment on that PR, not as an issue.
 
 ---
 
-## Weekly Checklist (~20–60 min)
+## Daily Checklist (~5 min)
 
-Budget 45–60 minutes on rebase weeks. A 200-file rebase diff is not a 20-minute review.
-
-1. Review the rebase PR opened by the bot (`claude/rebase-YYYYMMDD`):
-   - Read the diff-summary comment; check for `dropped-hunk` or `escalation` warnings.
-   - Verify CI is green: build + smoke + perf-gate.
-   - Check `.if-fork/patch-state.json` for entries with state `graduated_upstream` — these patches can be dropped.
-   - Approve and merge if clean; leave a comment explaining the conflict if escalating.
-
-2. Check for a weekly differential report:
+1. List open pipeline issues:
    ```bash
-   gh issue list --label "differential,weekly-report" --repo InitialForce/wpf --limit 1
+   gh issue list --repo InitialForce/wpf --label automated --state open
+   ```
+   Each one names what failed and links the run. Nothing else needs a daily look.
+
+2. List pipeline PRs that are still open:
+   ```bash
+   gh pr list --repo InitialForce/wpf --label automated \
+     --json number,title,headRefName,createdAt
+   ```
+   A PR open for more than a day either has a failed build (see its comment) or auto-merge is frozen.
+
+---
+
+## Weekly Checklist (~20 min)
+
+1. Check that upstream is being merged. `if/main` should contain upstream `release/10.0` within a day of each upstream change.
+   ```bash
+   git fetch upstream release/10.0 && git fetch origin if/main
+   git merge-base --is-ancestor upstream/release/10.0 origin/if/main && echo "up to date"
    ```
 
-3. If `IF_AUTOMERGE_FROZEN=true` (manually set after detecting a regression): investigate, fix, then clear:
+2. If `IF_AUTOMERGE_FROZEN=true` (set after a regression): investigate, fix, then clear:
    ```bash
    gh variable set IF_AUTOMERGE_FROZEN -b "false" --repo InitialForce/wpf
    ```
 
-4. **Ledger signature integrity check** (not called by any CI workflow — must be run manually):
+3. **Ledger signature integrity check** (no CI workflow runs it, so run it by hand):
    ```bash
    python tools/ledger-validate.py --ledger-path .if-fork/patch-ledger.jsonl --strict-signature
    ```
    Expected output: `Ledger OK: N entries, all hashes valid, all commits signed`
-   Any error (unsigned commit, hash mismatch, unexpected entry) is an incident — pause autonomy immediately and investigate via I-10.
+   Any error (unsigned commit, hash mismatch, unexpected entry) is an incident: pause autonomy and follow I-10.
 
 ---
 
@@ -129,15 +134,39 @@ gh workflow run pr-discovery.yml --repo InitialForce/wpf
 1. Open the issue: `gh issue view <N> --repo InitialForce/wpf`
 2. Read both reviewer rationales attached to the issue.
 3. Make a judgment call: comment `human-resolution: safe` or `human-resolution: unsafe`.
-4. The `pr-ingestion.yml` workflow re-checks resolution and proceeds or closes.
+4. If you decide the PR is safe, start ingestion by hand with the reviewed head SHA (the `review_1` and `review_2` ledger entries for the PR hold it):
+   ```bash
+   gh workflow run pr-ingestion.yml --repo InitialForce/wpf -f pr_number=<N> -f head_sha=<reviewed sha>
+   ```
+   If you decide it is unsafe, do nothing more. Close the issue in both cases.
 
-### Force a manual rebase
+### Run the upstream sync by hand
 ```bash
-git fetch upstream
-git checkout -b claude/rebase-$(date +%Y%m%d) if/release/10.0
-git rebase --onto upstream/release/10.0 $PREV_UPSTREAM_TAG --strategy-option=patience
-git config rerere.enabled true && git config rerere.autoupdate true
-# Push and open a PR as usual.
+# Rebuild if/staging even if the open sync PR already has the current upstream SHA:
+gh workflow run nightly-rebase.yml --repo InitialForce/wpf -f force_rebase=true
+```
+If the sync is blocked by conflicts, merge by hand. Never rebase `if/main`.
+```bash
+git fetch upstream release/10.0 && git fetch origin if/main
+git checkout -B if/staging origin/if/main
+git merge --no-ff upstream/release/10.0
+# resolve, commit, then:
+git push --force-with-lease origin if/staging
+gh pr create --repo InitialForce/wpf --base if/main --head if/staging \
+  --title "Merge upstream release/10.0 into if/main" --label automated
+```
+The `automated` label lets `automerge.yml` merge it when Build passes. The next nightly run closes the "Nightly upstream sync blocked" issue.
+
+### Adopt an upstream stable tag by hand
+```bash
+gh workflow run upstream-stable-adoption.yml --repo InitialForce/wpf -f tag=v10.0.<N>
+```
+The daily poller does this on its own and stops retrying a tag after three failed runs.
+
+### Merge a pipeline PR while auto-merge is frozen
+Use a merge commit, never squash. Squashing drops the upstream history and the `(cherry picked from commit ...)` trailers.
+```bash
+gh pr merge <N> --repo InitialForce/wpf --merge
 ```
 
 ### Check patch-ledger integrity manually
@@ -223,26 +252,17 @@ Run in order after any absence of 5+ days:
 gh variable get IF_AUTONOMY_ENABLED --repo InitialForce/wpf
 gh variable get IF_AUTOMERGE_FROZEN --repo InitialForce/wpf
 
-# 2. Issues opened since last check (substitute last-check date)
-# NOTE: --label with comma-separated values applies AND logic; use separate searches for OR.
-LAST_VISIT=2026-05-01
-gh search issues --repo InitialForce/wpf --state open \
-  --label security --created ">$LAST_VISIT"
-gh search issues --repo InitialForce/wpf --state open \
-  --label review-disagreement --created ">$LAST_VISIT"
-gh search issues --repo InitialForce/wpf --state open \
-  --label rebase-conflict --created ">$LAST_VISIT"
+# 2. Open pipeline issues (one per problem; repeats are comments)
+gh issue list --repo InitialForce/wpf --label automated --state open
 
 # 3. Ledger changes since last visit
-git log --since=$LAST_VISIT --oneline -- .if-fork/patch-state.json
+LAST_VISIT=2026-05-01
+git log origin/if/main --since=$LAST_VISIT --oneline -- .if-fork/patch-ledger.jsonl | head -30
 
-# 4. Audit branch summary
-git log audit --since=$LAST_VISIT --oneline | head -30
+# 4. Pipeline PRs still open
+gh pr list --repo InitialForce/wpf --label automated
 
-# 5. Open PRs requiring human action
-gh pr list --repo InitialForce/wpf --label "awaiting-human,review-disagreement"
-
-# 6. Re-enable autonomy if it was paused before your absence
+# 5. Re-enable autonomy if it was paused before your absence
 gh variable set IF_AUTONOMY_ENABLED -b "true" --repo InitialForce/wpf
 ```
 
@@ -283,6 +303,11 @@ gh api /orgs/InitialForce/packages/nuget/InitialForce.WPF/versions \
 VERSION_ID=<id>
 GH_TOKEN=$NUGET_FEED_PAT \
   gh api -X DELETE /orgs/InitialForce/packages/nuget/InitialForce.WPF/versions/$VERSION_ID
+
+# Step 1b: Unlist the version on nuget.org (nuget.org 'delete' unlists; it cannot remove).
+# Do this for both InitialForce.WPF and InitialForce.WPF.RuntimeOverride.
+dotnet nuget delete InitialForce.WPF $BAD_VERSION \
+  --source https://api.nuget.org/v3/index.json --api-key <nuget.org key> --non-interactive
 
 # Step 2: Pin SC to last known-good in Directory.Packages.props
 # Step 3: Rebuild from previous good tag (workflow_dispatch input is named "tag", not "version_override")
@@ -339,36 +364,16 @@ MTTR target: 30 min.
 
 ---
 
-### I-3: Nightly Rebase Failed with Conflicts on Multiple Files
+### I-3: Nightly Upstream Sync Blocked
 
-**Detection:** `nightly-rebase.yml` opens `rebase-conflict` issue; conflict count exceeds 30% threshold.
+**Detection:** an open issue titled "Nightly upstream sync blocked". It names the upstream SHA, links the run, and includes the escalation report: denylisted conflict files, Claude's reasons, or files the merge touched that upstream did not change.
 
 **Diagnosis:**
 ```bash
-# NOTE: nightly-rebase.yml does NOT upload a "conflict-artifacts" artifact.
-# Conflict file lists are written to /tmp/conflict-files.txt inside the runner
-# and are NOT persisted as artifacts. To see which files conflicted, read the
-# raw workflow log:
-gh run view <run-id> --repo InitialForce/wpf --log | grep "conflict-files\|Conflicts detected"
-# Or open the run in the browser and inspect the "Attempt rebase" step output.
-bash tools/cherry-pick-pre-flight.sh \
-  --base upstream/release/10.0 --patches-dir patches/ \
-  --output /tmp/graduation-candidates.txt
+gh run view <run-id> --repo InitialForce/wpf --log | grep -E "Conflicts:|Conflict markers|denylist|upstream did not change"
 ```
 
-**Note for future improvement:** `nightly-rebase.yml` should be updated to upload `/tmp/conflict-files.txt` as a `conflict-artifacts` artifact on failure. Without this, conflict diagnosis requires reading raw logs. Track as a separate improvement item.
-
-**Remediation:**
-```bash
-# Drop graduated patches
-python tools/ledger-event.py --event graduated_upstream --pr-number NNNN \
-  --upstream-commit SHA --detection-method hunk_match
-# Manual rebase
-git fetch upstream
-git checkout claude/rebase-YYYYMMDD
-git rebase --onto upstream/release/10.0 $PREV_UPSTREAM_TAG --strategy-option=patience
-git config rerere.enabled true && git config rerere.autoupdate true
-```
+**Remediation:** merge by hand as in "Run the upstream sync by hand" above. The job records one `rebase_failed` ledger event per upstream SHA and does not repeat the issue for the same SHA, so nothing piles up while you work.
 
 ---
 
@@ -589,7 +594,7 @@ Estimated time: 4–8 hours spread across multiple sessions. Do not attempt in o
 1. List open disagreements: `gh issue list --repo InitialForce/wpf --label review-disagreement --state open --limit 100`
 2. For each: `gh issue view <N> --repo InitialForce/wpf` — read both reviewer rationales.
 3. Post resolution comment: `gh issue comment <N> --repo InitialForce/wpf --body "human-resolution: safe"` or `human-resolution: unsafe`.
-4. The `pr-ingestion.yml` workflow will pick up the resolution automatically.
+4. For a PR you judge safe, start `pr-ingestion.yml` by hand (see "Escalate a review-disagreement issue").
 5. Close when disagreement count reaches zero.
 
 ### wpf-2xo: First release.yml run
