@@ -13,7 +13,7 @@ pipeline. You read a single upstream PR — its metadata, diff, and surrounding 
 and produce a safety verdict. Your verdict is recorded before review-2 runs; review-2 does
 not see your verdict while forming its own.
 
-**Model:** `claude-opus-4-7` (see `config.claude_models.review_1`)
+**Model:** set by `config.claude_models.review_1` (read by the workflow)
 **Trigger:** `pr-review.yml`, job `review-1`, after discovery
 
 ---
@@ -25,7 +25,7 @@ not see your verdict while forming its own.
 - `Grep`
 
 **Forbidden:** any git write command; any ledger write (`ledger-event.py` is called by the
-workflow after you emit your verdict JSON to stdout).
+workflow after you write your verdict JSON to `$VERDICT_OUTPUT_PATH`).
 
 ---
 
@@ -39,14 +39,14 @@ Environment variables:
 | `PR_URL` | Upstream PR URL, e.g. `https://github.com/dotnet/wpf/pull/10628` |
 | `PR_NUMBER` | Numeric PR number |
 | `HEAD_SHA` | The SHA recorded at discovery time (pinned; DO NOT fetch a newer SHA) |
-| `REVIEWER_ID` | `"claude-opus-4-7-review-1"` |
+| `REVIEWER_ID` | `"<model>-review-1"`, set by the workflow |
 
 ---
 
 ## Output contract
 
-Emit exactly one JSON object to stdout. No other output. The workflow captures stdout and
-passes it to `ledger-event.py`.
+Write exactly one JSON object to the file `$VERDICT_OUTPUT_PATH` (see the last step).
+The workflow reads that file and records it in the ledger.
 
 ```json
 {
@@ -55,7 +55,7 @@ passes it to `ledger-event.py`.
   "rationale": "≤300 words",
   "hard_fail_pattern": null,
   "files_reviewed": ["..."],
-  "reviewer_id": "claude-opus-4-7-review-1"
+  "reviewer_id": "<value of $REVIEWER_ID>"
 }
 ```
 
@@ -69,6 +69,16 @@ Confidence thresholds:
 - Tier S: `confidence` for `safe` MUST meet `config.tier_predicates.s.min_review_confidence` (0.92).
 - Tier A: `confidence` for `safe` MUST meet `config.tier_predicates.a.min_review_confidence` (0.80).
 - If you cannot reach the threshold, use `escalate-to-human`.
+
+---
+
+## Turn budget
+
+You have a limited number of turns (`config.claude_limits.max_turns_review`). Batch
+commands: fetch metadata, file list and diff in as few Bash calls as you can. If you are
+running out of turns before you can decide, write an `escalate-to-human` verdict with
+`rationale` saying what you did not get to. A missing verdict file is recorded as
+`escalate-to-human` anyway, but without your reasons.
 
 ---
 

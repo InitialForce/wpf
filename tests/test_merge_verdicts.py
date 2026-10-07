@@ -300,3 +300,81 @@ def test_fixture_safe_reject_escalated(tmp_path: Path) -> None:
     exit_code, output = run_main(tmp_path, safe_json, reject_json)
     assert exit_code == merge_verdicts.EXIT_ESCALATED  # type: ignore[attr-defined]
     assert output["verdict"] == "escalated"
+
+
+# ===========================================================================
+# 17. --missing-as-escalate: a crashed reviewer still ends in an outcome
+# ===========================================================================
+def test_missing_as_escalate_turns_missing_file_into_escalation(tmp_path: Path) -> None:
+    r2_path = tmp_path / "r2.json"
+    write_json(r2_path, _safe_rv("r2"))
+    out_path = tmp_path / "output.json"
+    code = merge_verdicts.main([  # type: ignore[attr-defined]
+        "--review-1", str(tmp_path / "missing.json"),
+        "--review-2", str(r2_path),
+        "--pr-number", str(PR_NUMBER),
+        "--head-sha", HEAD_SHA,
+        "--output", str(out_path),
+        "--missing-as-escalate",
+    ])
+    output = json.loads(out_path.read_text())
+    assert code == 2
+    assert output["verdict"] == "escalated"
+    assert "no valid verdict" in output["review_1"]["reasoning"]
+
+
+# ===========================================================================
+# 18. --events-out: one batch of ledger events per review run
+# ===========================================================================
+@pytest.mark.parametrize(
+    ("r1", "r2", "outcome"),
+    [
+        (_safe_rv(), _safe_rv("r2"), "approved"),
+        (_unsafe_rv(), _unsafe_rv("r2"), "rejected"),
+        (_safe_rv(), _escalate_rv("r2"), "escalated"),
+    ],
+)
+def test_events_out_records_reviews_verdict_and_outcome(
+    tmp_path: Path, r1: dict[str, Any], r2: dict[str, Any], outcome: str
+) -> None:
+    write_json(tmp_path / "r1.json", r1)
+    write_json(tmp_path / "r2.json", r2)
+    events_path = tmp_path / "events.jsonl"
+    merge_verdicts.main([  # type: ignore[attr-defined]
+        "--review-1", str(tmp_path / "r1.json"),
+        "--review-2", str(tmp_path / "r2.json"),
+        "--pr-number", str(PR_NUMBER),
+        "--head-sha", HEAD_SHA,
+        "--output", str(tmp_path / "out.json"),
+        "--events-out", str(events_path),
+        "--run-url", "https://example/run/1",
+    ])
+    events = [json.loads(line) for line in events_path.read_text().splitlines()]
+    assert [e["event"] for e in events] == ["review_1", "review_2", "merged_verdict", outcome]
+    assert all(e["pr_number"] == PR_NUMBER and e["head_sha"] == HEAD_SHA for e in events)
+    assert events[2]["details"]["verdict"] == outcome
+    assert events[0]["details"]["run_url"] == "https://example/run/1"
+
+
+def test_single_review_uses_review_1_only(tmp_path: Path) -> None:
+    write_json(tmp_path / "r1.json", _safe_rv())
+    events_path = tmp_path / "events.jsonl"
+    code = merge_verdicts.main([  # type: ignore[attr-defined]
+        "--review-1", str(tmp_path / "r1.json"),
+        "--single-review",
+        "--pr-number", str(PR_NUMBER),
+        "--head-sha", HEAD_SHA,
+        "--output", str(tmp_path / "out.json"),
+        "--events-out", str(events_path),
+    ])
+    events = [json.loads(line)["event"] for line in events_path.read_text().splitlines()]
+    assert code == 0
+    assert events == ["review_1", "merged_verdict", "approved"]
+
+
+def test_review_2_required_without_single_review() -> None:
+    with pytest.raises(SystemExit) as exc:
+        merge_verdicts.parse_args([  # type: ignore[attr-defined]
+            "--review-1", "a", "--pr-number", "1", "--head-sha", "x", "--output", "o",
+        ])
+    assert exc.value.code == 2

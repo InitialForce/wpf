@@ -186,7 +186,7 @@ def test_rejected_dry_run_prints_ledger_cmd(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     p = _write_verdict(tmp_path, REJECTED_VERDICT)
-    rc = dispatch_approved.main(_argv(p, dry_run=True))
+    rc = dispatch_approved.main(_argv(p, dry_run=True) + ["--record-rejected"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "ledger-event.py" in out
@@ -206,7 +206,7 @@ def test_rejected_live_calls_subprocess(tmp_path: Path) -> None:
 
     with patch("subprocess.run", return_value=mock_result) as mock_run, \
          patch.dict("os.environ", {"GITHUB_TOKEN": TOKEN}):
-        rc = dispatch_approved.main(_argv(p))
+        rc = dispatch_approved.main(_argv(p) + ["--record-rejected"])
 
     assert rc == 0
     assert mock_run.called
@@ -307,3 +307,45 @@ def test_fixture_escalated_loads() -> None:
     data = json.loads((FIXTURES / "merged-verdict-escalated.json").read_text())
     assert data["verdict"] == "escalated"
     assert "pr_number" in data
+
+
+# ===========================================================================
+# rejected without --record-rejected: no ledger write, no HTTP call
+# ===========================================================================
+
+def test_rejected_default_does_not_write_ledger(tmp_path: Path) -> None:
+    p = _write_verdict(tmp_path, REJECTED_VERDICT)
+    with patch("subprocess.run") as mock_run, \
+         patch("urllib.request.urlopen") as mock_open, \
+         patch.dict("os.environ", {"GITHUB_TOKEN": TOKEN}):
+        rc = dispatch_approved.main(_argv(p))
+    assert rc == 0
+    assert not mock_run.called
+    assert not mock_open.called
+
+
+# ===========================================================================
+# merge-verdicts.py output (no *_summary fields): summaries come from reasoning
+# ===========================================================================
+
+def test_approved_payload_from_merge_verdicts_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    verdict = {
+        "verdict": "approved",
+        "pr_number": 6511,
+        "head_sha": "abc",
+        "review_1": {"verdict": "safe", "rationale": "Fine."},
+        "review_2": {"verdict": "safe", "reasoning": "Also fine."},
+        "reasoning": "Both safe.",
+    }
+    p = _write_verdict(tmp_path, verdict)
+    rc = dispatch_approved.main(_argv(p, dry_run=True))
+    assert rc == 0
+    out = capsys.readouterr().out
+    body = json.loads(out.split("[dry-run] body: ", 1)[1])
+    assert body["event_type"] == "pr-ingestion-requested"
+    assert body["client_payload"]["pr_number"] == 6511
+    assert body["client_payload"]["head_sha"] == "abc"
+    assert body["client_payload"]["review_1_summary"] == "safe: Fine."
+    assert body["client_payload"]["review_2_summary"] == "safe: Also fine."

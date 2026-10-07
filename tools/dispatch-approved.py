@@ -20,8 +20,10 @@ Behaviour
                                  title: "review-disagreement: PR #<N>"
                                  labels: ["review-disagreement", "needs-human"]
 
-- ``verdict == "rejected"``   → Print the equivalent ledger-event.py invocation
-                                 (dry-run) or exec it (live mode).  Exit 0.
+- ``verdict == "rejected"``   → Nothing to dispatch. pr-review.yml records the
+                                 ``rejected`` ledger event itself (one commit with
+                                 the review events). With ``--record-rejected`` the
+                                 tool appends it via ledger-event.py (manual use).
 
 - Any other value             → Exit code 2.
 
@@ -86,6 +88,20 @@ def _github_post(
 # Verdict handlers
 # ---------------------------------------------------------------------------
 
+def _summary(verdict: Verdict, n: int) -> str:
+    """Return reviewer *n*'s summary: an explicit summary field, else its reasoning."""
+    explicit = verdict.get(f"review_{n}_summary")
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    review = verdict.get(f"review_{n}")
+    if isinstance(review, dict):
+        for key in ("reasoning", "rationale"):
+            text = review.get(key)
+            if isinstance(text, str) and text:
+                return f"{review.get('verdict', '?')}: {text}"[:1500]
+    return ""
+
+
 def _handle_approved(
     verdict: Verdict,
     repo: str,
@@ -95,8 +111,8 @@ def _handle_approved(
     """Fire a pr-ingestion-requested repository_dispatch event."""
     pr_number: int = verdict["pr_number"]
     head_sha: str = verdict["head_sha"]
-    review_1_summary: str = verdict.get("review_1_summary", "")
-    review_2_summary: str = verdict.get("review_2_summary", "")
+    review_1_summary = _summary(verdict, 1)
+    review_2_summary = _summary(verdict, 2)
 
     url = f"https://api.github.com/repos/{repo}/dispatches"
     payload: dict[str, Any] = {
@@ -127,8 +143,8 @@ def _handle_escalated(
 ) -> int:
     """Open a review-disagreement issue on GitHub."""
     pr_number: int = verdict["pr_number"]
-    review_1_summary: str = verdict.get("review_1_summary", "")
-    review_2_summary: str = verdict.get("review_2_summary", "")
+    review_1_summary = _summary(verdict, 1)
+    review_2_summary = _summary(verdict, 2)
 
     title = f"review-disagreement: PR #{pr_number}"
     body_lines = [
@@ -162,9 +178,14 @@ def _handle_rejected(
     repo: str,  # noqa: ARG001  (kept for consistent signature)
     token: str,  # noqa: ARG001
     dry_run: bool,
+    record: bool = False,
 ) -> int:
-    """Record a rejected ledger event via tools/ledger-event.py."""
+    """Rejected: nothing to dispatch; optionally record the ledger event."""
     pr_number: int = verdict["pr_number"]
+    if not record:
+        print(json.dumps({"status": "rejected", "pr_number": pr_number,
+                          "note": "no dispatch; ledger event recorded by caller"}))
+        return 0
     head_sha: str = verdict["head_sha"]
 
     cmd = [
@@ -211,6 +232,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="VAR",
         help="Name of environment variable containing the GitHub token "
              "(default: GITHUB_TOKEN).",
+    )
+    parser.add_argument(
+        "--record-rejected",
+        action="store_true",
+        help="On a rejected verdict, append the 'rejected' ledger event "
+             "(pr-review.yml records it itself, so it does not pass this).",
     )
     parser.add_argument(
         "--dry-run",
@@ -288,6 +315,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    if handler is _handle_rejected:
+        return _handle_rejected(verdict, args.repo, token, args.dry_run, args.record_rejected)
     return handler(verdict, args.repo, token, args.dry_run)
 
 
