@@ -94,3 +94,21 @@ def test_never_publishes(workflow: dict) -> None:
 def test_actionlint() -> None:
     result = subprocess.run(["actionlint", str(WORKFLOW_PATH)], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_dispatches_release_on_if_main(workflow: dict) -> None:
+    """release.yml has no tag trigger; auto-release dispatches it on if/main."""
+    runs = _runs(workflow["jobs"]["tag"])
+    assert "gh workflow run release.yml" in runs
+    assert "--ref if/main" in runs
+    assert '-f tag="$TAG"' in runs
+    assert workflow["permissions"].get("actions") == "write"
+
+
+def test_checks_public_key_variable_before_tagging(workflow: dict) -> None:
+    steps = workflow["jobs"]["tag"]["steps"]
+    names = [s.get("name", "") for s in steps]
+    check = names.index("Check the published verification key matches the signing key")
+    tag = names.index("Create and push signed release tag")
+    assert check < tag
+    assert "vars.IF_RELEASE_SIGNING_PUBKEY" in str(steps[check]["env"])

@@ -4,8 +4,10 @@
 # passed, but only when src/ (the WPF code that goes into the packages)
 # changed since the last published release, and at most once per UTC day.
 #
-# The tag is signed by the bot key and pushed with the GitHub App token, so
-# the push starts release.yml, which runs every gate again (build.yml with
+# The tag is signed by the bot key and pushed. This workflow then dispatches
+# release.yml on if/main with the tag name as input (release.yml has no
+# tag-push trigger, so a tag can never bring its own workflow). release.yml
+# verifies the tag with the public key, runs every gate again (build.yml with
 # the release version, smoke on the packed nupkg, perf-on-pack) and only then
 # publishes to nuget.org. This workflow never publishes anything itself.
 #
@@ -31,7 +33,7 @@ concurrency:
 
 permissions:
   contents: read
-  actions: read
+  actions: write
 
 jobs:
   gate:
@@ -54,8 +56,9 @@ jobs:
           app_id: ${{ secrets.GH_APP_ID }}
           private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
 
-      # Checked out with the App token: a tag pushed with GITHUB_TOKEN would
-      # not start release.yml.
+      # Checked out with the App token, which pushes the release tag
+      # (GITHUB_TOKEN here is read-only for contents). This job runs only
+      # if/main code; nothing from the tag or a PR executes here.
       - uses: actions/checkout@v4
         with:
           ref: if/main
@@ -68,9 +71,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          SHA=$(gh run list --repo "${{ github.repository }}" \
+          SHA=$(gh run list --repo "$GITHUB_REPOSITORY" \
             --workflow build.yml --branch if/main --event push --status success \
             --limit 1 --json headSha --jq '.[0].headSha // ""')
+          if [[ -n "$SHA" && ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Unexpected headSha from the Build run list"
+            exit 1
+          fi
           if [ -z "$SHA" ]; then
             echo "::notice::No successful Build run on if/main; nothing to release."
             echo "sha=" >> "$GITHUB_OUTPUT"
@@ -91,13 +98,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
+          SHA: ${{ steps.green.outputs.sha }}
         run: |
           set -euo pipefail
           # A tag counts as published once release.yml created its GitHub
           # Release, which is its last publish step.
-          gh release list --repo "${{ github.repository }}" --limit 200 \
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 \
             --json tagName --jq '.[].tagName' > "$RUNNER_TEMP/published-tags.txt"
-          ARGS=(plan --target "${{ steps.green.outputs.sha }}"
+          ARGS=(plan --target "$SHA"
                 --published-tags-file "$RUNNER_TEMP/published-tags.txt")
           if [ "$FORCE" = "true" ]; then ARGS+=(--force); fi
           python3 tools/release-version.py "${ARGS[@]}" | tee -a "$GITHUB_OUTPUT"
@@ -111,6 +119,38 @@ jobs:
           gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
           gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
 
+      # release.yml verifies tags with the public key in the repository
+      # variable IF_RELEASE_SIGNING_PUBKEY. Stop before tagging when that
+      # variable is missing or holds a different key; print the public key so
+      # an admin can set it.
+      - name: Check the published verification key matches the signing key
+        if: steps.plan.outputs.release == 'true'
+        env:
+          SIGNING_PUBKEY: ${{ vars.IF_RELEASE_SIGNING_PUBKEY }}
+          GH_BOT_GPG_FINGERPRINT: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SIGNING_PUBKEY" ]; then
+            {
+              echo "## Set IF_RELEASE_SIGNING_PUBKEY"
+              echo "release.yml needs the bot's public key. Set the repository variable"
+              echo "IF_RELEASE_SIGNING_PUBKEY to this value:"
+              echo '```'
+              gpg --armor --export "$GH_BOT_GPG_FINGERPRINT"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Repository variable IF_RELEASE_SIGNING_PUBKEY is not set; see the step summary"
+            exit 1
+          fi
+          VERIFY_HOME=$(mktemp -d)
+          printf '%s\n' "$SIGNING_PUBKEY" | gpg --homedir "$VERIFY_HOME" --batch --quiet --import
+          if ! gpg --homedir "$VERIFY_HOME" --with-colons --list-keys \
+               | grep -q "^fpr:::::::::${GH_BOT_GPG_FINGERPRINT}:"; then
+            echo "::error::IF_RELEASE_SIGNING_PUBKEY does not hold the bot signing key ($GH_BOT_GPG_FINGERPRINT)"
+            exit 1
+          fi
+        shell: bash
+
       - name: Create and push signed release tag
         if: steps.plan.outputs.release == 'true'
         env:
@@ -122,7 +162,20 @@ jobs:
           VERSION=$(python3 tools/release-version.py version --tag "$TAG")
           git tag -s "$TAG" "$SHA" -m "InitialForce WPF $VERSION" -m "$REASON"
           git push origin "refs/tags/$TAG"
-          echo "Pushed $TAG ($VERSION) at $SHA; release.yml takes it from here."
+          echo "Pushed $TAG ($VERSION) at $SHA."
+        shell: bash
+
+      - name: Dispatch release.yml on if/main for the tag
+        if: steps.plan.outputs.release == 'true'
+        env:
+          # GITHUB_TOKEN may start workflow_dispatch runs (GitHub's documented
+          # exception to "GITHUB_TOKEN events start no workflows").
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref if/main -f tag="$TAG"
+          echo "Dispatched release.yml for $TAG."
         shell: bash
 
       - name: Summary
