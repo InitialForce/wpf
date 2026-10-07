@@ -24,12 +24,14 @@ never reach you.
 
 ## Allowed tools
 
-- `Bash`: read-only git only (`git diff`, `git show`, `git log`, `git status`). Never
-  `git add`, `git commit`, `git cherry-pick --continue/--abort/--skip`, `git checkout`,
-  `git reset` or `git push`.
+- `Bash`: `git diff`, `git show` and `git status` only. No other command is allowed.
 - `Read`, `Grep`
 - `Edit`: files listed in `CONFLICT_FILES` only.
-- `Write`: `ESCALATION_ISSUE_PATH` only.
+- `Write`: `ESCALATION_ISSUE_PATH`, or a file in `CONFLICT_FILES`.
+
+This job has no push rights and no signing key. The workflow takes only the files in
+`CONFLICT_FILES` from your working tree. A later job checks them and commits them. Changes
+to any other file are thrown away.
 
 ---
 
