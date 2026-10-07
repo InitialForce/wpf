@@ -98,6 +98,7 @@ _UNUSED_EVENTS_OK: frozenset[str] = frozenset(
         "automerge_frozen",       # operator toggles IF_AUTOMERGE_FROZEN repo variable
         "automerge_thawed",       # operator unfreezes after 4-PR validation passes
         "autonomy_paused",        # operator/kill-switch pause; unpause emits autonomy_resumed
+        "autonomy_resumed",       # operator unpause (nightly-rebase no longer misuses it)
         # Future-use: emitted by review/build/perf/smoke gates wired in Phase-0/1
         # (per Bootstrap Status: wpf-2hh, wpf-1pt, wpf-2xo). Workflows currently
         # use placeholder steps and don't yet call ledger-event for these.
