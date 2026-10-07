@@ -169,6 +169,40 @@ Use a merge commit, never squash. Squashing drops the upstream history and the `
 gh pr merge <N> --repo InitialForce/wpf --merge
 ```
 
+### Auto-merge trust checks
+`automerge.yml` runs on `workflow_run` of Build and merges only when all of these hold:
+- Build concluded `success` for a `pull_request` event.
+- The PR is from this repository (not a fork) and targets `if/main`.
+- The head branch is `if/staging` or `claude/cherry-pick-pr-<N>`.
+- The PR was opened by a bot account and carries the `automated` label.
+- The PR head SHA equals the SHA that Build ran on.
+- The PR touches no `.github/workflows/**`, `.if-fork/config.yaml` or `.if-fork/prompts/**`.
+- `IF_AUTONOMY_ENABLED=true` and `IF_AUTOMERGE_FROZEN` is not `true`.
+
+A PR that only changes `docs/**` or Markdown gets no Build run (the PR trigger ignores those paths), so merge it by hand.
+
+### Review one upstream PR by hand
+```bash
+gh workflow run pr-review.yml --repo InitialForce/wpf -f pr_number=<N> -f head_sha=<sha>
+```
+The daily review rate is `discovery.max_reviews_per_run` in `.if-fork/config.yaml` (10).
+
+### Releases
+`auto-release.yml` (09:23 UTC) tags at most once a day, and only when `src/` changed since the last published release. The bot-signed tag starts `release.yml`, which calls `build.yml`, runs perf on the pack, and publishes to nuget.org, GitHub Packages and a GitHub Release. No `.snupkg` is made; the Windows PDBs ship inside the `.nupkg`.
+```bash
+# Release now, skipping the once-a-day and src/-changed checks:
+gh workflow run auto-release.yml --repo InitialForce/wpf -f force=true
+# Re-run the release for an existing tag:
+gh workflow run release.yml --repo InitialForce/wpf --ref <tag> -f tag=<tag>
+```
+
+### Regenerate the perf baseline
+`perf/baseline.json` is a placeholder, so the first release will probably fail its perf check.
+1. `gh workflow run release.yml --repo InitialForce/wpf --ref <tag> -f tag=<tag> -f regenerate_perf_baseline=true`
+2. Download the `perf-baseline-<version>` artifact from that run and review it.
+3. Commit it as `perf/baseline.json` on `if/main`.
+4. Re-run the release: `gh workflow run release.yml --repo InitialForce/wpf --ref <tag> -f tag=<tag>`
+
 ### Check patch-ledger integrity manually
 ```bash
 python tools/ledger-validate.py --ledger-path .if-fork/patch-ledger.jsonl
