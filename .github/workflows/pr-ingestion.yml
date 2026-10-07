@@ -133,9 +133,10 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
-      - name: Handle graduated — end workflow (no work needed)
+      - name: Handle graduated (nothing to do)
         if: steps.check.outputs.action == 'skip'
-        run: echo "::notice::PR #$PR_NUMBER is already graduated — nothing to do."
+        run: |
+          echo "::notice::Upstream PR #$PR_NUMBER is already in the fork. Nothing to do."
 
       - name: Handle partial graduation — stop for a human
         if: steps.check.outputs.action == 'escalate'

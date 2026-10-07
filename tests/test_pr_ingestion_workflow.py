@@ -531,3 +531,13 @@ def test_actionlint() -> None:
     assert result.returncode == 0, (
         f"actionlint found errors:\n{result.stdout}\n{result.stderr}"
     )
+
+
+def test_run_blocks_are_valid_bash(workflow: dict) -> None:
+    for name, job in workflow["jobs"].items():
+        for step in job.get("steps", []):
+            if "run" in step:
+                r = subprocess.run(
+                    ["bash", "-n"], input=step["run"], text=True, capture_output=True
+                )
+                assert r.returncode == 0, f"{name}: {step.get('name')}: {r.stderr}"
