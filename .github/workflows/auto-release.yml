@@ -1,0 +1,143 @@
+# .github/workflows/auto-release.yml
+#
+# Daily automatic release. Tags the newest if/main commit whose Build run
+# passed, but only when src/ (the WPF code that goes into the packages)
+# changed since the last published release, and at most once per UTC day.
+#
+# The tag is signed by the bot key and pushed with the GitHub App token, so
+# the push starts release.yml, which runs every gate again (build.yml with
+# the release version, smoke on the packed nupkg, perf-on-pack) and only then
+# publishes to nuget.org. This workflow never publishes anything itself.
+#
+# Decision rules live in tools/release-version.py (`plan`), with tests.
+name: Auto Release
+
+on:
+  schedule:
+    # After the nightly pipeline: nightly-rebase 03:07, pr-discovery 04:17,
+    # then review, ingestion and auto-merge of the day's PRs.
+    - cron: "23 9 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Tag even if src/ is unchanged, the commit is already tagged, or a release already ran today"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  gate:
+    name: Autonomy gate (release-publish)
+    uses: ./.github/workflows/autonomy-check.yml
+    with:
+      requested_action: release-publish
+
+  tag:
+    name: Tag a release if src/ changed
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      # Checked out with the App token: a tag pushed with GITHUB_TOKEN would
+      # not start release.yml.
+      - uses: actions/checkout@v4
+        with:
+          ref: if/main
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Find the newest green if/main commit
+        id: green
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SHA=$(gh run list --repo "${{ github.repository }}" \
+            --workflow build.yml --branch if/main --event push --status success \
+            --limit 1 --json headSha --jq '.[0].headSha // ""')
+          if [ -z "$SHA" ]; then
+            echo "::notice::No successful Build run on if/main; nothing to release."
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git merge-base --is-ancestor "$SHA" HEAD; then
+            echo "::warning::Last green commit $SHA is not on if/main any more; nothing to release."
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Newest green if/main commit: $SHA"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+        shell: bash
+
+      - name: Decide whether to release
+        id: plan
+        if: steps.green.outputs.sha != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
+        run: |
+          set -euo pipefail
+          # A tag counts as published once release.yml created its GitHub
+          # Release, which is its last publish step.
+          gh release list --repo "${{ github.repository }}" --limit 200 \
+            --json tagName --jq '.[].tagName' > "$RUNNER_TEMP/published-tags.txt"
+          ARGS=(plan --target "${{ steps.green.outputs.sha }}"
+                --published-tags-file "$RUNNER_TEMP/published-tags.txt")
+          if [ "$FORCE" = "true" ]; then ARGS+=(--force); fi
+          python3 tools/release-version.py "${ARGS[@]}" | tee -a "$GITHUB_OUTPUT"
+        shell: bash
+
+      - name: Import bot GPG key
+        if: steps.plan.outputs.release == 'true'
+        uses: ./.github/actions/import-bot-gpg
+        with:
+          gpg-private-key: ${{ secrets.GH_BOT_GPG_KEY }}
+          gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
+          gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
+
+      - name: Create and push signed release tag
+        if: steps.plan.outputs.release == 'true'
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+          SHA: ${{ steps.green.outputs.sha }}
+          REASON: ${{ steps.plan.outputs.reason }}
+        run: |
+          set -euo pipefail
+          VERSION=$(python3 tools/release-version.py version --tag "$TAG")
+          git tag -s "$TAG" "$SHA" -m "InitialForce WPF $VERSION" -m "$REASON"
+          git push origin "refs/tags/$TAG"
+          echo "Pushed $TAG ($VERSION) at $SHA; release.yml takes it from here."
+        shell: bash
+
+      - name: Summary
+        if: always()
+        env:
+          SHA: ${{ steps.green.outputs.sha }}
+          RELEASE: ${{ steps.plan.outputs.release }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          REASON: ${{ steps.plan.outputs.reason }}
+        run: |
+          {
+            echo "## Auto release"
+            echo "- Newest green if/main commit: ${SHA:-none}"
+            echo "- Release: ${RELEASE:-false}"
+            if [ -n "${TAG:-}" ]; then echo "- Tag: $TAG"; fi
+            echo "- Reason: ${REASON:-no green commit}"
+          } >> "$GITHUB_STEP_SUMMARY"
+        shell: bash
