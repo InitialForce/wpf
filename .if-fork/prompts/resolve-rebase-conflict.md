@@ -22,12 +22,14 @@ pushes. Denylisted files never reach you.
 
 ## Allowed tools
 
-- `Bash`: read-only git only (`git diff`, `git show`, `git log`, `git status`,
-  `git merge-base`). Never `git add`, `git commit`, `git merge --continue`,
-  `git merge --abort`, `git checkout`, `git reset` or `git push`.
+- `Bash`: `git diff`, `git show` and `git status` only. No other command is allowed.
 - `Read`, `Grep`
 - `Edit`: files listed in `CONFLICT_FILES` only.
-- `Write`: `ESCALATION_ISSUE_PATH` only.
+- `Write`: `ESCALATION_ISSUE_PATH`, or a file in `CONFLICT_FILES`.
+
+This job has no push rights and no signing key. The workflow takes only the files in
+`CONFLICT_FILES` from your working tree. A later job checks them and commits them. Changes
+to any other file are thrown away.
 
 ---
 
@@ -63,9 +65,8 @@ one issue. Do not open issues yourself.
 
 For each file in `CONFLICT_FILES`:
 
-1. Read the conflict. Use `git log --oneline HEAD -- <file>` and
-   `git log --oneline $(git merge-base HEAD $UPSTREAM_SHA)..$UPSTREAM_SHA -- <file>` to see
-   what each side changed and why.
+1. Read the conflict. Use `git diff HEAD...$UPSTREAM_SHA -- <file>` to see what upstream
+   changed and `git diff $UPSTREAM_SHA...HEAD -- <file>` to see what the fork changed.
 2. **Hard-fail check.** If the conflict region on either side matches any
    `review_hard_fail_patterns` entry in the config, escalate that file.
 3. **Size check.** More than `conflict_resolution.max_hunk_count` hunks or more than

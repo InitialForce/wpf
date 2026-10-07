@@ -8,6 +8,7 @@ de-duplication rules without executing the workflow. Actionlint runs when availa
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -20,7 +21,7 @@ WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "nightly-rebase.yml"
 REBASE_PROMPT_PATH = REPO_ROOT / ".if-fork" / "prompts" / "rebase.md"
 CONFLICT_PROMPT_PATH = REPO_ROOT / ".if-fork" / "prompts" / "resolve-rebase-conflict.md"
 
-EXPECTED_JOBS = {"gate", "sync"}
+EXPECTED_JOBS = {"gate", "sync", "resolve-conflicts", "finalize", "report-blocked"}
 GATE_CONDITION = "needs.gate.outputs.proceed == 'true'"
 
 
@@ -41,6 +42,16 @@ def workflow() -> dict:
 @pytest.fixture(scope="module")
 def sync_steps(workflow: dict) -> list[dict]:
     return workflow["jobs"]["sync"]["steps"]
+
+
+@pytest.fixture(scope="module")
+def finalize_steps(workflow: dict) -> list[dict]:
+    return workflow["jobs"]["finalize"]["steps"]
+
+
+@pytest.fixture(scope="module")
+def report_steps(workflow: dict) -> list[dict]:
+    return workflow["jobs"]["report-blocked"]["steps"]
 
 
 def _step(steps: list[dict], name_part: str) -> dict:
@@ -97,33 +108,39 @@ def test_conflict_prompt_exists_and_size() -> None:
     assert 800 <= size <= 5000, f"resolve-rebase-conflict.md is {size} chars"
 
 
+
+
+MERGE_SCRIPT = REPO_ROOT / "tools" / "nightly-merge.sh"
+
+
 # ---------------------------------------------------------------------------
 # Branch model: merge into if/staging made from if/main, never rebase if/main
 # ---------------------------------------------------------------------------
 def test_checks_out_if_main(sync_steps: list[dict]) -> None:
-    checkout = next(s for s in sync_steps if s.get("uses", "").startswith("actions/checkout"))
-    assert checkout["with"]["ref"] == "if/main"
-    assert checkout["with"]["fetch-depth"] == 0
+    checkouts = [s for s in sync_steps if s.get("uses", "").startswith("actions/checkout")]
+    assert all(s["with"]["ref"] == "if/main" for s in checkouts)
+    work = next(s for s in checkouts if s["with"]["path"] == "work")
+    assert work["with"]["fetch-depth"] == 0
 
 
 def test_merges_instead_of_rebasing(sync_steps: list[dict]) -> None:
-    run = _step(sync_steps, "Merge upstream")["run"]
-    assert 'git checkout -B "$STAGING_BRANCH" "origin/$MAIN_BRANCH"' in run
-    assert "git merge --no-ff --no-commit" in run
-    raw = WORKFLOW_PATH.read_text()
-    assert "git rebase" not in raw
+    run = _step(sync_steps, "Try the merge")["run"]
+    assert 'bash "$TRUSTED/tools/nightly-merge.sh"' in run
+    script = MERGE_SCRIPT.read_text()
+    assert "git checkout -q -B if/staging origin/if/main" in script
+    assert "git merge --no-ff --no-commit" in script
+    assert "git rebase" not in WORKFLOW_PATH.read_text()
 
 
-def test_push_targets_only_staging(sync_steps: list[dict]) -> None:
-    run = _step(sync_steps, "Commit merge and push")["run"]
+def test_push_targets_only_staging(finalize_steps: list[dict]) -> None:
+    run = _step(finalize_steps, "Commit merge and push")["run"]
     assert "--force-with-lease" in run
-    assert 'HEAD:refs/heads/$STAGING_BRANCH' in run
-    raw = WORKFLOW_PATH.read_text()
-    assert "push origin if/main" not in raw
+    assert "HEAD:refs/heads/$STAGING_BRANCH" in run
+    assert "push origin if/main" not in WORKFLOW_PATH.read_text()
 
 
-def test_merge_limited_to_upstream_changed_files(sync_steps: list[dict]) -> None:
-    run = _step(sync_steps, "Commit merge and push")["run"]
+def test_merge_limited_to_upstream_changed_files(finalize_steps: list[dict]) -> None:
+    run = _step(finalize_steps, "Recreate the merge")["run"]
     assert "comm -23" in run
     assert "upstream did not change" in run
 
@@ -143,8 +160,19 @@ def test_no_op_when_open_pr_already_has_upstream(sync_steps: list[dict]) -> None
     assert '--head "$STAGING_BRANCH"' in run
 
 
-def test_reuses_open_pr(sync_steps: list[dict]) -> None:
-    run = _step(sync_steps, "Open or update the sync PR")["run"]
+def test_blocked_sha_is_not_retried_without_force(sync_steps: list[dict]) -> None:
+    step = _step(sync_steps, "Decide whether a sync is needed")
+    run = step["run"]
+    assert "result=blocked" in run
+    assert '"rebase_failed"' in run and "patch-ledger.jsonl" in run
+    assert "contains(env.UPSTREAM_SHA)" in run
+    assert 'if [ "$FORCE" != "true" ]' in run
+    force = step["env"]["FORCE"]
+    assert "inputs.force_rebase" in force and "client_payload.force" in force
+
+
+def test_reuses_open_pr(finalize_steps: list[dict]) -> None:
+    run = _step(finalize_steps, "Open or update the sync PR")["run"]
     assert 'if [ -n "$OPEN_PR" ]' in run
     assert "gh pr create" in run
     # Label failure must not fail the step.
@@ -157,27 +185,60 @@ def test_no_dated_branches() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Conflicts and failure reporting
+# Trust split: agent without credentials, trusted checker and push
 # ---------------------------------------------------------------------------
-def test_denylisted_conflicts_skip_claude(sync_steps: list[dict]) -> None:
+def test_agent_job_has_no_credentials(workflow: dict) -> None:
+    job = workflow["jobs"]["resolve-conflicts"]
+    assert job["permissions"] == {"contents": "read"}
+    assert "environment" not in job
+    text = yaml.safe_dump(job)
+    assert "GH_APP" not in text and "GPG" not in text
+    assert "import-bot-gpg" not in text and "github-app-token" not in text
+    checkouts = [s for s in job["steps"] if str(s.get("uses", "")).startswith("actions/checkout")]
+    assert checkouts and all(s["with"]["persist-credentials"] is False for s in checkouts)
+    claude = _step(job["steps"], "Resolve conflicts")
+    assert claude["with"]["github_token"] == "${{ github.token }}"
+    assert claude.get("continue-on-error") is True
+    args = claude["with"]["claude_args"]
+    assert "--max-turns 40" in args
+    m = re.search(r'--allowedTools "([^"]+)"', args)
+    assert m, args
+    assert m.group(1) == (
+        "Read,Edit,Write,Grep,Bash(git diff:*),Bash(git show:*),Bash(git status:*)"
+    )
+    assert "upload-artifact" in text
+
+
+def test_denylisted_conflicts_skip_claude(workflow: dict, sync_steps: list[dict]) -> None:
     deny = _step(sync_steps, "Refuse conflicts on denylisted files")
-    assert "tools/check-denylist.py" in deny["run"]
+    assert '"$TRUSTED/tools/check-denylist.py"' in deny["run"]
+    assert '--config "$TRUSTED/.if-fork/config.yaml"' in deny["run"]
     assert "--changed-files" in deny["run"]
-    resolve = _step(sync_steps, "Resolve conflicts")
-    assert resolve["if"] == "steps.denylist.outputs.allowed == 'true'"
-    assert resolve.get("continue-on-error") is True
-    assert "--max-turns 40" in resolve["with"]["claude_args"]
+    assert "needs.sync.outputs.conflicts_allowed == 'true'" in (
+        workflow["jobs"]["resolve-conflicts"]["if"]
+    )
 
 
-def test_verify_checks_conflict_markers(sync_steps: list[dict]) -> None:
-    run = _step(sync_steps, "Verify resolution")["run"]
-    assert "<<<<<<<" in run
-    assert "--diff-filter=U" in run
+@pytest.mark.parametrize("job_name", ["sync", "finalize"])
+def test_checker_runs_from_trusted_checkout(workflow: dict, job_name: str) -> None:
+    job = workflow["jobs"][job_name]
+    trusted = [s for s in job["steps"] if (s.get("with") or {}).get("path") == "trusted"]
+    assert trusted and trusted[0]["with"]["ref"] == "if/main"
+    for step in job["steps"]:
+        run = step.get("run", "")
+        assert "python3 tools/" not in run and "bash tools/" not in run, step.get("name")
 
 
-def test_blocked_sync_issue_is_deduplicated(sync_steps: list[dict]) -> None:
-    step = _step(sync_steps, "Report blocked sync")
-    run = step["run"]
+def test_finalize_takes_only_conflicted_paths(finalize_steps: list[dict]) -> None:
+    run = _step(finalize_steps, "Recreate the merge")["run"]
+    assert 'bash "$TRUSTED/tools/nightly-merge.sh"' in run
+    assert 'bash "$TRUSTED/tools/conflict-handoff.sh" apply' in run
+    assert "escalation.md" in run
+    assert run.index("conflict-handoff.sh") < run.index("comm -23")
+
+
+def test_blocked_sync_issue_is_deduplicated(report_steps: list[dict]) -> None:
+    run = _step(report_steps, "blocked-sync issue")["run"]
     assert "gh issue list" in run
     assert "gh issue create" in run
     assert "gh issue comment" in run
@@ -187,15 +248,33 @@ def test_blocked_sync_issue_is_deduplicated(sync_steps: list[dict]) -> None:
     assert "exit 1" not in run
 
 
-def test_blocked_issue_closed_on_success(sync_steps: list[dict]) -> None:
-    run = _step(sync_steps, "Close blocked-sync issue")["run"]
-    assert "gh issue close" in run
+def test_blocked_issue_closed_on_success(finalize_steps: list[dict]) -> None:
+    step = _step(finalize_steps, "Close blocked-sync issue")
+    assert "nightly-close-blocked.sh" in step["run"]
+    script = (REPO_ROOT / "tools" / "nightly-close-blocked.sh").read_text()
+    assert "gh issue close" in script
 
 
 def test_issue_labels_exist_only_automated() -> None:
     raw = WORKFLOW_PATH.read_text()
     assert "rebase-failure" not in raw
     assert '--label "automated,rebase"' not in raw
+
+
+def test_no_expressions_inside_run_blocks(workflow: dict) -> None:
+    for name, job in workflow["jobs"].items():
+        for step in job.get("steps", []):
+            assert "${{" not in step.get("run", ""), f"{name}: {step.get('name')}"
+
+
+def test_run_blocks_are_valid_bash(workflow: dict) -> None:
+    for name, job in workflow["jobs"].items():
+        for step in job.get("steps", []):
+            if "run" in step:
+                r = subprocess.run(
+                    ["bash", "-n"], input=step["run"], text=True, capture_output=True
+                )
+                assert r.returncode == 0, f"{name}: {step.get('name')}: {r.stderr}"
 
 
 @pytest.mark.skipif(shutil.which("actionlint") is None, reason="actionlint not available")

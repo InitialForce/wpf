@@ -10,12 +10,21 @@
 #               release/10.0 merged in. Rebuilt from if/main by this workflow
 #               every time upstream moves; nothing else writes to it.
 #
-# Flow: if upstream release/10.0 is not yet in if/main, reset if/staging to
-# if/main, merge upstream into it (Claude resolves conflicts that are not on
-# the denylist), force-push if/staging and keep exactly one PR
+# Flow: if upstream release/10.0 is not yet in if/main, merge it into a fresh
+# if/staging made from if/main, force-push if/staging and keep exactly one PR
 # if/staging -> if/main open. build.yml runs on that PR; automerge.yml merges
 # it when the build passes. Nothing is pushed and no PR is touched when the
-# upstream SHA is already in if/main or already proposed in the open PR.
+# upstream SHA is already in if/main, already proposed in the open PR, or
+# already reported as blocked (unless force is set).
+#
+# Trust model (same as pr-ingestion.yml):
+#   - Checker code and policy come from a separate if/main checkout
+#     ("trusted/"), never from the merged tree.
+#   - Claude only runs in resolve-conflicts: contents:read, no App token, no
+#     GPG key, no persisted credentials, read-only git tools. It hands back
+#     only the conflicted files, as an artifact.
+#   - finalize recreates the merge itself, takes only the conflicted paths
+#     from the artifact, refuses stray files, and only then signs and pushes.
 name: Nightly Rebase
 
 on:
@@ -24,7 +33,7 @@ on:
   workflow_dispatch:
     inputs:
       force_rebase:
-        description: Rebuild if/staging even if the open sync PR already has this upstream SHA
+        description: Rebuild if/staging even if the open sync PR has this upstream SHA or it was reported blocked
         type: boolean
         default: false
   repository_dispatch:
@@ -53,15 +62,26 @@ jobs:
       requested_action: claude-invoke
       bypass_for_human_dispatch: false
 
+  # -------------------------------------------------------------------------
+  # sync: decide whether to merge; try the merge; check conflicts against
+  # if/main's denylist. No model and no push here.
+  # -------------------------------------------------------------------------
   sync:
-    name: Merge upstream release/10.0 into if/staging
+    name: Plan upstream merge
     needs: gate
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     environment: bot-credentials
+    defaults:
+      run:
+        working-directory: work
     outputs:
       result: ${{ steps.plan.outputs.result }}
       upstream_sha: ${{ steps.plan.outputs.upstream_sha }}
+      open_pr: ${{ steps.plan.outputs.open_pr }}
+      has_conflicts: ${{ steps.merge.outputs.has_conflicts }}
+      conflicts_allowed: ${{ steps.denylist.outputs.allowed }}
+      denylist_report: ${{ steps.denylist.outputs.report }}
 
     steps:
       - name: Generate GH App token
@@ -71,11 +91,20 @@ jobs:
           app_id: ${{ secrets.GH_APP_ID }}
           private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
 
-      - uses: actions/checkout@v4
+      - name: Check out if/main (trusted tools and policy)
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           ref: if/main
-          token: ${{ steps.app-token.outputs.token }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Check out if/main (work tree)
+        uses: actions/checkout@v4
+        with:
+          ref: if/main
+          path: work
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -85,13 +114,6 @@ jobs:
       - name: Install Python dependencies
         run: pip install pyyaml
 
-      - name: Import bot GPG key (also sets user.name/email)
-        uses: ./.github/actions/import-bot-gpg
-        with:
-          gpg-private-key: ${{ secrets.GH_BOT_GPG_KEY }}
-          gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
-          gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
-
       - name: Decide whether a sync is needed
         id: plan
         run: |
@@ -100,6 +122,7 @@ jobs:
           git fetch --no-tags upstream release/10.0
           git fetch origin "$MAIN_BRANCH" "$STAGING_BRANCH" 2>/dev/null || git fetch origin "$MAIN_BRANCH"
           UPSTREAM_SHA=$(git rev-parse upstream/release/10.0)
+          export UPSTREAM_SHA
           echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
           echo "::notice::Upstream release/10.0 HEAD: $UPSTREAM_SHA"
 
@@ -122,64 +145,81 @@ jobs:
             exit 0
           fi
 
+          # A SHA that already failed stays failed until upstream moves or a
+          # human sets force. Do not run Claude on it again every night.
+          if [ "$FORCE" != "true" ]; then
+            BLOCKED_ISSUE=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label automated \
+              --search "\"$BLOCKED_ISSUE_TITLE\" in:title" --json number,body \
+              --jq '[.[] | select(.body | contains(env.UPSTREAM_SHA))][0].number // empty')
+            IN_LEDGER=$(python3 - <<'PY'
+          import json, os
+          sha = os.environ["UPSTREAM_SHA"]
+          found = False
+          with open(".if-fork/patch-ledger.jsonl", encoding="utf-8") as fh:
+              for line in fh:
+                  try:
+                      e = json.loads(line)
+                  except ValueError:
+                      continue
+                  if e.get("event") == "rebase_failed" and e.get("head_sha") == sha:
+                      found = True
+          print("true" if found else "false")
+          PY
+            )
+            if [ -n "$BLOCKED_ISSUE" ] || [ "$IN_LEDGER" = "true" ]; then
+              echo "result=blocked" >> "$GITHUB_OUTPUT"
+              echo "::notice::Upstream $UPSTREAM_SHA was already reported blocked. Skipping. Run with force_rebase to retry."
+              exit 0
+            fi
+          fi
+
           echo "result=merge" >> "$GITHUB_OUTPUT"
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force_rebase || 'false' }}
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ (github.event_name == 'workflow_dispatch' && inputs.force_rebase) || (github.event_name == 'repository_dispatch' && github.event.client_payload.force == true) }}
 
       - name: Close sync PR made redundant by if/main
         if: steps.plan.outputs.result == 'up-to-date' && steps.plan.outputs.open_pr != ''
         run: |
-          gh pr close "${{ steps.plan.outputs.open_pr }}" --repo "$GITHUB_REPOSITORY" \
-            --comment "if/main already contains upstream release/10.0 \`${{ steps.plan.outputs.upstream_sha }}\`. Closing this sync PR."
+          gh pr close "$OPEN_PR" --repo "$GITHUB_REPOSITORY" \
+            --comment "if/main already contains upstream release/10.0 \`$UPSTREAM_SHA\`. Closing this sync PR."
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          OPEN_PR: ${{ steps.plan.outputs.open_pr }}
+          UPSTREAM_SHA: ${{ steps.plan.outputs.upstream_sha }}
 
-      - name: Merge upstream into a fresh if/staging
+      - name: Close blocked-sync issue when if/main is current
+        if: steps.plan.outputs.result == 'up-to-date'
+        run: bash "$TRUSTED/tools/nightly-close-blocked.sh"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TRUSTED: ${{ github.workspace }}/trusted
+
+      - name: Try the merge
         id: merge
         if: steps.plan.outputs.result == 'merge'
         run: |
-          set -euo pipefail
-          git checkout -B "$STAGING_BRANCH" "origin/$MAIN_BRANCH"
-          if git merge --no-ff --no-commit "$UPSTREAM_SHA"; then
-            echo "::notice::Upstream merged without conflicts."
-          fi
-
-          # The fork deliberately deleted upstream's GitHub workflows and
-          # CODEOWNERS. When upstream edits one of those, keep the deletion.
-          git diff --name-only --diff-filter=U | while read -r f; do
-            case "$f" in
-              .github/*|CODEOWNERS)
-                if ! git cat-file -e "HEAD:$f" 2>/dev/null; then
-                  git rm -q --cached -- "$f" && rm -f -- "$f"
-                  echo "::notice::Kept fork deletion of $f"
-                fi
-                ;;
-            esac
-          done
-
-          git diff --name-only --diff-filter=U > "$RUNNER_TEMP/conflicts.txt"
-          if [ -s "$RUNNER_TEMP/conflicts.txt" ]; then
+          git config user.name "Claude (Initial Force WPF Bot)"
+          git config user.email "wpf-bot@initialforce.com"
+          bash "$TRUSTED/tools/nightly-merge.sh"
+          if [ -s "$OUT/conflicts.txt" ]; then
             echo "has_conflicts=true" >> "$GITHUB_OUTPUT"
-            echo "::warning::Conflicts: $(tr '\n' ' ' < "$RUNNER_TEMP/conflicts.txt")"
-            {
-              echo 'files<<__EOF_FILES__'
-              cat "$RUNNER_TEMP/conflicts.txt"
-              echo '__EOF_FILES__'
-            } >> "$GITHUB_OUTPUT"
+            echo "::warning::Conflicts: $(tr '\n' ' ' < "$OUT/conflicts.txt")"
           else
             echo "has_conflicts=false" >> "$GITHUB_OUTPUT"
           fi
         env:
           UPSTREAM_SHA: ${{ steps.plan.outputs.upstream_sha }}
+          OUT: ${{ runner.temp }}/merge
+          TRUSTED: ${{ github.workspace }}/trusted
 
       - name: Refuse conflicts on denylisted files
         id: denylist
         if: steps.merge.outputs.has_conflicts == 'true'
         run: |
           set +e
-          python3 tools/check-denylist.py --config .if-fork/config.yaml \
-            --changed-files "$RUNNER_TEMP/conflicts.txt" > "$RUNNER_TEMP/denylist.json"
+          python3 "$TRUSTED/tools/check-denylist.py" --config "$TRUSTED/.if-fork/config.yaml" \
+            --changed-files "$RUNNER_TEMP/merge/conflicts.txt" > "$RUNNER_TEMP/denylist.json"
           RC=$?
           set -e
           cat "$RUNNER_TEMP/denylist.json"
@@ -187,18 +227,41 @@ jobs:
             echo "allowed=true" >> "$GITHUB_OUTPUT"
           else
             echo "allowed=false" >> "$GITHUB_OUTPUT"
-            {
-              echo "Conflicts touch files on the denylist in \`.if-fork/config.yaml\`, so they were not sent to Claude."
-              echo
-              echo '```json'
-              cat "$RUNNER_TEMP/denylist.json"
-              echo '```'
-            } > "$RUNNER_TEMP/escalation.md"
+            echo "report=Conflicts touch files on the denylist in .if-fork/config.yaml, so they were not sent to Claude: $(tr '\n' ' ' < "$RUNNER_TEMP/merge/conflicts.txt")" >> "$GITHUB_OUTPUT"
           fi
+        env:
+          TRUSTED: ${{ github.workspace }}/trusted
+
+  # -------------------------------------------------------------------------
+  # resolve-conflicts: Claude, with no credentials beyond a read-only token.
+  # Returns only the conflicted files, as an artifact.
+  # -------------------------------------------------------------------------
+  resolve-conflicts:
+    name: Resolve conflicts (no credentials)
+    needs: [gate, sync]
+    if: >-
+      needs.gate.outputs.proceed == 'true' &&
+      needs.sync.outputs.result == 'merge' &&
+      needs.sync.outputs.has_conflicts == 'true' &&
+      needs.sync.outputs.conflicts_allowed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      UPSTREAM_SHA: ${{ needs.sync.outputs.upstream_sha }}
+
+    steps:
+      - name: Validate upstream SHA
+        run: '[[ "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Invalid upstream SHA"; exit 1; }'
+
+      - uses: actions/checkout@v4
+        with:
+          ref: if/main
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Load conflict-resolution prompt
         id: load-prompt
-        if: steps.denylist.outputs.allowed == 'true'
         run: |
           {
             echo 'prompt<<__EOF_PROMPT__'
@@ -207,9 +270,27 @@ jobs:
             echo '__EOF_PROMPT__'
           } >> "$GITHUB_OUTPUT"
 
+      - name: Recreate the conflicted merge
+        run: |
+          set -euo pipefail
+          # Copy the scripts out first: the merge and the agent change the tree.
+          cp tools/nightly-merge.sh tools/conflict-handoff.sh "$RUNNER_TEMP/"
+          git config user.name "Claude (Initial Force WPF Bot)"
+          git config user.email "wpf-bot@initialforce.com"
+          git remote add upstream https://github.com/dotnet/wpf.git
+          git fetch --no-tags upstream "$UPSTREAM_SHA"
+          bash "$RUNNER_TEMP/nightly-merge.sh"
+          test -s "$OUT/conflicts.txt"
+          {
+            echo 'CONFLICT_FILES<<__EOF_FILES__'
+            cat "$OUT/conflicts.txt"
+            echo '__EOF_FILES__'
+          } >> "$GITHUB_ENV"
+        env:
+          OUT: ${{ runner.temp }}/merge
+
       - name: Resolve conflicts (Claude Sonnet)
         id: resolve
-        if: steps.denylist.outputs.allowed == 'true'
         continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
@@ -218,71 +299,148 @@ jobs:
           claude_args: >-
             --max-turns 40
             --model claude-sonnet-4-6
-            --allowedTools Bash,Read,Edit,Write,Grep
+            --allowedTools "Read,Edit,Write,Grep,Bash(git diff:*),Bash(git show:*),Bash(git status:*)"
             --disallowedTools mcp__github__push_files,mcp__github__create_pull_request
-          github_token: ${{ steps.app-token.outputs.token }}
+          github_token: ${{ github.token }}
         env:
           CONFIG_PATH: .if-fork/config.yaml
-          CONFLICT_FILES: ${{ steps.merge.outputs.files }}
-          UPSTREAM_SHA: ${{ steps.plan.outputs.upstream_sha }}
-          ESCALATION_ISSUE_PATH: ${{ runner.temp }}/escalation.md
+          ESCALATION_ISSUE_PATH: ${{ github.workspace }}/.escalation.md
 
-      - name: Verify resolution
-        id: verify
-        if: steps.merge.outputs.has_conflicts == 'true' && steps.denylist.outputs.allowed == 'true'
+      - name: Collect the resolved conflict files
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/resolution"
+          bash "$RUNNER_TEMP/conflict-handoff.sh" collect "$RUNNER_TEMP/merge/conflicts.txt" "$RUNNER_TEMP/resolution"
+          if [ -f .escalation.md ]; then cp .escalation.md "$RUNNER_TEMP/resolution/escalation.md"; fi
+
+      - name: Upload resolution
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-merge-resolution
+          path: ${{ runner.temp }}/resolution/
+          retention-days: 7
+
+  # -------------------------------------------------------------------------
+  # finalize: trusted. Recreate the merge, take only the conflicted paths
+  # from the artifact, check, sign, push, and keep one sync PR open.
+  # -------------------------------------------------------------------------
+  finalize:
+    name: Check merge and push if/staging
+    needs: [gate, sync, resolve-conflicts]
+    if: >-
+      always() && needs.gate.outputs.proceed == 'true' &&
+      needs.sync.outputs.result == 'merge' &&
+      (needs.sync.outputs.has_conflicts == 'false' || needs.resolve-conflicts.result == 'success')
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+    defaults:
+      run:
+        working-directory: work
+    env:
+      UPSTREAM_SHA: ${{ needs.sync.outputs.upstream_sha }}
+    outputs:
+      pushed: ${{ steps.push.outputs.pushed }}
+      reason: ${{ steps.check.outputs.reason }}
+
+    steps:
+      - name: Validate upstream SHA
+        working-directory: .
+        run: '[[ "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Invalid upstream SHA"; exit 1; }'
+
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Check out if/main (trusted tools and policy)
+        uses: actions/checkout@v4
+        with:
+          ref: if/main
+          path: trusted
+          persist-credentials: false
+
+      - name: Check out if/main (work tree)
+        uses: actions/checkout@v4
+        with:
+          ref: if/main
+          path: work
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install pyyaml
+
+      - name: Import bot GPG key (also sets user.name/email)
+        uses: ./trusted/.github/actions/import-bot-gpg
+        with:
+          gpg-private-key: ${{ secrets.GH_BOT_GPG_KEY }}
+          gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
+          gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
+
+      - name: Download resolution
+        if: needs.sync.outputs.has_conflicts == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: nightly-merge-resolution
+          path: ${{ runner.temp }}/resolution
+
+      - name: Recreate the merge, apply the resolution and check it
+        id: check
         run: |
           set -euo pipefail
-          OK=true
-          if [ -s "$RUNNER_TEMP/escalation.md" ]; then
-            echo "::warning::Claude escalated the conflict."
-            OK=false
-          fi
-          while read -r f; do
-            [ -z "$f" ] && continue
-            if [ -e "$f" ] && grep -nE '^(<<<<<<<|=======|>>>>>>>)( |$)' -- "$f"; then
-              echo "::error::Conflict markers remain in $f"
-              OK=false
+          git remote add upstream https://github.com/dotnet/wpf.git 2>/dev/null || true
+          git fetch --no-tags upstream "$UPSTREAM_SHA"
+          git fetch origin "$STAGING_BRANCH" 2>/dev/null || true
+          bash "$TRUSTED/tools/nightly-merge.sh"
+          if [ -s "$OUT/conflicts.txt" ]; then
+            if [ "$HAS_CONFLICTS" != "true" ]; then
+              echo "reason=The merge now conflicts but did not in the planning job." >> "$GITHUB_OUTPUT"; exit 0
             fi
-          done < "$RUNNER_TEMP/conflicts.txt"
-          if [ "$OK" = "true" ]; then
-            # Stage only the files that were in conflict.
-            while read -r f; do
-              [ -z "$f" ] && continue
-              if [ -e "$f" ]; then git add -- "$f"; else git rm -q --cached --ignore-unmatch -- "$f"; fi
-            done < "$RUNNER_TEMP/conflicts.txt"
-            if git diff --name-only --diff-filter=U | grep -q .; then
-              echo "::error::Unmerged paths remain after resolution."
-              OK=false
+            if [ -s "$RUNNER_TEMP/resolution/escalation.md" ]; then
+              echo "reason=Claude escalated the conflict (see the run's resolution artifact)." >> "$GITHUB_OUTPUT"; exit 0
             fi
-          fi
-          echo "resolved=$OK" >> "$GITHUB_OUTPUT"
-          if [ "$OK" != "true" ] && [ ! -s "$RUNNER_TEMP/escalation.md" ]; then
-            echo "Claude could not resolve the conflicts in: $(tr '\n' ' ' < "$RUNNER_TEMP/conflicts.txt")" > "$RUNNER_TEMP/escalation.md"
+            if ! python3 "$TRUSTED/tools/check-denylist.py" --config "$TRUSTED/.if-fork/config.yaml" \
+                   --changed-files "$OUT/conflicts.txt"; then
+              echo "reason=Conflicts touch denylisted files." >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            if ! bash "$TRUSTED/tools/conflict-handoff.sh" apply "$OUT/conflicts.txt" "$RUNNER_TEMP/resolution"; then
+              echo "reason=Claude's resolution was missing, kept conflict markers or was a symlink." >> "$GITHUB_OUTPUT"; exit 0
+            fi
           fi
 
-      - name: Commit merge and push if/staging
-        id: push
-        if: >-
-          steps.plan.outputs.result == 'merge' &&
-          (steps.merge.outputs.has_conflicts == 'false' || steps.verify.outputs.resolved == 'true')
-        run: |
-          set -euo pipefail
           # Upstream workflows never run in the fork: drop any workflow file
           # upstream added (pushing it would also need the workflows scope).
           git diff --cached --name-only --diff-filter=A "origin/$MAIN_BRANCH" -- .github/workflows \
             | while read -r f; do git rm -q --cached -- "$f"; rm -f -- "$f"; done
 
-          # The merge may only change files that upstream changed. Anything
-          # else means the conflict resolver strayed outside its remit.
+          # The merge may only change files that upstream changed.
           BASE=$(git merge-base "origin/$MAIN_BRANCH" "$UPSTREAM_SHA")
           STRAY=$(comm -23 <(git diff --cached --name-only "origin/$MAIN_BRANCH" | sort) \
                            <(git diff --name-only "$BASE" "$UPSTREAM_SHA" | sort))
           if [ -n "$STRAY" ]; then
             echo "::error::Merge touches files upstream did not change: $STRAY"
-            echo "The merge result touched files upstream did not change: $STRAY" > "$RUNNER_TEMP/escalation.md"
+            echo "reason=The merge result touched files upstream did not change: $(echo "$STRAY" | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+        env:
+          HAS_CONFLICTS: ${{ needs.sync.outputs.has_conflicts }}
+          OUT: ${{ runner.temp }}/merge
+          TRUSTED: ${{ github.workspace }}/trusted
 
+      - name: Commit merge and push if/staging
+        id: push
+        if: steps.check.outputs.ok == 'true'
+        run: |
+          set -euo pipefail
           SHORT=$(git rev-parse --short "$UPSTREAM_SHA")
           if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
             git commit -m "Merge upstream release/10.0 ($SHORT) into if/main" \
@@ -290,14 +448,11 @@ jobs:
           fi
           if ! git merge-base --is-ancestor "$UPSTREAM_SHA" HEAD; then
             echo "::error::HEAD does not contain upstream $UPSTREAM_SHA after the merge."
-            echo "The merge commit was not created." > "$RUNNER_TEMP/escalation.md"
-            exit 0
+            exit 1
           fi
           OLD=$(git rev-parse -q --verify "origin/$STAGING_BRANCH" || true)
           git push --force-with-lease="refs/heads/$STAGING_BRANCH:$OLD" origin "HEAD:refs/heads/$STAGING_BRANCH"
           echo "pushed=true" >> "$GITHUB_OUTPUT"
-        env:
-          UPSTREAM_SHA: ${{ steps.plan.outputs.upstream_sha }}
 
       - name: Open or update the sync PR
         if: steps.push.outputs.pushed == 'true'
@@ -328,39 +483,86 @@ jobs:
           echo "::notice::Sync PR: #$PR"
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          UPSTREAM_SHA: ${{ steps.plan.outputs.upstream_sha }}
-          OPEN_PR: ${{ steps.plan.outputs.open_pr }}
+          OPEN_PR: ${{ needs.sync.outputs.open_pr }}
 
       - name: Close blocked-sync issue after a successful sync
-        if: steps.plan.outputs.result == 'up-to-date' || steps.push.outputs.pushed == 'true'
-        run: |
-          for n in $(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label automated \
-                       --search "\"$BLOCKED_ISSUE_TITLE\" in:title" --json number --jq '.[].number'); do
-            gh issue close "$n" --repo "$GITHUB_REPOSITORY" \
-              --comment "Upstream sync succeeded in $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
-          done
+        if: steps.push.outputs.pushed == 'true'
+        run: bash "$TRUSTED/tools/nightly-close-blocked.sh"
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TRUSTED: ${{ github.workspace }}/trusted
 
-      - name: Report blocked sync (one issue, one ledger event per upstream SHA)
-        if: >-
-          steps.plan.outputs.result == 'merge' && steps.push.outputs.pushed != 'true'
+  # -------------------------------------------------------------------------
+  # report-blocked: one issue and one rebase_failed ledger event per SHA.
+  # -------------------------------------------------------------------------
+  report-blocked:
+    name: Report blocked sync
+    needs: [gate, sync, resolve-conflicts, finalize]
+    if: >-
+      always() && needs.gate.outputs.proceed == 'true' &&
+      needs.sync.outputs.result == 'merge' && needs.finalize.outputs.pushed != 'true'
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+    env:
+      UPSTREAM_SHA: ${{ needs.sync.outputs.upstream_sha }}
+
+    steps:
+      - name: Validate upstream SHA
+        run: '[[ "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Invalid upstream SHA"; exit 1; }'
+
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          ref: if/main
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Import bot GPG key
+        uses: ./.github/actions/import-bot-gpg
+        with:
+          gpg-private-key: ${{ secrets.GH_BOT_GPG_KEY }}
+          gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
+          gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
+
+      - name: Download Claude's escalation report, if any
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: nightly-merge-resolution
+          path: ${{ runner.temp }}/resolution
+
+      - name: Open or update the blocked-sync issue and record rebase_failed
         run: |
           set -euo pipefail
-          git merge --abort 2>/dev/null || true
-          git checkout -q -B "$MAIN_BRANCH" "origin/$MAIN_BRANCH"
           RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          REASON="${DENYLIST_REPORT:-$FINALIZE_REASON}"
+          if [ -z "$REASON" ]; then
+            REASON="The conflict-resolution or finalize job did not finish (resolve-conflicts: $RESOLVE_RESULT, finalize: $FINALIZE_RESULT)."
+          fi
           {
             echo "The nightly job could not merge upstream \`release/10.0\` into \`if/main\`."
             echo
             echo "- Upstream SHA: \`$UPSTREAM_SHA\`"
             echo "- Run: $RUN_URL"
+            echo "- Reason: $REASON"
             echo
-            echo "To fix: merge \`$UPSTREAM_SHA\` into a branch from \`if/main\` by hand, push it as \`if/staging\`, and open a PR to \`if/main\`. The next nightly run closes this issue once \`if/main\` contains the upstream SHA."
-            echo
-            echo "### Details"
-            echo
-            cat "$RUNNER_TEMP/escalation.md" 2>/dev/null || echo "No details were written."
+            echo "To fix: merge \`$UPSTREAM_SHA\` into a branch from \`if/main\` by hand, push it as \`if/staging\`, and open a PR to \`if/main\`. The next nightly run closes this issue once \`if/main\` contains the upstream SHA. To make the bot try this SHA again, run Nightly Rebase with \`force_rebase\`."
+            if [ -s "$RUNNER_TEMP/resolution/escalation.md" ]; then
+              echo
+              echo "### Claude's escalation report"
+              echo
+              cat "$RUNNER_TEMP/resolution/escalation.md"
+            fi
           } > "$RUNNER_TEMP/issue.md"
 
           EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label automated \
@@ -389,4 +591,7 @@ jobs:
           echo "::warning::Upstream sync blocked. See the '$BLOCKED_ISSUE_TITLE' issue."
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          UPSTREAM_SHA: ${{ steps.plan.outputs.upstream_sha }}
+          DENYLIST_REPORT: ${{ needs.sync.outputs.denylist_report }}
+          FINALIZE_REASON: ${{ needs.finalize.outputs.reason }}
+          RESOLVE_RESULT: ${{ needs.resolve-conflicts.result }}
+          FINALIZE_RESULT: ${{ needs.finalize.result }}
