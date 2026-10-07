@@ -26,9 +26,12 @@
     <!-- GitCommitId and PublishRepositoryUrl require dotnet/sourcelink. -->
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
-    <!-- Symbols are emitted as .snupkg (portable PDB format). -->
-    <IncludeSymbols>true</IncludeSymbols>
-    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <!-- No .snupkg. The upstream WPF build (eng/WpfArcadeSdk) emits Windows
+         PDBs, not portable ones, and nuget.org rejects a symbol package that
+         holds Windows PDBs ("pdbs that are not portable"). The PDBs ship
+         inside the .nupkg next to the DLLs instead (globs below), so Visual
+         Studio can still load them for debugging. -->
+    <IncludeSymbols>false</IncludeSymbols>
     <!-- Suppress warnings for NoBuild SDK-style packaging. -->
     <NoWarn>NU5128</NoWarn>
     <!-- Package icon and readme. -->
@@ -45,8 +48,8 @@
           PackagePath="lib/net10.0/_._" />
   </ItemGroup>
 
-  <!-- The four patched DLLs and their portable PDBs.
-       Populated by release.yml before dotnet pack is called. -->
+  <!-- The four patched DLLs and their (Windows-format) PDBs.
+       Staged by build.yml before dotnet pack is called. -->
   <ItemGroup>
     <None Include="runtimes\win-x64\lib\net10.0\*.dll" Pack="true"
           PackagePath="runtimes/win-x64/lib/net10.0/" />

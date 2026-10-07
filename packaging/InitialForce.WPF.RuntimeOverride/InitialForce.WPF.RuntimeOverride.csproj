@@ -28,7 +28,7 @@
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
     <!-- Disable snupkg: the symbol package generator considers this project
          empty (NoBuild=true, no compiled output), so it emits NU5017. The
-         portable PDBs already ship inside the .nupkg via the explicit
+         PDBs (Windows format) already ship inside the .nupkg via the explicit
          '*.pdb Pack=true' globs below, so a separate symbol package adds
          no value here. -->
     <IncludeSymbols>false</IncludeSymbols>
@@ -49,8 +49,8 @@
           PackagePath="lib/net10.0/_._" />
   </ItemGroup>
 
-  <!-- The four patched DLLs and their portable PDBs.
-       Populated by release.yml before dotnet pack is called. -->
+  <!-- The four patched DLLs and their (Windows-format) PDBs.
+       Staged by build.yml before dotnet pack is called. -->
   <ItemGroup>
     <None Include="runtimes\win-x64\lib\net10.0\*.dll" Pack="true"
           PackagePath="runtimes/win-x64/lib/net10.0/" />
