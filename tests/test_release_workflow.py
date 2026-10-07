@@ -119,6 +119,22 @@ def test_no_expression_expanded_inside_run_scripts() -> None:
                 assert "${{" not in run, f"{path.name}::{job_name}::{step.get('name')}"
 
 
+def test_no_private_key_or_app_token_in_release(workflow: dict) -> None:
+    text = WORKFLOW_PATH.read_text()
+    for forbidden in ("GH_BOT_GPG_KEY", "GH_APP_PRIVATE_KEY", "import-bot-gpg", "github-app-token"):
+        assert forbidden not in text, f"release.yml must not use {forbidden}"
+
+
+def test_no_checkout_persists_credentials(workflow: dict) -> None:
+    for job_name, job in workflow["jobs"].items():
+        for step in job.get("steps", []):
+            if str(step.get("uses", "")).startswith("actions/checkout"):
+                assert (step.get("with") or {}).get("persist-credentials") is False, job_name
+
+
+# ---------------------------------------------------------------------------
+# gate and verify-tag
+# ---------------------------------------------------------------------------
 def test_gate_passes_requested_action_release_publish(workflow: dict) -> None:
     gate = workflow["jobs"]["gate"]
     assert gate["uses"] == "./.github/workflows/autonomy-check.yml"
@@ -315,3 +331,19 @@ def test_actionlint_release_yml() -> None:
         ["actionlint", str(WORKFLOW_PATH), str(RECORD_PATH)], capture_output=True, text=True
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_release_notes_agent_has_no_bash_and_read_only_token(workflow: dict) -> None:
+    """The notes agent reads community PR titles: Read tool only, no secrets
+    beyond the Anthropic key, read-only GITHUB_TOKEN, no environment."""
+    job = workflow["jobs"]["release-notes"]
+    assert job["permissions"] == {"contents": "read"}
+    assert "environment" not in job
+    claude = next(s for s in job["steps"] if "claude-code-action" in str(s.get("uses", "")))
+    args = claude["with"]["claude_args"]
+    assert "--allowedTools Read" in args
+    assert "Bash" not in args.split("--disallowedTools")[0]
+    assert "Bash" in args.split("--disallowedTools")[1]
+    assert claude["with"]["github_token"] == "${{ github.token }}"
+    combined = _steps_combined_run(job)
+    assert "git log" in combined, "the commit list is prepared before the agent runs"
