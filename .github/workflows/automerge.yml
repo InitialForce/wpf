@@ -11,6 +11,8 @@
 #     claude/cherry-pick-pr-<N> (pr-ingestion.yml)
 #   - the PR carries the "automated" label and was opened by a bot account
 #   - the PR head is still the commit the build ran on
+#   - the PR touches no .github/workflows/**, .if-fork/config.yaml or
+#     .if-fork/prompts/** (those stay human-merged)
 #   - autonomy-check allows "auto-merge" (IF_AUTONOMY_ENABLED=true and
 #     IF_AUTOMERGE_FROZEN is not "true")
 # The merge uses a merge commit so upstream history and the
@@ -86,6 +88,15 @@ jobs:
             elif .head.sha != $sha then "PR head moved to \(.head.sha) after the build"
             else "" end' "$RUNNER_TEMP/pr.json")
           echo "number=$PR" >> "$GITHUB_OUTPUT"
+          # Workflows, policy and prompts stay human-merged even when the bot
+          # authored the change.
+          if [ -z "$REASON" ]; then
+            PROTECTED=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --paginate --jq '.[].filename' \
+              | grep -E '^(\.github/workflows/|\.if-fork/config\.yaml$|\.if-fork/prompts/)' || true)
+            if [ -n "$PROTECTED" ]; then
+              REASON="PR touches files that need a human merge: $(echo "$PROTECTED" | tr '\n' ' ')"
+            fi
+          fi
           if [ -n "$REASON" ]; then
             echo "::notice::Not merging PR #$PR: $REASON"
             echo "eligible=false" >> "$GITHUB_OUTPUT"

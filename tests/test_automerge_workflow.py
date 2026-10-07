@@ -69,6 +69,13 @@ def test_eligibility_checks(workflow: dict) -> None:
         assert needle in run, f"missing eligibility check {needle!r}"
 
 
+def test_protected_paths_need_a_human(workflow: dict) -> None:
+    run = _steps(workflow)["Find the PR for this build"]["run"]
+    assert "/files" in run
+    for path in (r"\.github/workflows/", r"\.if-fork/config\.yaml$", r"\.if-fork/prompts/"):
+        assert path in run, f"protected path {path!r} not refused"
+
+
 def test_merge_requires_success_and_gate(workflow: dict) -> None:
     step = _steps(workflow)["Merge PR (build passed)"]
     assert "conclusion == 'success'" in step["if"]
