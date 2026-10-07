@@ -134,17 +134,23 @@ gh workflow run pr-discovery.yml --repo InitialForce/wpf
 1. Open the issue: `gh issue view <N> --repo InitialForce/wpf`
 2. Read both reviewer rationales attached to the issue.
 3. Make a judgment call: comment `human-resolution: safe` or `human-resolution: unsafe`.
-4. If you decide the PR is safe, start ingestion by hand with the reviewed head SHA (the `review_1` and `review_2` ledger entries for the PR hold it):
+4. If you decide the PR is safe, record an `approved` outcome for the reviewed head SHA (the `review_1` and `review_2` ledger entries for the PR hold it), then start ingestion. Ingestion refuses any head without an `approved` outcome, and a later `rejected` or `escalated` event for the same head cancels it.
    ```bash
+   git checkout if/main && git pull
+   python tools/ledger-event.py --event approved --pr-number <N> --head-sha <reviewed sha> \
+     --actor <your GitHub login> --details-json '{"reason":"human-resolution"}' --push
    gh workflow run pr-ingestion.yml --repo InitialForce/wpf -f pr_number=<N> -f head_sha=<reviewed sha>
    ```
    If you decide it is unsafe, do nothing more. Close the issue in both cases.
 
 ### Run the upstream sync by hand
 ```bash
-# Rebuild if/staging even if the open sync PR already has the current upstream SHA:
+# Rebuild if/staging even if the open sync PR already has the current upstream SHA,
+# or retry an upstream SHA that is already reported blocked:
 gh workflow run nightly-rebase.yml --repo InitialForce/wpf -f force_rebase=true
 ```
+Once an upstream SHA is blocked (open "Nightly upstream sync blocked" issue, or a `rebase_failed` ledger event for it), the nightly run skips that SHA without calling Claude until upstream moves or you set `force_rebase`.
+
 If the sync is blocked by conflicts, merge by hand. Never rebase `if/main`.
 ```bash
 git fetch upstream release/10.0 && git fetch origin if/main
@@ -155,7 +161,7 @@ git push --force-with-lease origin if/staging
 gh pr create --repo InitialForce/wpf --base if/main --head if/staging \
   --title "Merge upstream release/10.0 into if/main" --label automated
 ```
-The `automated` label lets `automerge.yml` merge it when Build passes. The next nightly run closes the "Nightly upstream sync blocked" issue.
+Your merge commit is not signed by the bot, so `automerge.yml` will not merge this PR. Merge it by hand with a merge commit once Build passes. The next nightly run closes the "Nightly upstream sync blocked" issue.
 
 ### Adopt an upstream stable tag by hand
 ```bash
@@ -170,14 +176,26 @@ gh pr merge <N> --repo InitialForce/wpf --merge
 ```
 
 ### Auto-merge trust checks
-`automerge.yml` runs on `workflow_run` of Build and merges only when all of these hold:
+`automerge.yml` runs on `workflow_run` of Build, one run at a time (concurrency group `automerge-if-main`). It merges only when all of these hold:
 - Build concluded `success` for a `pull_request` event.
-- The PR is from this repository (not a fork) and targets `if/main`.
+- The PR is open, from this repository (not a fork), and targets `if/main`.
 - The head branch is `if/staging` or `claude/cherry-pick-pr-<N>`.
-- The PR was opened by a bot account and carries the `automated` label.
+- The PR was opened by this GitHub App's own bot login and carries the `automated` label.
 - The PR head SHA equals the SHA that Build ran on.
-- The PR touches no `.github/workflows/**`, `.if-fork/config.yaml` or `.if-fork/prompts/**`.
+- `tools/automerge-verify.sh` passes. It runs from a separate checkout of `if/main` and uses that checkout's tools, `config.yaml`, ledger and `docs/bot-gpg-pubkey.asc`, never the PR's copies. The key's fingerprint must equal the `GH_BOT_GPG_FINGERPRINT` secret.
+  - The PR touches no `.github/workflows/**`, `.if-fork/config.yaml` or `.if-fork/prompts/**`.
+  - No changed file is on `file_denylist`. For a cherry-pick PR this is the whole diff. For the sync PR it is the files whose content differs from what `git merge` produces on its own, which are the conflict resolutions.
+  - Cherry-pick PR: exactly one commit, signed by the bot key. Its `Upstream-PR` trailer matches the branch number, and its `Upstream-PR-Head` has an `approved` outcome in the `if/main` ledger with no later `rejected` or `escalated`.
+  - Sync PR: the head is a merge commit signed by the bot key, its second parent is in upstream `release/10.0`, and every other new commit comes from upstream.
+  - The PR contains the current `if/main` tip. Commits on `if/main` that only change `.if-fork/patch-ledger.jsonl` do not count.
 - `IF_AUTONOMY_ENABLED=true` and `IF_AUTOMERGE_FROZEN` is not `true`.
+
+When `if/main` has moved on, `automerge.yml` does not use GitHub's "update branch" (its merge commit would not be bot-signed). It sends `pr-ingestion-requested` again for a cherry-pick PR, or `nightly-rebase` with `force: true` for the sync PR. The rebuilt branch gets a new Build, which runs `automerge.yml` again.
+
+### Where Claude runs, and what it can reach
+Claude resolves merge and cherry-pick conflicts in a job of its own (`resolve-conflicts` in `pr-ingestion.yml` and `nightly-rebase.yml`). That job has `contents: read`, no environment, no App token, no GPG key and no stored git credentials. Claude may use only Read, Edit, Write, Grep and `git diff`, `git show` and `git status`. The job uploads only the conflicted files as an artifact.
+
+The next job (`finalize`) runs `if/main`'s own scripts. It repeats the merge or cherry-pick itself and takes only the conflicted paths from the artifact. It refuses symlinks, missing files and leftover conflict markers. It then runs `file_denylist` from `if/main` on the whole branch diff (`origin/if/main...HEAD`) and checks for files upstream did not change. Only after that does it create the App token, import the bot key, sign and push. Nothing is pushed before that check, so an open PR cannot be updated with denylisted content.
 
 A PR that only changes `docs/**` or Markdown gets no Build run (the PR trigger ignores those paths), so merge it by hand.
 
