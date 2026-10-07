@@ -136,6 +136,8 @@ _EMITTED_BY_TOOLS: dict[str, str] = {
     "approved": "merge-verdicts.py",
     "rejected": "merge-verdicts.py",
     "escalated": "merge-verdicts.py",
+    "review_error": "merge-verdicts.py",
+    "ingestion_requested": "merge-verdicts.py",
 }
 
 

@@ -41,5 +41,11 @@ VALID_EVENTS: frozenset[str] = frozenset(
         "pre_flight_failed",
         # emitted by pr-review workflow when only a single review path is available
         "review_single_path_warning",
+        # emitted by pr-review when a reviewer left no valid verdict; pr-discovery
+        # retries the review (merge-verdicts.py escalates after 3 attempts)
+        "review_error",
+        # emitted just before a pr-ingestion-requested dispatch (pr-review on
+        # approval, pr-discovery when it re-sends a stranded approval)
+        "ingestion_requested",
     ]
 )
