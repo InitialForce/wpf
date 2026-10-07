@@ -244,3 +244,15 @@ def test_actionlint_if_available():
     assert result.returncode == 0, (
         f"actionlint found issues:\n{result.stdout}\n{result.stderr}"
     )
+
+
+def test_lost_ingestion_handoffs_are_resent_after_ledger_push(workflow):
+    steps = workflow["jobs"]["discover"]["steps"]
+    names = [s.get("name", "") for s in steps]
+    record = next(i for i, n in enumerate(names) if n.startswith("Record discovered"))
+    resend = next(i for i, n in enumerate(names) if n.startswith("Re-send lost ingestion"))
+    assert record < resend
+    run = steps[resend]["run"]
+    assert '"pr-ingestion-requested"' in run
+    assert "pr_number:" in run and "head_sha:" in run
+    assert "--ingest-out" in _step_runs(workflow)

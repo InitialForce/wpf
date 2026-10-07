@@ -9,6 +9,11 @@
 #   2. Dispatches `pr-discovered` (client_payload: pr_number, head_sha) to
 #      pr-review.yml for at most discovery.max_reviews_per_run PRs that have no
 #      review verdict yet, so the backlog drains over several days.
+#   3. Re-sends `pr-ingestion-requested` (no model call) for approved SHAs whose
+#      handoff to pr-ingestion.yml was lost: approved, no ingestion outcome
+#      event, last attempt over 6 hours ago. Each attempt is an
+#      `ingestion_requested` ledger event; after 3 the SHA is recorded as
+#      escalated. These events go into the same single commit as step 1.
 name: PR Discovery
 
 on:
@@ -69,7 +74,8 @@ jobs:
             --config .if-fork/config.yaml \
             --ledger-path .if-fork/patch-ledger.jsonl \
             --events-out "$RUNNER_TEMP/discovered-events.jsonl" \
-            --queue-out "$RUNNER_TEMP/review-queue.json" | tee "$RUNNER_TEMP/counts.json"
+            --queue-out "$RUNNER_TEMP/review-queue.json" \
+            --ingest-out "$RUNNER_TEMP/ingest-queue.json" | tee "$RUNNER_TEMP/counts.json"
           {
             echo "### PR discovery"
             echo '```json'
@@ -78,6 +84,10 @@ jobs:
             echo "Queued for review:"
             echo '```json'
             cat "$RUNNER_TEMP/review-queue.json"
+            echo '```'
+            echo "Re-sent to ingestion:"
+            echo '```json'
+            cat "$RUNNER_TEMP/ingest-queue.json"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
         env:
@@ -96,13 +106,13 @@ jobs:
         run: |
           COUNT=$(grep -c . "$RUNNER_TEMP/discovered-events.jsonl" || true)
           if [ "$COUNT" = "0" ]; then
-            echo "::notice::No new upstream PRs or head SHAs; ledger unchanged."
+            echo "::notice::No new upstream PRs, head SHAs or ingestion retries; ledger unchanged."
             exit 0
           fi
           python tools/ledger-event.py \
             --events-file "$RUNNER_TEMP/discovered-events.jsonl" \
             --actor pr-discovery \
-            --message "ledger: discovered $COUNT upstream PR head(s) on $(date -u +%Y-%m-%d)" \
+            --message "ledger: discovery run $(date -u +%Y-%m-%d), $COUNT event(s)" \
             --push
         env:
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
@@ -117,9 +127,20 @@ jobs:
           jq -c '.[]' "$RUNNER_TEMP/review-queue.json" | while read -r item; do
             jq -n --argjson item "$item" \
               '{event_type: "pr-discovered", client_payload: {pr_number: $item.pr_number, head_sha: $item.head_sha}}' \
-              | gh api "repos/${{ github.repository }}/dispatches" --input -
+              | gh api "repos/$GITHUB_REPOSITORY/dispatches" --input -
             echo "Dispatched review for $item"
             sleep 20
+          done
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Re-send lost ingestion handoffs (pr-ingestion-requested)
+        run: |
+          jq -c '.[]' "$RUNNER_TEMP/ingest-queue.json" | while read -r item; do
+            jq -n --argjson item "$item" \
+              '{event_type: "pr-ingestion-requested", client_payload: {pr_number: $item.pr_number, head_sha: $item.head_sha}}' \
+              | gh api "repos/$GITHUB_REPOSITORY/dispatches" --input -
+            echo "Re-sent ingestion for $item"
           done
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
