@@ -3,15 +3,16 @@ Tests for .github/workflows/release.yml
 
 Validates structural requirements of the tag-triggered NuGet publish workflow:
 - YAML parses cleanly
-- All 8 required jobs are present (gate, verify-tag, build, smoke-on-pack,
-  perf-on-pack, release-notes, publish, record)
+- All 7 required jobs are present (gate, verify-tag, build, perf-on-pack,
+  release-notes, publish, record); build calls build.yml, which includes
+  smoke on the packed nupkg
 - needs: chain is correct
 - publish job has environment: wpf-nuget-publish (manual approval gate)
 - Trigger: push tags if-10.0.* + workflow_dispatch with tag input
-- compute-version.ps1 is referenced in the build job
+- the NuGet version is derived from the tag by tools/release-version.py
 - check-regression.py --current-sha is referenced in the perf job
 - ledger-event.py is referenced in the record job
-- NuGet target URL contains nuget.pkg.github.com/initialforce
+- publish pushes to nuget.org and nuget.pkg.github.com/initialforce
 - Concurrency group: release-${{ github.ref }}, cancel-in-progress: false
 - Permissions: contents:write, packages:write, id-token:write
 - Tag pattern if-10.0.*
@@ -21,7 +22,7 @@ Security / integrity checks (CRIT-1, CRIT-2, HIGH-5, HIGH-7, MED-3, LOW-3):
 - all downstream jobs gated on proceed == 'true'
 - publish and record include build in needs
 - verify-tag errors on unsigned tags (no warning fallback)
-- verify-tag checks reachability against if/release/10.0
+- verify-tag checks reachability against if/main
 - verify-tag validates tag format regex
 - record job uses correct ledger-event.py CLI flags (--pr-number, --head-sha, --push)
 - publish job contains a SHA256 integrity check step
@@ -44,7 +45,6 @@ REQUIRED_JOBS = {
     "gate",
     "verify-tag",
     "build",
-    "smoke-on-pack",
     "perf-on-pack",
     "release-notes",
     "publish",
@@ -111,10 +111,10 @@ def test_yaml_parses() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 2. All 8 required jobs are present
+# 2. All required jobs are present
 # ---------------------------------------------------------------------------
-def test_all_eight_jobs_present(workflow: dict) -> None:
-    """Workflow must define all 8 required jobs."""
+def test_all_required_jobs_present(workflow: dict) -> None:
+    """Workflow must define all required jobs."""
     jobs = workflow.get("jobs", {})
     missing = REQUIRED_JOBS - set(jobs.keys())
     assert not missing, f"Missing required jobs: {missing}"
@@ -137,11 +137,12 @@ def test_build_needs_verify_tag(workflow: dict) -> None:
     assert "verify-tag" in needs, f"build must need 'verify-tag'; got: {needs}"
 
 
-def test_smoke_on_pack_needs_build(workflow: dict) -> None:
-    """smoke-on-pack must need build."""
-    jobs = workflow["jobs"]
-    needs = _job_needs_list(jobs.get("smoke-on-pack", {}))
-    assert "build" in needs, f"smoke-on-pack must need 'build'; got: {needs}"
+def test_build_calls_build_workflow_with_release_version(workflow: dict) -> None:
+    """build must reuse build.yml (same gates as if/main, incl. smoke on pack)."""
+    build_job = workflow["jobs"]["build"]
+    assert build_job.get("uses") == "./.github/workflows/build.yml"
+    version = (build_job.get("with") or {}).get("package_version", "")
+    assert "needs.verify-tag.outputs.nuget_version" in version
 
 
 def test_perf_on_pack_needs_build(workflow: dict) -> None:
@@ -158,11 +159,11 @@ def test_release_notes_needs_build(workflow: dict) -> None:
     assert "build" in needs, f"release-notes must need 'build'; got: {needs}"
 
 
-def test_publish_needs_smoke_perf_notes(workflow: dict) -> None:
-    """publish must need smoke-on-pack, perf-on-pack, and release-notes."""
+def test_publish_needs_build_perf_notes(workflow: dict) -> None:
+    """publish must need build (incl. smoke), perf-on-pack, and release-notes."""
     jobs = workflow["jobs"]
     needs = _job_needs_list(jobs.get("publish", {}))
-    for required in ("smoke-on-pack", "perf-on-pack", "release-notes"):
+    for required in ("build", "perf-on-pack", "release-notes"):
         assert required in needs, (
             f"publish must need '{required}'; got needs: {needs}"
         )
@@ -217,17 +218,14 @@ def test_trigger_workflow_dispatch_with_tag_input(workflow: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 7. compute-version.ps1 referenced in build job
+# 7. NuGet version derived from the tag by release-version.py
 # ---------------------------------------------------------------------------
-def test_build_references_compute_version(workflow: dict) -> None:
-    """build job must reference tools/compute-version.ps1."""
-    jobs = workflow["jobs"]
-    build_job = jobs.get("build", {})
-    combined = _steps_combined_run(build_job)
-    assert "compute-version.ps1" in combined, (
-        "build job must invoke tools/compute-version.ps1 to derive NuGet version; "
-        "not found in any step's 'run' script"
-    )
+def test_version_derived_from_tag(workflow: dict) -> None:
+    """verify-tag must derive the NuGet version from the tag and expose it."""
+    verify_job = workflow["jobs"]["verify-tag"]
+    combined = _steps_combined_run(verify_job)
+    assert "tools/release-version.py version --tag" in combined
+    assert "nuget_version" in (verify_job.get("outputs") or {})
 
 
 # ---------------------------------------------------------------------------
@@ -273,8 +271,28 @@ def test_record_emits_published_event(workflow: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 10. NuGet target URL contains nuget.pkg.github.com/initialforce
+# 10. publish pushes to nuget.org and GitHub Packages
 # ---------------------------------------------------------------------------
+def test_publish_targets_nuget_org(workflow: dict) -> None:
+    """publish job must push to nuget.org with the NUGET_ORG_API_KEY secret."""
+    publish_job = workflow["jobs"]["publish"]
+    combined = _steps_combined_run(publish_job)
+    assert "https://api.nuget.org/v3/index.json" in combined
+    assert "secrets.NUGET_ORG_API_KEY" in str(publish_job)
+
+
+def test_publish_requires_build_and_perf_success(workflow: dict) -> None:
+    """publish runs only when build (all build.yml gates) and perf passed."""
+    if_condition = str(workflow["jobs"]["publish"].get("if", ""))
+    assert "needs.build.result == 'success'" in if_condition
+    assert "needs.perf-on-pack.result == 'success'" in if_condition
+
+
+def test_record_checks_out_if_main(workflow: dict) -> None:
+    """record pushes a ledger commit, so it must check out the if/main branch."""
+    steps = workflow["jobs"]["record"]["steps"]
+    checkout = next(s for s in steps if str(s.get("uses", "")).startswith("actions/checkout"))
+    assert (checkout.get("with") or {}).get("ref") == "if/main"
 def test_publish_targets_github_packages_initialforce(workflow: dict) -> None:
     """publish job must push to nuget.pkg.github.com/initialforce."""
     jobs = workflow["jobs"]
@@ -341,25 +359,29 @@ def test_permissions_id_token_write(workflow: dict) -> None:
 # ---------------------------------------------------------------------------
 # 13. build job packs both InitialForce.WPF packages
 # ---------------------------------------------------------------------------
-def test_build_packs_initialforce_wpf(workflow: dict) -> None:
-    """build job must pack packaging/InitialForce.WPF/InitialForce.WPF.csproj."""
-    jobs = workflow["jobs"]
-    build_job = jobs.get("build", {})
-    combined = _steps_combined_run(build_job)
-    assert "InitialForce.WPF.csproj" in combined, (
-        "build job must run dotnet pack on packaging/InitialForce.WPF/InitialForce.WPF.csproj"
-    )
+def _called_build_workflow() -> dict:
+    path = REPO_ROOT / ".github" / "workflows" / "build.yml"
+    with path.open() as fh:
+        return _normalize_on_key(yaml.safe_load(fh))
 
 
-def test_build_packs_initialforce_wpf_runtimeoverride(workflow: dict) -> None:
-    """build job must pack the RuntimeOverride csproj."""
-    jobs = workflow["jobs"]
-    build_job = jobs.get("build", {})
-    combined = _steps_combined_run(build_job)
-    assert "InitialForce.WPF.RuntimeOverride.csproj" in combined, (
-        "build job must run dotnet pack on "
-        "packaging/InitialForce.WPF.RuntimeOverride/InitialForce.WPF.RuntimeOverride.csproj"
-    )
+def test_build_packs_initialforce_wpf() -> None:
+    """The called build.yml must pack InitialForce.WPF."""
+    combined = _steps_combined_run(_called_build_workflow()["jobs"]["build-wpf"])
+    assert "InitialForce.WPF.csproj" in combined
+
+
+def test_build_packs_initialforce_wpf_runtimeoverride() -> None:
+    """The called build.yml must pack InitialForce.WPF.RuntimeOverride."""
+    combined = _steps_combined_run(_called_build_workflow()["jobs"]["build-wpf"])
+    assert "InitialForce.WPF.RuntimeOverride.csproj" in combined
+
+
+def test_called_build_runs_smoke_on_packed_nupkg() -> None:
+    """build.yml's smoke job (the release smoke gate) must consume the packed nupkg."""
+    jobs = _called_build_workflow()["jobs"]
+    assert "build-wpf" in _job_needs_list(jobs["smoke"])
+    assert "InitialForceWpfVersion" in _steps_combined_run(jobs["smoke"])
 
 
 # ---------------------------------------------------------------------------
@@ -436,14 +458,6 @@ def test_build_gated_on_prior_success(workflow: dict) -> None:
     assert if_condition, "build must have an 'if' condition to gate on prior job success"
 
 
-def test_smoke_on_pack_gated_on_build_success(workflow: dict) -> None:
-    """smoke-on-pack must have an if condition gated on build success."""
-    jobs = workflow.get("jobs", {})
-    job = jobs.get("smoke-on-pack", {})
-    if_condition = job.get("if", "")
-    assert if_condition, "smoke-on-pack must have an 'if' condition gated on build success"
-
-
 def test_perf_on_pack_gated_on_build_success(workflow: dict) -> None:
     """perf-on-pack must have an if condition gated on build success."""
     jobs = workflow.get("jobs", {})
@@ -503,14 +517,8 @@ def test_record_needs_includes_build(workflow: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# HIGH-7: tag signature step errors (never warns); reachability against if/release/10.0
+# HIGH-7: tag signature step errors (never warns); reachability against if/main
 # ---------------------------------------------------------------------------
-@pytest.mark.xfail(
-    reason="verify-tag still emits a ::warning:: TODO instead of a hard signature "
-    "check because GPG signing infrastructure is not yet provisioned. Tracked by "
-    "br-commit-video-presenter-rx-fix-vmo; remove this marker once GPG is in place.",
-    strict=False,
-)
 def test_verify_tag_errors_on_unsigned(workflow: dict) -> None:
     """verify-tag must fail (exit 1) on unsigned tag, never emit ::warning:: and continue."""
     jobs = workflow.get("jobs", {})
@@ -528,13 +536,21 @@ def test_verify_tag_errors_on_unsigned(workflow: dict) -> None:
     )
 
 
-def test_verify_tag_reachability_uses_if_release_10(workflow: dict) -> None:
-    """verify-tag reachability check must reference if/release/10.0, not if/main."""
+def test_verify_tag_checks_bot_signature(workflow: dict) -> None:
+    """verify-tag must verify the tag signature against the bot key fingerprint."""
+    combined = _steps_combined_run(workflow["jobs"]["verify-tag"])
+    assert "git verify-tag" in combined
+    assert "GH_BOT_GPG_FINGERPRINT" in combined
+
+
+def test_verify_tag_reachability_uses_if_main(workflow: dict) -> None:
+    """Releases are cut from if/main: the tagged commit must be reachable from it."""
     jobs = workflow.get("jobs", {})
     verify_job = jobs.get("verify-tag", {})
     combined = _steps_combined_run(verify_job)
-    assert "if/release/10.0" in combined, (
-        "verify-tag must check reachability against 'if/release/10.0', not 'if/main'"
+    assert "merge-base --is-ancestor" in combined
+    assert "origin/if/main" in combined, (
+        "verify-tag must check reachability against 'if/main'"
     )
 
 
