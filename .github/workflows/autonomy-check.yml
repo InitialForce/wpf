@@ -40,12 +40,13 @@ jobs:
     steps:
       - name: Evaluate autonomy gate
         id: check
+        env:
+          AUTONOMY_ENABLED: ${{ vars.IF_AUTONOMY_ENABLED }}
+          AUTOMERGE_FROZEN: ${{ vars.IF_AUTOMERGE_FROZEN }}
+          REQUESTED_ACTION: ${{ inputs.requested_action }}
+          BYPASS: ${{ inputs.bypass_for_human_dispatch }}
+          TRIGGER_EVENT: ${{ github.event_name }}
         run: |
-          AUTONOMY_ENABLED="${{ vars.IF_AUTONOMY_ENABLED }}"
-          AUTOMERGE_FROZEN="${{ vars.IF_AUTOMERGE_FROZEN }}"
-          REQUESTED_ACTION="${{ inputs.requested_action }}"
-          BYPASS="${{ inputs.bypass_for_human_dispatch }}"
-          TRIGGER_EVENT="${{ github.event_name }}"
 
           # Gate 0: default-deny for unknown requested_action
           KNOWN_ACTIONS="claude-invoke auto-merge discovery-scan release-publish cherry-pick upstream-stable-adoption"

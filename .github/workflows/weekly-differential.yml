@@ -100,16 +100,18 @@ jobs:
             if (-not $hit) { throw "Could not locate $n.dll" }
             Copy-Item $hit.FullName -Destination $dest
           }
-          $version = "10.0.0-diff.${{ github.run_number }}.${{ matrix.variant }}"
+          $version = "10.0.0-diff.$env:GITHUB_RUN_NUMBER.$env:VARIANT"
           dotnet pack packaging\InitialForce.WPF\InitialForce.WPF.csproj -c Release `
             -p:PackageVersion=$version --output artifacts\diff-packages
           if ($LASTEXITCODE -ne 0) { throw "pack failed" }
           "version=$version" | Out-File -Append $env:GITHUB_OUTPUT
+        env:
+          VARIANT: ${{ matrix.variant }}
 
       - name: Run smoke harness
         shell: pwsh
         run: |
-          $ver = "${{ steps.pack.outputs.version }}"
+          $ver = $env:PACKED_VERSION
           $feed = (Resolve-Path artifacts\diff-packages).Path
           dotnet nuget add source $feed --name local-packed --configfile NuGet.config
           dotnet nuget add source https://api.nuget.org/v3/index.json --name nuget.org --configfile NuGet.config
@@ -143,11 +145,14 @@ jobs:
           }
           ($deps | ConvertTo-Json -Depth 100) | Set-Content $depsPath -Encoding utf8
           New-Item -ItemType Directory -Force -Path smoke-results | Out-Null
-          & "smoke-publish/InitialForce.WpfSmoke.exe" --result:"smoke-results/smoke-${{ matrix.variant }}.xml"
+          & "smoke-publish/InitialForce.WpfSmoke.exe" --result:"smoke-results/smoke-$env:VARIANT.xml"
           # Test failures are data for the comparison, not a job failure.
           Write-Host "NUnitLite exit code: $LASTEXITCODE"
-          if (-not (Test-Path "smoke-results/smoke-${{ matrix.variant }}.xml")) { throw "smoke harness produced no result file" }
+          if (-not (Test-Path "smoke-results/smoke-$env:VARIANT.xml")) { throw "smoke harness produced no result file" }
           exit 0
+        env:
+          VARIANT: ${{ matrix.variant }}
+          PACKED_VERSION: ${{ steps.pack.outputs.version }}
 
       - name: Upload smoke results
         uses: actions/upload-artifact@v4

@@ -122,17 +122,13 @@ def test_gating_logic_references_vars(workflow: dict) -> None:
     steps = gate_job.get("steps", [])
     assert steps, "gate job must have at least one step"
 
-    # Collect all run scripts across steps
-    combined_script = "\n".join(
-        step.get("run", "") for step in steps if isinstance(step, dict)
-    )
-
-    assert "${{ vars.IF_AUTONOMY_ENABLED }}" in combined_script, (
-        "Gate script must reference ${{ vars.IF_AUTONOMY_ENABLED }} literally"
-    )
-    assert "${{ vars.IF_AUTOMERGE_FROZEN }}" in combined_script, (
-        "Gate script must reference ${{ vars.IF_AUTOMERGE_FROZEN }} literally"
-    )
+    # The values reach the script through env, never ${{ }} inside run.
+    env = steps[0].get("env", {})
+    assert env.get("AUTONOMY_ENABLED") == "${{ vars.IF_AUTONOMY_ENABLED }}"
+    assert env.get("AUTOMERGE_FROZEN") == "${{ vars.IF_AUTOMERGE_FROZEN }}"
+    assert env.get("REQUESTED_ACTION") == "${{ inputs.requested_action }}"
+    for step in steps:
+        assert "${{" not in step.get("run", ""), step.get("name")
 
 
 # ---------------------------------------------------------------------------

@@ -74,7 +74,11 @@ jobs:
           git remote add upstream https://github.com/dotnet/wpf.git || true
           git fetch upstream --tags
 
-          TAG="${{ env.UPSTREAM_TAG }}"
+          TAG="$UPSTREAM_TAG"
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$TAG' is not a release tag like v10.0.12."
+            exit 1
+          fi
 
           # Verify tag exists
           if ! git tag --list "$TAG" | grep -qxF "$TAG"; then
@@ -136,9 +140,8 @@ jobs:
       - name: Fast-forward mirror branch
         id: promote
         run: |
-          TAG="${{ env.UPSTREAM_TAG }}"
+          TAG="$UPSTREAM_TAG"
           MIRROR_BRANCH="if/mirror/release/10.0"
-          TAG_SHA="${{ needs.verify-tag.outputs.tag_sha }}"
 
           # Fetch the mirror branch from origin
           git fetch origin "$MIRROR_BRANCH" || {
@@ -168,6 +171,7 @@ jobs:
           echo "::notice::Mirror branch '$MIRROR_BRANCH' fast-forwarded to '$TAG' ($TAG_SHA)."
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG_SHA: ${{ needs.verify-tag.outputs.tag_sha }}
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
 
@@ -191,15 +195,15 @@ jobs:
 
       - name: Dispatch nightly-rebase workflow
         run: |
-          TAG="${{ env.UPSTREAM_TAG }}"
-          gh api repos/${{ github.repository }}/dispatches \
+          gh api "repos/$GITHUB_REPOSITORY/dispatches" \
             --field event_type=nightly-rebase \
             --field "client_payload[trigger]=upstream-stable-adoption" \
-            --field "client_payload[upstream_tag]=$TAG" \
-            --field "client_payload[mirror_sha]=${{ needs.promote-mirror.outputs.mirror_sha }}"
-          echo "::notice::Dispatched nightly-rebase event for tag '$TAG'."
+            --field "client_payload[upstream_tag]=$UPSTREAM_TAG" \
+            --field "client_payload[mirror_sha]=$MIRROR_SHA"
+          echo "::notice::Dispatched nightly-rebase event for tag '$UPSTREAM_TAG'."
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          MIRROR_SHA: ${{ needs.promote-mirror.outputs.mirror_sha }}
 
   # ---------------------------------------------------------------------------
   # Job 5: Summarise the adoption in the run summary (no issue: failures are
@@ -219,10 +223,15 @@ jobs:
             echo
             echo "| Field | Value |"
             echo "|---|---|"
-            echo "| Tag commit | \`${{ needs.verify-tag.outputs.tag_sha }}\` |"
-            echo "| Tag signature | \`${{ needs.verify-tag.outputs.tag_verified }}\` |"
-            echo "| \`if/mirror/release/10.0\` now at | \`${{ needs.promote-mirror.outputs.mirror_sha }}\` |"
-            echo "| nightly-rebase dispatch | ${{ needs.trigger-rebase.result }} |"
+            echo "| Tag commit | \`$TAG_SHA\` |"
+            echo "| Tag signature | \`$TAG_VERIFIED\` |"
+            echo "| \`if/mirror/release/10.0\` now at | \`$MIRROR_SHA\` |"
+            echo "| nightly-rebase dispatch | $DISPATCH_RESULT |"
             echo
             echo "The nightly upstream sync merges upstream \`release/10.0\` into \`if/staging\` and keeps one PR to \`if/main\`, which merges itself when Build passes."
           } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          TAG_SHA: ${{ needs.verify-tag.outputs.tag_sha }}
+          TAG_VERIFIED: ${{ needs.verify-tag.outputs.tag_verified }}
+          MIRROR_SHA: ${{ needs.promote-mirror.outputs.mirror_sha }}
+          DISPATCH_RESULT: ${{ needs.trigger-rebase.result }}
