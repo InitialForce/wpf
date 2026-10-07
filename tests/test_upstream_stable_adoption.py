@@ -164,21 +164,17 @@ def test_gated_jobs_have_proceed_condition(jobs: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Gate 8: promote-mirror step issues a gh issue create on non-FF failure
+# Gate 8: promote-mirror is fast-forward only and a no-op when already adopted
 # ---------------------------------------------------------------------------
-def test_promote_mirror_opens_issue_on_non_ff(jobs: dict) -> None:
-    """promote-mirror must call 'gh issue create' in its promotion step."""
-    pm_job = jobs.get("promote-mirror", {})
-    steps = pm_job.get("steps", [])
-    combined_run = "\n".join(
-        step.get("run", "") for step in steps if isinstance(step, dict)
-    )
-    assert "gh issue create" in combined_run, (
-        "promote-mirror must open a gh issue on non-fast-forward failure"
-    )
-    assert "--ff-only" in combined_run or "ff-only" in combined_run, (
-        "promote-mirror must use fast-forward-only merge (--ff-only)"
-    )
+def test_promote_mirror_fast_forward_only(jobs: dict) -> None:
+    """promote-mirror pushes only when the mirror is an ancestor of the tag."""
+    steps = jobs["promote-mirror"]["steps"]
+    combined_run = "\n".join(s.get("run", "") for s in steps if isinstance(s, dict))
+    assert 'git merge-base --is-ancestor "$CURRENT_MIRROR_SHA" "$TAG_SHA"' in combined_run
+    assert 'git merge-base --is-ancestor "$TAG_SHA" "$CURRENT_MIRROR_SHA"' in combined_run
+    assert "--force" not in combined_run
+    # Failures are reported by claude-on-failure.yml; no ad-hoc issue labels.
+    assert "gh issue create" not in combined_run
 
 
 # ---------------------------------------------------------------------------
@@ -197,21 +193,13 @@ def test_trigger_rebase_dispatches_nightly_rebase(jobs: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Gate 10: notify step opens an issue with 'operator-followup' label
+# Gate 10: notify writes a run summary instead of opening an issue
 # ---------------------------------------------------------------------------
-def test_notify_opens_operator_followup_issue(jobs: dict) -> None:
-    """The notify job must open a gh issue with the 'operator-followup' label."""
-    notify_job = jobs.get("notify", {})
-    steps = notify_job.get("steps", [])
-    combined_run = "\n".join(
-        step.get("run", "") for step in steps if isinstance(step, dict)
-    )
-    assert "operator-followup" in combined_run, (
-        "notify job must create an issue with 'operator-followup' label"
-    )
-    assert "gh issue create" in combined_run, (
-        "notify job must call 'gh issue create'"
-    )
+def test_notify_writes_summary_not_issue(jobs: dict) -> None:
+    steps = jobs["notify"]["steps"]
+    combined_run = "\n".join(s.get("run", "") for s in steps if isinstance(s, dict))
+    assert "GITHUB_STEP_SUMMARY" in combined_run
+    assert "gh issue create" not in combined_run
 
 
 # ---------------------------------------------------------------------------
