@@ -30,6 +30,12 @@ WORKFLOW_DIR: Path = Path(__file__).parent.parent / ".github" / "workflows"
 # Matches:  --event foo_bar  /  --event foo-bar  /  --event FooBar123
 EVENT_RE: re.Pattern[str] = re.compile(r"--event\s+([a-zA-Z_][a-zA-Z0-9_-]*)")
 
+# `gh run list --event <trigger>` uses the same flag for GitHub trigger names.
+_GITHUB_TRIGGER_NAMES: frozenset[str] = frozenset(
+    {"push", "pull_request", "schedule", "workflow_dispatch", "repository_dispatch",
+     "workflow_run"}
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -41,6 +47,9 @@ def _events_in_workflow(path: Path) -> list[tuple[Path, int, str]]:
     findings: list[tuple[Path, int, str]] = []
     for lineno, line in enumerate(path.read_text().splitlines(), start=1):
         for m in EVENT_RE.finditer(line):
+            if m.group(1) in _GITHUB_TRIGGER_NAMES:
+                # `gh run list --event push` filters by trigger; not a ledger event.
+                continue
             findings.append((path, lineno, m.group(1)))
     return findings
 
