@@ -572,50 +572,24 @@ jobs:
         shell: bash
 
   # ---------------------------------------------------------------------------
-  # perf: BenchmarkDotNet perf gate (needs build-wpf)
+  # perf: PLACEHOLDER. No benchmark runs here and nothing is measured. It is a
+  # named slot in the aggregate gate until real package-consuming benchmarks
+  # exist. Do not describe it as a performance check.
   # ---------------------------------------------------------------------------
   perf:
-    name: Perf (${{ matrix.arch }})
-    runs-on: windows-2022
+    name: Perf placeholder (measures nothing)
+    runs-on: ubuntu-latest
     needs: build-wpf
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [x64, arm64]
 
     steps:
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: build-${{ matrix.arch }}
-          path: artifacts/packages/
-
-      - name: Set up .NET SDK
-        uses: actions/setup-dotnet@v4
-        with:
-          global-json-file: global.json
-
-      # Placeholder: run BenchmarkDotNet benchmarks.
-      # TODO (wired by perf beads): replace with real benchmark invocation.
-      - name: Run BenchmarkDotNet (placeholder)
+      - name: Report that no performance check ran
         run: |
-          echo "BenchmarkDotNet placeholder — wired by other beads."
-          echo "Expected command:"
-          echo "  dotnet run --project test/InitialForce.WpfSmoke/ -c Release -- --filter '*Bench*' --exporters json"
-          echo "  python tools/check-regression.py --current-sha ${{ github.sha }} --series perf/series.jsonl"
+          echo "::notice title=No performance check::This job is a placeholder. No benchmark ran and nothing was measured for this build."
+          {
+            echo "## Perf: placeholder"
+            echo "No benchmark ran. This build has no performance check."
+          } >> "$GITHUB_STEP_SUMMARY"
         shell: bash
-
-      - name: Upload perf results
-        uses: actions/upload-artifact@v4
-        with:
-          name: perf-${{ matrix.arch }}
-          path: BenchmarkDotNet.Artifacts/
-          if-no-files-found: warn
-          retention-days: 14
 
   # ---------------------------------------------------------------------------
   # aggregate: diff smoke results, final gate (needs all prior jobs)
@@ -684,7 +658,7 @@ jobs:
           echo "lint-yaml:      $LINT_YAML"
           echo "anti-stub-lint: $ANTI_STUB"
           echo "smoke:          $SMOKE"
-          echo "perf:           $PERF"
+          echo "perf:           $PERF (placeholder, measures nothing)"
 
           FAILED=0
           for result in "$LINT_TOOLS" "$LINT_YAML" "$ANTI_STUB" "$SMOKE" "$PERF"; do
