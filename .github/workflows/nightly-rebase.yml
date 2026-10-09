@@ -25,6 +25,10 @@
 #     only the conflicted files, as an artifact.
 #   - finalize recreates the merge itself, takes only the conflicted paths
 #     from the artifact, refuses stray files, and only then signs and pushes.
+#   - sync records the if/main commit it starts from (main_sha).
+#     resolve-conflicts and finalize merge onto exactly that commit, so a
+#     change that lands on if/main meanwhile cannot be overwritten by a
+#     resolution made on an older tree.
 name: Nightly Rebase
 
 on:
@@ -78,6 +82,7 @@ jobs:
     outputs:
       result: ${{ steps.plan.outputs.result }}
       upstream_sha: ${{ steps.plan.outputs.upstream_sha }}
+      main_sha: ${{ steps.plan.outputs.main_sha }}
       open_pr: ${{ steps.plan.outputs.open_pr }}
       has_conflicts: ${{ steps.merge.outputs.has_conflicts }}
       conflicts_allowed: ${{ steps.denylist.outputs.allowed }}
@@ -124,6 +129,7 @@ jobs:
           UPSTREAM_SHA=$(git rev-parse upstream/release/10.0)
           export UPSTREAM_SHA
           echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+          echo "main_sha=$(git rev-parse "origin/$MAIN_BRANCH")" >> "$GITHUB_OUTPUT"
           echo "::notice::Upstream release/10.0 HEAD: $UPSTREAM_SHA"
 
           OPEN_PR=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open \
@@ -210,6 +216,7 @@ jobs:
           fi
         env:
           UPSTREAM_SHA: ${{ steps.plan.outputs.upstream_sha }}
+          BASE_SHA: ${{ steps.plan.outputs.main_sha }}
           OUT: ${{ runner.temp }}/merge
           TRUSTED: ${{ github.workspace }}/trusted
 
@@ -249,14 +256,18 @@ jobs:
       contents: read
     env:
       UPSTREAM_SHA: ${{ needs.sync.outputs.upstream_sha }}
+      BASE_SHA: ${{ needs.sync.outputs.main_sha }}
 
     steps:
-      - name: Validate upstream SHA
-        run: '[[ "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Invalid upstream SHA"; exit 1; }'
+      - name: Validate SHAs
+        run: |
+          [[ "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]] && [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::Invalid upstream or if/main SHA"; exit 1; }
 
-      - uses: actions/checkout@v4
+      - name: Check out the pinned if/main commit
+        uses: actions/checkout@v4
         with:
-          ref: if/main
+          ref: ${{ env.BASE_SHA }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -339,14 +350,17 @@ jobs:
         working-directory: work
     env:
       UPSTREAM_SHA: ${{ needs.sync.outputs.upstream_sha }}
+      BASE_SHA: ${{ needs.sync.outputs.main_sha }}
     outputs:
       pushed: ${{ steps.push.outputs.pushed }}
       reason: ${{ steps.check.outputs.reason }}
 
     steps:
-      - name: Validate upstream SHA
+      - name: Validate SHAs
         working-directory: .
-        run: '[[ "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Invalid upstream SHA"; exit 1; }'
+        run: |
+          [[ "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]] && [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::Invalid upstream or if/main SHA"; exit 1; }
 
       - name: Generate GH App token
         id: app-token
@@ -362,10 +376,10 @@ jobs:
           path: trusted
           persist-credentials: false
 
-      - name: Check out if/main (work tree)
+      - name: Check out the pinned if/main commit (work tree)
         uses: actions/checkout@v4
         with:
-          ref: if/main
+          ref: ${{ env.BASE_SHA }}
           path: work
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
@@ -418,12 +432,12 @@ jobs:
 
           # Upstream workflows never run in the fork: drop any workflow file
           # upstream added (pushing it would also need the workflows scope).
-          git diff --cached --name-only --diff-filter=A "origin/$MAIN_BRANCH" -- .github/workflows \
+          git diff --cached --name-only --diff-filter=A "$BASE_SHA" -- .github/workflows \
             | while read -r f; do git rm -q --cached -- "$f"; rm -f -- "$f"; done
 
           # The merge may only change files that upstream changed.
-          BASE=$(git merge-base "origin/$MAIN_BRANCH" "$UPSTREAM_SHA")
-          STRAY=$(comm -23 <(git diff --cached --name-only "origin/$MAIN_BRANCH" | sort) \
+          BASE=$(git merge-base "$BASE_SHA" "$UPSTREAM_SHA")
+          STRAY=$(comm -23 <(git diff --cached --name-only "$BASE_SHA" | sort) \
                            <(git diff --name-only "$BASE" "$UPSTREAM_SHA" | sort))
           if [ -n "$STRAY" ]; then
             echo "::error::Merge touches files upstream did not change: $STRAY"

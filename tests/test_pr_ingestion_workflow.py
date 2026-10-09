@@ -264,7 +264,7 @@ FINISH_SCRIPT = REPO_ROOT / "tools" / "finish-ingestion-branch.sh"
 def test_branch_cut_from_if_main(workflow: dict) -> None:
     steps = {s.get("name"): s for s in workflow["jobs"]["cherry-pick"]["steps"]}
     assert 'bash "$TRUSTED/tools/apply-upstream-pr.sh"' in steps["Apply upstream change"]["run"]
-    assert 'git checkout -q -B "$BRANCH" origin/if/main' in APPLY_SCRIPT.read_text()
+    assert 'git checkout -q -B "$BRANCH" "$BASE_SHA"' in APPLY_SCRIPT.read_text()
     assert "--changed-files" in steps["Refuse conflicts on denylisted files"]["run"]
     resolve_if = workflow["jobs"]["resolve-conflicts"]["if"]
     assert "needs.cherry-pick.outputs.conflicts_allowed == 'true'" in resolve_if
@@ -329,7 +329,7 @@ def test_pushing_jobs_use_trusted_checkout(workflow: dict, job_name: str) -> Non
 
 def test_finish_runs_denylist_on_branch_diff_before_push() -> None:
     text = FINISH_SCRIPT.read_text()
-    assert "git diff --name-only origin/if/main...HEAD" in text
+    assert 'git diff --name-only "$BASE_SHA...HEAD"' in text
     assert '"$TRUSTED/tools/check-denylist.py" --config "$TRUSTED/.if-fork/config.yaml"' in text
     assert text.index("check-denylist.py") < text.index("git push")
 
@@ -463,8 +463,8 @@ def test_sha_smuggling_reads_ledger_file(workflow: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def test_denylist_uses_full_diff_range() -> None:
-    """Denylist check must diff origin/if/main...HEAD to catch every commit (HIGH-4)."""
-    assert "origin/if/main...HEAD" in FINISH_SCRIPT.read_text()
+    """Denylist check must diff BASE_SHA...HEAD to catch every commit (HIGH-4)."""
+    assert '"$BASE_SHA...HEAD"' in FINISH_SCRIPT.read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -541,3 +541,34 @@ def test_run_blocks_are_valid_bash(workflow: dict) -> None:
                     ["bash", "-n"], input=step["run"], text=True, capture_output=True
                 )
                 assert r.returncode == 0, f"{name}: {step.get('name')}: {r.stderr}"
+
+
+# ---------------------------------------------------------------------------
+# Every job works on the if/main commit the cherry-pick job started from
+# ---------------------------------------------------------------------------
+
+def test_if_main_commit_is_pinned_across_jobs(workflow: dict) -> None:
+    jobs = workflow["jobs"]
+    pick = jobs["cherry-pick"]
+    assert pick["outputs"]["main_sha"] == "${{ steps.base.outputs.sha }}"
+    base = next(s for s in pick["steps"] if s.get("id") == "base")
+    assert "git rev-parse origin/if/main" in base["run"]
+    for step in pick["steps"]:
+        if step.get("id") in ("apply", "finish"):
+            assert step["env"]["BASE_SHA"] == "${{ steps.base.outputs.sha }}"
+    for name in ("resolve-conflicts", "finalize"):
+        job = jobs[name]
+        assert job["env"]["BASE_SHA"] == "${{ needs.cherry-pick.outputs.main_sha }}"
+        validate = job["steps"][0]["run"]
+        assert '"$BASE_SHA" =~ ^[0-9a-f]{40}$' in validate
+        refs = [
+            s["with"]["ref"]
+            for s in job["steps"]
+            if "actions/checkout" in s.get("uses", "") and s["with"].get("path") != "trusted"
+        ]
+        assert refs == ["${{ env.BASE_SHA }}"], name
+
+
+def test_scripts_refuse_a_missing_base_sha() -> None:
+    for script in (APPLY_SCRIPT, FINISH_SCRIPT):
+        assert '[[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]' in script.read_text(), script.name

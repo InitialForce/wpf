@@ -17,6 +17,11 @@
 #     recreates the conflict itself, takes only those paths from the
 #     artifact, checks them, and only then signs and pushes.
 #   - Nothing is pushed before the whole branch diff passes file_denylist.
+#   - cherry-pick records the if/main commit it starts from (main_sha).
+#     resolve-conflicts and finalize branch from exactly that commit, so a
+#     change that lands on if/main meanwhile cannot be overwritten by a
+#     resolution made on an older tree. automerge.yml rebuilds the PR when
+#     if/main has moved.
 #
 # Flow: gate -> pre-flight (already in the fork?) -> approval check (the
 # exact pair must be approved in the ledger) -> cherry-pick (deterministic) ->
@@ -223,6 +228,7 @@ jobs:
         working-directory: work
     outputs:
       branch: ${{ steps.set-branch.outputs.branch }}
+      main_sha: ${{ steps.base.outputs.sha }}
       title: ${{ steps.apply.outputs.title }}
       result: ${{ steps.apply.outputs.result }}
       conflicts_allowed: ${{ steps.conflict-denylist.outputs.allowed }}
@@ -260,6 +266,10 @@ jobs:
       - name: Add upstream remote
         run: git remote add upstream https://github.com/dotnet/wpf.git || true
 
+      - name: Pin the if/main commit for this run
+        id: base
+        run: echo "sha=$(git rev-parse origin/if/main)" >> "$GITHUB_OUTPUT"
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -291,6 +301,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ steps.set-branch.outputs.branch }}
+          BASE_SHA: ${{ steps.base.outputs.sha }}
           OUT: ${{ runner.temp }}/apply
           TRUSTED: ${{ github.workspace }}/trusted
 
@@ -317,6 +328,7 @@ jobs:
           if [ -f "$OUT/reason" ]; then echo "reason=$(cat "$OUT/reason")" >> "$GITHUB_OUTPUT"; fi
         env:
           BRANCH: ${{ steps.set-branch.outputs.branch }}
+          BASE_SHA: ${{ steps.base.outputs.sha }}
           OUT: ${{ runner.temp }}/finish
           TRUSTED: ${{ github.workspace }}/trusted
 
@@ -362,16 +374,20 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      BASE_SHA: ${{ needs.cherry-pick.outputs.main_sha }}
 
     steps:
       - name: Validate payload
         run: |
           [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] && [[ "$PINNED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] \
-            || { echo "::error::Invalid pr_number or head_sha"; exit 1; }
+            && [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::Invalid pr_number, head_sha or if/main SHA"; exit 1; }
 
-      - uses: actions/checkout@v4
+      - name: Check out the pinned if/main commit
+        uses: actions/checkout@v4
         with:
-          ref: if/main
+          ref: ${{ env.BASE_SHA }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -459,6 +475,8 @@ jobs:
     defaults:
       run:
         working-directory: work
+    env:
+      BASE_SHA: ${{ needs.cherry-pick.outputs.main_sha }}
     outputs:
       pushed: ${{ steps.finish.outputs.pushed }}
 
@@ -467,7 +485,8 @@ jobs:
         working-directory: .
         run: |
           [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] && [[ "$PINNED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] \
-            || { echo "::error::Invalid pr_number or head_sha"; exit 1; }
+            && [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::Invalid pr_number, head_sha or if/main SHA"; exit 1; }
 
       - name: Generate GH App token
         id: app-token
@@ -483,10 +502,10 @@ jobs:
           path: trusted
           persist-credentials: false
 
-      - name: Check out if/main (work tree)
+      - name: Check out the pinned if/main commit (work tree)
         uses: actions/checkout@v4
         with:
-          ref: if/main
+          ref: ${{ env.BASE_SHA }}
           path: work
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}

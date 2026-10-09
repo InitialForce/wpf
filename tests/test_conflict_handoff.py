@@ -191,7 +191,12 @@ def test_nightly_merge_keeps_fork_deletion_of_github_files(
         cwd=work,
         capture_output=True,
         text=True,
-        env={**git_env, "UPSTREAM_SHA": sha, "OUT": str(out)},
+        env={
+            **git_env,
+            "UPSTREAM_SHA": sha,
+            "BASE_SHA": git(work, git_env, "rev-parse", "origin/if/main"),
+            "OUT": str(out),
+        },
     )
     assert r.returncode == 0, r.stderr
     assert (out / "conflicts.txt").read_text() == ""
@@ -228,6 +233,7 @@ def _finish(work: Path, env: dict[str, str], out: Path) -> subprocess.CompletedP
             "PR_NUMBER": "123",
             "PINNED_HEAD_SHA": "a" * 40,
             "BRANCH": "claude/cherry-pick-pr-123",
+            "BASE_SHA": git(work, env, "rev-parse", "origin/if/main"),
             "TRUSTED": str(REPO_ROOT),
             "OUT": str(out),
         },

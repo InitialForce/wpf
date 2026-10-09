@@ -35,6 +35,7 @@ def _run(tmp_path: Path, upr: dict) -> tuple[subprocess.CompletedProcess[str], P
             "PR_NUMBER": "12",
             "PINNED_HEAD_SHA": "a" * 40,
             "BRANCH": "claude/cherry-pick-pr-12",
+            "BASE_SHA": "c" * 40,
             "OUT": str(out),
             "TRUSTED": str(REPO_ROOT),
             "GH_TOKEN": "x",

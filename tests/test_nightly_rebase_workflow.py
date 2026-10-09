@@ -127,7 +127,7 @@ def test_merges_instead_of_rebasing(sync_steps: list[dict]) -> None:
     run = _step(sync_steps, "Try the merge")["run"]
     assert 'bash "$TRUSTED/tools/nightly-merge.sh"' in run
     script = MERGE_SCRIPT.read_text()
-    assert "git checkout -q -B if/staging origin/if/main" in script
+    assert 'git checkout -q -B if/staging "$BASE_SHA"' in script
     assert "git merge --no-ff --no-commit" in script
     assert "git rebase" not in WORKFLOW_PATH.read_text()
 
@@ -281,3 +281,26 @@ def test_run_blocks_are_valid_bash(workflow: dict) -> None:
 def test_actionlint_nightly_rebase() -> None:
     result = subprocess.run(["actionlint", str(WORKFLOW_PATH)], capture_output=True, text=True)
     assert result.returncode == 0, f"actionlint failed:\n{result.stdout}\n{result.stderr}"
+
+
+def test_if_main_commit_is_pinned_across_jobs() -> None:
+    doc = yaml.safe_load(WORKFLOW_PATH.read_text())
+    jobs = doc["jobs"]
+    assert jobs["sync"]["outputs"]["main_sha"] == "${{ steps.plan.outputs.main_sha }}"
+    plan = next(s for s in jobs["sync"]["steps"] if s.get("id") == "plan")
+    assert 'echo "main_sha=$(git rev-parse "origin/$MAIN_BRANCH")"' in plan["run"]
+    merge = next(s for s in jobs["sync"]["steps"] if s.get("id") == "merge")
+    assert merge["env"]["BASE_SHA"] == "${{ steps.plan.outputs.main_sha }}"
+    for name in ("resolve-conflicts", "finalize"):
+        job = jobs[name]
+        assert job["env"]["BASE_SHA"] == "${{ needs.sync.outputs.main_sha }}"
+        assert '"$BASE_SHA" =~ ^[0-9a-f]{40}$' in job["steps"][0]["run"]
+        refs = [
+            s["with"]["ref"]
+            for s in job["steps"]
+            if "actions/checkout" in s.get("uses", "") and s["with"].get("path") != "trusted"
+        ]
+        assert refs == ["${{ env.BASE_SHA }}"], name
+    check = next(s for s in jobs["finalize"]["steps"] if s.get("id") == "check")["run"]
+    assert "origin/$MAIN_BRANCH" not in check
+    assert 'git merge-base "$BASE_SHA" "$UPSTREAM_SHA"' in check

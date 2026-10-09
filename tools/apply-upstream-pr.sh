@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # apply-upstream-pr.sh: apply one reviewed upstream dotnet/wpf PR onto a branch
-# made from origin/if/main, without any model involvement.
+# made from a pinned if/main commit, without any model involvement.
 #
 # Used by pr-ingestion.yml in three jobs (cherry-pick, resolve-conflicts,
 # finalize). Running it again on the same inputs gives the same result, which
@@ -9,11 +9,14 @@
 # Environment (all required):
 #   PR_NUMBER        upstream PR number (^[0-9]+$)
 #   PINNED_HEAD_SHA  reviewed upstream head (^[0-9a-f]{40}$)
+#   BASE_SHA         if/main commit to branch from (^[0-9a-f]{40}$). Every job
+#                    of one run uses the same commit, so the trusted job
+#                    recreates exactly the state the resolver saw.
 #   BRANCH           local branch to create, e.g. claude/cherry-pick-pr-123
 #   OUT              directory for result files
 #   TRUSTED          checkout of if/main whose tools and config are used
 #   GH_TOKEN         token for read-only GitHub API calls
-# Expects remotes: origin (with origin/if/main fetched) and upstream.
+# Expects remotes: origin (with BASE_SHA fetched) and upstream.
 #
 # Writes to $OUT:
 #   result     applied | conflict | empty | refused
@@ -25,6 +28,7 @@ set -euo pipefail
 
 [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || { echo "invalid PR_NUMBER" >&2; exit 1; }
 [[ "$PINNED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid PINNED_HEAD_SHA" >&2; exit 1; }
+[[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid BASE_SHA" >&2; exit 1; }
 mkdir -p "$OUT"
 
 refuse() {
@@ -64,7 +68,7 @@ for sha in "$SOURCE" "$PINNED_HEAD_SHA"; do
   fi
 done
 
-git checkout -q -B "$BRANCH" origin/if/main
+git checkout -q -B "$BRANCH" "$BASE_SHA"
 PICK_ARGS=(-x)
 if [ "$SOURCE" != "$MERGE_SHA" ]; then
   # Squash the open PR into one synthetic commit on its upstream base so
