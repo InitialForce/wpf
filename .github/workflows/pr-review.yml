@@ -18,9 +18,11 @@
 # prepare pins what is reviewed: it fetches refs/pull/N/head from dotnet/wpf,
 # checks that it equals HEAD_SHA, and writes the diff from the merge base,
 # the file list and the changed files' content to the `review-input`
-# artifact. Reviewers read only that artifact. They have Read/Grep/Glob and
-# Write (for the verdict file), no shell, no network tools and a read-only
-# token, because they read untrusted PR content.
+# artifact. Reviewers read only that artifact. Because they read untrusted PR
+# content they get a read-only token, a sparse checkout (config and prompts
+# only), trusted Claude settings only (no project settings, hooks or MCP
+# servers), Read limited to review-input/ and the config, Write limited to
+# their own verdict file, and no shell or network tools.
 #
 # merge-verdict applies code checks on the same pinned diff (hard-fail
 # patterns, file denylist, confidence threshold; see tools/merge-verdicts.py)
@@ -193,9 +195,15 @@ jobs:
             exit 1
           fi
 
+      # Only the policy file and the prompts. The working directory holds
+      # nothing else from the repository: no .claude/, .mcp.json or CLAUDE.md.
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /.if-fork/config.yaml
+            /.if-fork/prompts/
 
       - name: Download pinned review input
         uses: actions/download-artifact@v4
@@ -245,11 +253,18 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: ${{ steps.load-prompt-1.outputs.prompt }}
+          # Trusted settings only: the user settings the action writes (hooks
+          # off), no project or local settings, and no MCP servers except the
+          # action's own. Tool rules cover only the input and the verdict file.
+          # In a Claude Code rule "//" starts an absolute path.
+          settings: '{"disableAllHooks": true}'
           claude_args: >-
+            --setting-sources user
+            --strict-mcp-config
             --max-turns ${{ steps.settings.outputs.max_turns }}
             --model ${{ steps.settings.outputs.model }}
-            --allowedTools Read,Grep,Glob,Write
-            --disallowedTools Bash,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task
+            --allowedTools Read(./review-input/**),Read(./.if-fork/config.yaml),Write(./review-output/review-1.json)
+            --disallowedTools Bash,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task,Read(//proc/**),Read(//home/runner/work/_temp/**)
           github_token: ${{ github.token }}
 
       # Upload whatever verdict exists, even when the reviewer hit its turn
@@ -294,9 +309,15 @@ jobs:
             exit 1
           fi
 
+      # Only the policy file and the prompts. The working directory holds
+      # nothing else from the repository: no .claude/, .mcp.json or CLAUDE.md.
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /.if-fork/config.yaml
+            /.if-fork/prompts/
 
       - name: Download pinned review input
         uses: actions/download-artifact@v4
@@ -346,11 +367,15 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: ${{ steps.load-prompt-2.outputs.prompt }}
+          # Same trusted-settings rule and tool limits as review-1.
+          settings: '{"disableAllHooks": true}'
           claude_args: >-
+            --setting-sources user
+            --strict-mcp-config
             --max-turns ${{ steps.settings.outputs.max_turns }}
             --model ${{ steps.settings.outputs.model }}
-            --allowedTools Read,Grep,Glob,Write
-            --disallowedTools Bash,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task
+            --allowedTools Read(./review-input/**),Read(./.if-fork/config.yaml),Write(./review-output/review-2.json)
+            --disallowedTools Bash,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task,Read(//proc/**),Read(//home/runner/work/_temp/**)
           github_token: ${{ github.token }}
 
       - name: Upload review-2 artifact

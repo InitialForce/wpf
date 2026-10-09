@@ -603,9 +603,63 @@ def test_reviewers_need_prepare_and_have_no_shell(workflow, job):
     assert "prepare" in j["needs"]
     action = next(s for s in j["steps"] if "claude-code-action" in s.get("uses", ""))
     args = action["with"]["claude_args"]
-    assert "--allowedTools Read,Grep,Glob,Write" in args
-    assert "Bash" in args.split("--disallowedTools", 1)[1]
-    assert "WebFetch" in args.split("--disallowedTools", 1)[1]
+    denied = args.split("--disallowedTools", 1)[1].split()[0].split(",")
+    assert "Bash" in denied
+    assert "WebFetch" in denied
+
+
+def _claude_step(workflow, job: str) -> dict:
+    return next(
+        s for s in workflow["jobs"][job]["steps"] if "claude-code-action" in s.get("uses", "")
+    )
+
+
+def _tool_list(args: str, flag: str) -> list[str]:
+    return args.split(f"--{flag}", 1)[1].split()[0].split(",")
+
+
+@pytest.mark.parametrize("n", [1, 2])
+def test_reviewers_load_only_trusted_claude_settings(workflow, n):
+    """Regression: candidate content must not configure Claude. No project or
+    local settings, no project hooks, no MCP servers from the checkout."""
+    step = _claude_step(workflow, f"review-{n}")
+    args = step["with"]["claude_args"].split()
+    assert args[args.index("--setting-sources") + 1] == "user"
+    assert "--strict-mcp-config" in args
+    assert '"disableAllHooks": true' in step["with"]["settings"]
+    assert "--mcp-config" not in args
+
+
+@pytest.mark.parametrize("n", [1, 2])
+def test_reviewer_tool_rules_are_path_scoped(workflow, n):
+    """Regression: Read only on the input and config, Write only on the
+    reviewer's own verdict file, and /proc and the runner temp dir denied."""
+    args = _claude_step(workflow, f"review-{n}")["with"]["claude_args"]
+    allowed = _tool_list(args, "allowedTools")
+    assert sorted(allowed) == sorted([
+        "Read(./review-input/**)",
+        "Read(./.if-fork/config.yaml)",
+        f"Write(./review-output/review-{n}.json)",
+    ])
+    denied = _tool_list(args, "disallowedTools")
+    assert "Read(//proc/**)" in denied
+    assert "Read(//home/runner/work/_temp/**)" in denied
+    for tool in ("Bash", "Edit", "MultiEdit", "WebFetch", "WebSearch", "Task"):
+        assert tool in denied
+
+
+@pytest.mark.parametrize("n", [1, 2])
+def test_reviewer_checkout_is_sparse(workflow, n):
+    """The reviewer's working directory holds only the config and prompts,
+    so no repository .claude/, .mcp.json or CLAUDE.md is present."""
+    checkout = next(
+        s for s in workflow["jobs"][f"review-{n}"]["steps"]
+        if s.get("uses", "").startswith("actions/checkout")
+    )
+    w = checkout["with"]
+    assert w["persist-credentials"] is False
+    assert w["sparse-checkout-cone-mode"] is False
+    assert w["sparse-checkout"].split() == ["/.if-fork/config.yaml", "/.if-fork/prompts/"]
 
 
 def test_prompts_do_not_fetch_the_diff():

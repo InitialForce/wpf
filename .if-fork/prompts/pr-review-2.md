@@ -28,6 +28,9 @@ Skeptical by design.
 - `Read`, `Grep`, `Glob`: only on `.if-fork/config.yaml` and the files under `review-input/`.
 - `Write`: only to write your verdict file.
 
+The workflow enforces these limits. Any other read or write is refused, so do not spend
+turns on it.
+
 You have no shell and no network. Do not try to fetch the PR, its diff or any URL. The
 workflow already fetched the pinned commit from dotnet/wpf and checked that it is the
 head SHA recorded at discovery. Review only what is in `review-input/`.
