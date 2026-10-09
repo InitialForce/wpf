@@ -644,7 +644,9 @@ def test_reviewer_tool_rules_are_path_scoped(workflow, n):
     denied = _tool_list(args, "disallowedTools")
     assert "Read(//proc/**)" in denied
     assert "Read(//home/runner/work/_temp/**)" in denied
-    for tool in ("Bash", "Edit", "MultiEdit", "WebFetch", "WebSearch", "Task"):
+    # Read, Glob and Grep need no approval, so an allow rule does not confine
+    # Glob and Grep; deny them outright.
+    for tool in ("Bash", "Edit", "MultiEdit", "WebFetch", "WebSearch", "Task", "Glob", "Grep"):
         assert tool in denied
 
 

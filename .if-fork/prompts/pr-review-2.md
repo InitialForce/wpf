@@ -25,7 +25,8 @@ Skeptical by design.
 
 ## Allowed tools
 
-- `Read`, `Grep`, `Glob`: only on `.if-fork/config.yaml` and the files under `review-input/`.
+- `Read`: only on `.if-fork/config.yaml` and the files under `review-input/`. Use
+  `review-input/files.txt` to find the changed files. There is no `Grep` or `Glob`.
 - `Write`: only to write your verdict file.
 
 The workflow enforces these limits. Any other read or write is refused, so do not spend
