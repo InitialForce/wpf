@@ -84,8 +84,27 @@ file_denylist:
   - azure-pipelines.yml
   - azure-pipelines1.yml
   - .github/**
-  - .if-fork/config.yaml
-  - .if-fork/prompts/**
+  # agent configuration: Claude Code would load these from the candidate tree
+  - .claude/**
+  - "**/.claude/**"
+  - .mcp.json
+  - CLAUDE.md
+  - CLAUDE.local.md
+  - AGENTS.md
+  # fork-owned: upstream dotnet/wpf has none of these. They hold the
+  # pipeline's own code, policy, ledger, tests and packaging, which privileged
+  # jobs run or trust, so an upstream change must never touch them.
+  - .if-fork/**
+  - tools/**
+  - tests/**
+  - test/**
+  - docs/**
+  - perf/**
+  - data/**
+  - packaging/InitialForce.*/**
+  - FORK.md
+  - NOTICE.md
+  - pyproject.toml
   # high-risk WPF source
   - src/Microsoft.DotNet.Wpf/src/PresentationFramework/System/Windows/Controls/Primitives/ScrollBar.cs
   - src/Microsoft.DotNet.Wpf/src/PresentationFramework/System/Windows/Controls/Primitives/Track.cs
