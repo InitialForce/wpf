@@ -136,6 +136,12 @@ gh workflow run pr-discovery.yml --repo InitialForce/wpf
    ```
    If you decide it is unsafe, do nothing more. Close the issue in both cases.
 
+### A review escalated with `prepare_failed` or `origin_errors`
+- `prepare_failed`: the `prepare` job could not build the review input three times. Read the `prepare` log of the latest `pr-review.yml` run. Common causes: the PR head moved, the base SHA is unusable, the diff is empty, or a file name has a newline.
+- `origin_errors` (the `merge-verdict` job is red): a verdict did not come from its own review job, so one review job may have tried to stand in for the other. Treat it as a security incident: pause autonomy and read both reviewer logs.
+
+To retry either case, run `pr-review.yml` by hand with the same `pr_number` and `head_sha` (see "Review one upstream PR by hand").
+
 ### Run the upstream sync by hand
 ```bash
 # Rebuild if/staging even if the open sync PR already has the current upstream SHA,
