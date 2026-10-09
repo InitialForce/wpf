@@ -105,10 +105,13 @@ def test_dispatches_release_on_if_main(workflow: dict) -> None:
     assert workflow["permissions"].get("actions") == "write"
 
 
-def test_checks_public_key_variable_before_tagging(workflow: dict) -> None:
+def test_runs_release_tag_check_before_pushing(workflow: dict) -> None:
+    """The tag is checked with release.yml's own script before the push, and
+    no repository variable holds the key."""
     steps = workflow["jobs"]["tag"]["steps"]
-    names = [s.get("name", "") for s in steps]
-    check = names.index("Check the published verification key matches the signing key")
-    tag = names.index("Create and push signed release tag")
-    assert check < tag
-    assert "vars.IF_RELEASE_SIGNING_PUBKEY" in str(steps[check]["env"])
+    step = next(s for s in steps if s.get("name") == "Create and push signed release tag")
+    run = step["run"]
+    assert run.index("tools/verify-release-tag.sh") < run.index("git push origin")
+    assert "PUBKEY_FILE=docs/bot-gpg-pubkey.asc" in run
+    assert step["env"]["BOT_FPR"] == "${{ secrets.GH_BOT_GPG_FINGERPRINT }}"
+    assert "IF_RELEASE_SIGNING_PUBKEY" not in WORKFLOW_PATH.read_text()

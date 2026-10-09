@@ -4,10 +4,11 @@
 # passed, but only when src/ (the WPF code that goes into the packages)
 # changed since the last published release, and at most once per UTC day.
 #
-# The tag is signed by the bot key and pushed. This workflow then dispatches
+# The tag is signed by the bot key, checked with tools/verify-release-tag.sh
+# (the same check release.yml runs) and pushed. This workflow then dispatches
 # release.yml on if/main with the tag name as input (release.yml has no
 # tag-push trigger, so a tag can never bring its own workflow). release.yml
-# verifies the tag with the public key, runs every gate again (build.yml with
+# verifies the tag against docs/bot-gpg-pubkey.asc, runs every gate again (build.yml with
 # the release version, smoke on the packed nupkg, perf-on-pack) and only then
 # publishes to nuget.org. This workflow never publishes anything itself.
 #
@@ -119,48 +120,26 @@ jobs:
           gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
           gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
 
-      # release.yml verifies tags with the public key in the repository
-      # variable IF_RELEASE_SIGNING_PUBKEY. Stop before tagging when that
-      # variable is missing or holds a different key; print the public key so
-      # an admin can set it.
-      - name: Check the published verification key matches the signing key
-        if: steps.plan.outputs.release == 'true'
-        env:
-          SIGNING_PUBKEY: ${{ vars.IF_RELEASE_SIGNING_PUBKEY }}
-          GH_BOT_GPG_FINGERPRINT: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
-        run: |
-          set -euo pipefail
-          if [ -z "$SIGNING_PUBKEY" ]; then
-            {
-              echo "## Set IF_RELEASE_SIGNING_PUBKEY"
-              echo "release.yml needs the bot's public key. Set the repository variable"
-              echo "IF_RELEASE_SIGNING_PUBKEY to this value:"
-              echo '```'
-              gpg --armor --export "$GH_BOT_GPG_FINGERPRINT"
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::Repository variable IF_RELEASE_SIGNING_PUBKEY is not set; see the step summary"
-            exit 1
-          fi
-          VERIFY_HOME=$(mktemp -d)
-          printf '%s\n' "$SIGNING_PUBKEY" | gpg --homedir "$VERIFY_HOME" --batch --quiet --import
-          if ! gpg --homedir "$VERIFY_HOME" --with-colons --list-keys \
-               | grep -q "^fpr:::::::::${GH_BOT_GPG_FINGERPRINT}:"; then
-            echo "::error::IF_RELEASE_SIGNING_PUBKEY does not hold the bot signing key ($GH_BOT_GPG_FINGERPRINT)"
-            exit 1
-          fi
-        shell: bash
-
       - name: Create and push signed release tag
         if: steps.plan.outputs.release == 'true'
         env:
           TAG: ${{ steps.plan.outputs.tag }}
           SHA: ${{ steps.green.outputs.sha }}
           REASON: ${{ steps.plan.outputs.reason }}
+          BOT_FPR: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
         run: |
           set -euo pipefail
           VERSION=$(python3 tools/release-version.py version --tag "$TAG")
           git tag -s "$TAG" "$SHA" -m "InitialForce WPF $VERSION" -m "$REASON"
+          # Run release.yml's own tag check before pushing, so a tag it would
+          # refuse (for example when docs/bot-gpg-pubkey.asc is not the
+          # signing key) is never pushed.
+          PUBKEY_FILE=docs/bot-gpg-pubkey.asc MAIN_REF=HEAD \
+            tools/verify-release-tag.sh "$TAG" >/dev/null || {
+            git tag -d "$TAG"
+            echo "::error::release.yml would refuse $TAG; docs/bot-gpg-pubkey.asc must be the key with fingerprint GH_BOT_GPG_FINGERPRINT"
+            exit 1
+          }
           git push origin "refs/tags/$TAG"
           echo "Pushed $TAG ($VERSION) at $SHA."
         shell: bash

@@ -5,8 +5,9 @@ Trust model being checked:
 - No tag-push trigger. release.yml runs only through workflow_dispatch on
   if/main with a `tag` input, so its workflow and tools come from if/main.
 - verify-tag treats the tag as data: strict name check before use, signature
-  verified with the public key variable only (no private key, no secrets),
-  tag commit reachable from if/main.
+  verified with if/main's docs/bot-gpg-pubkey.asc pinned to the
+  GH_BOT_GPG_FINGERPRINT fingerprint (no private key), tag commit reachable
+  from if/main.
 - build calls build.yml on the verified commit with no secrets.
 - publish is the only job with NUGET_ORG_API_KEY and needs every gate.
 - No ${{ }} expression is expanded inside any run: script.
@@ -147,9 +148,10 @@ def test_verify_tag_gated_on_proceed(workflow: dict) -> None:
     assert "needs.gate.outputs.proceed == 'true'" in job["if"]
 
 
-def test_verify_tag_has_no_secrets(workflow: dict) -> None:
-    assert "secrets." not in str(workflow["jobs"]["verify-tag"])
-    assert workflow["jobs"]["verify-tag"]["permissions"] == {"contents": "read"}
+def test_verify_tag_has_only_the_fingerprint_secret(workflow: dict) -> None:
+    job = workflow["jobs"]["verify-tag"]
+    assert re.findall(r"secrets\.\w+", str(job)) == ["secrets.GH_BOT_GPG_FINGERPRINT"]
+    assert job["permissions"] == {"contents": "read"}
 
 
 def test_verify_tag_requires_if_main(workflow: dict) -> None:
@@ -158,16 +160,19 @@ def test_verify_tag_requires_if_main(workflow: dict) -> None:
 
 
 def test_verify_tag_validates_name_before_use(workflow: dict) -> None:
+    """The tag name reaches nothing but verify-release-tag.sh, which checks it
+    first (tests/test_verify_release_tag.py), before release-version.py."""
     combined = _steps_combined_run(workflow["jobs"]["verify-tag"])
-    check = combined.index('=~ ^if-[0-9]+')
-    for use in ("release-version.py", "git fetch", "echo \"Verifying tag"):
-        assert combined.index(use) > check, f"{use} runs before the tag name check"
+    check = combined.index("tools/verify-release-tag.sh")
+    assert combined.index("release-version.py") > check
+    assert "git fetch" not in combined
+    assert 'echo "Verifying tag' not in combined
 
 
 def test_tag_regex_rejects_command_substitution() -> None:
-    """The bash regex used in verify-tag must reject shell metacharacters."""
-    combined = _steps_combined_run(_load(WORKFLOW_PATH)["jobs"]["verify-tag"])
-    m = re.search(r'=~ (\^if-\S+\$) \]\]', combined)
+    """The bash regex in verify-release-tag.sh must reject shell metacharacters."""
+    text = (REPO_ROOT / "tools" / "verify-release-tag.sh").read_text()
+    m = re.search(r'=~ (\^if-\S+\$) \]\]', text)
     assert m, "tag regex not found"
     pattern = re.compile(m.group(1))
     assert pattern.match("if-10.0.8-perf.20261008")
@@ -176,25 +181,25 @@ def test_tag_regex_rejects_command_substitution() -> None:
         assert not pattern.match(bad), bad
 
 
-def test_verify_tag_uses_public_key_variable(workflow: dict) -> None:
+def test_verify_tag_uses_if_main_key_file_and_fingerprint(workflow: dict) -> None:
+    """No repository variable: the key comes from the if/main checkout and is
+    pinned to the GH_BOT_GPG_FINGERPRINT secret."""
     job = workflow["jobs"]["verify-tag"]
     step = next(s for s in job["steps"] if s.get("id") == "verify")
-    assert step["env"]["SIGNING_PUBKEY"] == "${{ vars.IF_RELEASE_SIGNING_PUBKEY }}"
+    assert step["env"] == {"BOT_FPR": "${{ secrets.GH_BOT_GPG_FINGERPRINT }}"}
     combined = _steps_combined_run(job)
-    assert "git verify-tag" in combined
-    assert "VALIDSIG" in combined
-    assert "GNUPGHOME=$(mktemp -d)" in combined
+    assert "PUBKEY_FILE=docs/bot-gpg-pubkey.asc" in combined
+    assert 'MAIN_REF="$GITHUB_SHA"' in combined
+    assert "FETCH=1" in combined
+    assert "IF_RELEASE_SIGNING_PUBKEY" not in WORKFLOW_PATH.read_text()
+    checkout = next(s for s in job["steps"] if "actions/checkout" in str(s.get("uses", "")))
+    assert "ref" not in checkout.get("with", {}), "the key file must come from if/main"
 
 
-def test_verify_tag_errors_on_unsigned(workflow: dict) -> None:
+def test_verify_tag_errors_on_refusal(workflow: dict) -> None:
     combined = _steps_combined_run(workflow["jobs"]["verify-tag"])
-    assert "Unsigned or invalid tag" in combined
+    assert "::error::Release tag refused" in combined
     assert "::warning::Tag" not in combined
-
-
-def test_verify_tag_reachability_uses_if_main(workflow: dict) -> None:
-    combined = _steps_combined_run(workflow["jobs"]["verify-tag"])
-    assert 'git merge-base --is-ancestor "$TAG_COMMIT" "$GITHUB_SHA"' in combined
 
 
 def test_version_derived_from_tag(workflow: dict) -> None:

@@ -4,10 +4,10 @@
 # - There is no tag-push trigger. The workflow runs only through
 #   workflow_dispatch on if/main (auto-release.yml dispatches it), so the
 #   workflow file and every tool it runs come from if/main, never from the tag.
-# - The tag is data. verify-tag checks its name, verifies its signature with
-#   the public key in the IF_RELEASE_SIGNING_PUBKEY variable (no private key
-#   anywhere in this workflow), and checks that its commit is on if/main. It
-#   has no secrets.
+# - The tag is data. verify-tag (tools/verify-release-tag.sh) checks its
+#   name, verifies its signature with if/main's docs/bot-gpg-pubkey.asc,
+#   pinned to the GH_BOT_GPG_FINGERPRINT fingerprint (no private key anywhere
+#   in this workflow), and checks that its commit is on if/main.
 # - The tag's commit is built and tested with no secrets (build.yml), then
 #   perf-checked. Only publish gets NUGET_ORG_API_KEY, after every gate passed.
 # - Scripts never expand ${{ }} expressions that carry the tag or other input;
@@ -53,7 +53,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Job 2: verify-tag — trusted if/main code checks the tag as data.
-  # No secrets; only the public signing key.
+  # Its only secret is the key fingerprint; no private key.
   # ---------------------------------------------------------------------------
   verify-tag:
     name: Verify tag signature and reachability
@@ -76,60 +76,29 @@ jobs:
       - name: Verify tag is bot-signed and reachable from if/main
         id: verify
         env:
-          SIGNING_PUBKEY: ${{ vars.IF_RELEASE_SIGNING_PUBKEY }}
+          # Only the fingerprint, to pin the key file; no private key here.
+          BOT_FPR: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
         run: |
           set -euo pipefail
 
-          # The workflow and tools must be if/main's, not a branch's copy.
+          # The workflow, tools and public key must be if/main's, not a
+          # branch's copy.
           if [ "$GITHUB_REF" != "refs/heads/if/main" ]; then
             echo "::error::Run release.yml on if/main: gh workflow run release.yml --ref if/main -f tag=<tag>"
             exit 1
           fi
 
-          # LOW-3: validate the tag name before using it anywhere (not even
-          # in a log line).
-          if [[ ! "$TAG_NAME" =~ ^if-[0-9]+\.[0-9]+\.[0-9]+-perf\.[0-9]{8}(\.[0-9]+)?$ ]]; then
-            echo "::error::Invalid tag format. Expected if-10.0.<patch>-perf.<yyyymmdd>[.<rev>]"
-            exit 1
-          fi
-          echo "Verifying tag: $TAG_NAME"
-          # The version depends only on the tag, so a re-run packs the same version.
-          VERSION=$(python3 tools/release-version.py version --tag "$TAG_NAME")
-
-          # Fetch the annotated tag object itself (checkout does not fetch it).
-          git fetch --no-tags origin "+refs/tags/$TAG_NAME:refs/tags/$TAG_NAME"
-          if [ "$(git cat-file -t "refs/tags/$TAG_NAME")" != "tag" ]; then
-            echo "::error::Tag $TAG_NAME is a lightweight tag; release tags must be signed"
-            exit 1
-          fi
-
-          # HIGH-7: verify the signature against the public key only, in an
-          # empty keyring, so a valid signature can only come from that key.
-          if [ -z "$SIGNING_PUBKEY" ]; then
-            echo "::error::Repository variable IF_RELEASE_SIGNING_PUBKEY (bot public key) is not set"
-            exit 1
-          fi
-          GNUPGHOME=$(mktemp -d)
-          export GNUPGHOME
-          printf '%s\n' "$SIGNING_PUBKEY" | gpg --batch --quiet --import
-          STATUS=$(git verify-tag --raw "$TAG_NAME" 2>&1) || {
-            echo "$STATUS"
-            echo "::error::Unsigned or invalid tag: $TAG_NAME"
+          # verify-release-tag.sh checks the tag name before any other use,
+          # then fetches the tag and checks its signature against
+          # docs/bot-gpg-pubkey.asc (pinned to BOT_FPR) and that its commit is
+          # on if/main. GITHUB_SHA is the if/main commit this run started on.
+          TAG_COMMIT=$(FETCH=1 PUBKEY_FILE=docs/bot-gpg-pubkey.asc MAIN_REF="$GITHUB_SHA" \
+            tools/verify-release-tag.sh "$TAG_NAME") || {
+            echo "::error::Release tag refused; the log above says why"
             exit 1
           }
-          if ! grep -q '^\[GNUPG:\] VALIDSIG ' <<<"$STATUS"; then
-            echo "$STATUS"
-            echo "::error::Tag $TAG_NAME has no valid signature from the release signing key"
-            exit 1
-          fi
-
-          # Releases are cut from if/main. GITHUB_SHA is the if/main commit
-          # this run started on.
-          TAG_COMMIT=$(git rev-parse "refs/tags/$TAG_NAME^{commit}")
-          if ! git merge-base --is-ancestor "$TAG_COMMIT" "$GITHUB_SHA"; then
-            echo "::error::Tag $TAG_NAME is not reachable from if/main"
-            exit 1
-          fi
+          # The version depends only on the tag, so a re-run packs the same version.
+          VERSION=$(python3 tools/release-version.py version --tag "$TAG_NAME")
 
           {
             echo "tag=$TAG_NAME"
