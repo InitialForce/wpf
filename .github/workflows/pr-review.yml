@@ -173,11 +173,11 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # Job 3: review-1 — Reviewer 1 (temperature 0.0, diff only)
+  # Job 3: review-1 — Reviewer 1 (prompt pr-review-1.md)
   # Runs independently of review-2; no output shared until merge-verdict.
   # ---------------------------------------------------------------------------
   review-1:
-    name: Reviewer 1 (temp=0.0, diff-only)
+    name: Reviewer 1 (prompt pr-review-1)
     needs: [gate, prepare]
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
@@ -299,13 +299,13 @@ jobs:
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
-  # Job 4: review-2 — Reviewer 2 (temperature 0.7, diff + source context)
+  # Job 4: review-2 — Reviewer 2 (prompt pr-review-2.md)
   # Runs INDEPENDENTLY from review-1 (both need only gate and prepare).
   # Skipped when IF_REVIEW_DOUBLE_REQUIRED is "false" (single-review fast path).
   # The fast path additionally requires a manual approval via environment: branch-promotion.
   # ---------------------------------------------------------------------------
   review-2:
-    name: Reviewer 2 (temp=0.7, diff+context, isolated)
+    name: Reviewer 2 (prompt pr-review-2, isolated)
     needs: [gate, prepare]
     # NOTE: review-2 intentionally does NOT need review-1.
     # Independence is the core security property: two reviewers with no shared
