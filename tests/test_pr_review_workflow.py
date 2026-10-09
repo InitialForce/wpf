@@ -738,3 +738,31 @@ def test_merge_verdict_fails_job_on_origin_errors(workflow):
     assert "origin_errors" in last["run"] and "exit 1" in last["run"]
     names = [s.get("name", "") for s in steps]
     assert names.index("Record review outcome in ledger (one commit)") < len(steps) - 1
+
+
+# ---------------------------------------------------------------------------
+# A failed prepare is recorded as review_error (Opus NEW-7)
+# ---------------------------------------------------------------------------
+
+def test_failed_prepare_is_recorded(workflow):
+    job = workflow["jobs"]["record-prepare-failure"]
+    assert job["needs"] == ["gate", "prepare"]
+    cond = " ".join(job["if"].split())
+    assert cond.startswith("always()")
+    assert "needs.gate.outputs.proceed == 'true'" in cond
+    assert "needs.prepare.result == 'failure'" in cond
+    runs = _runs(workflow, "record-prepare-failure")
+    assert "merge-verdicts.py" in runs and "--prepare-failed" in runs
+    assert "--ledger-path .if-fork/patch-ledger.jsonl" in runs
+    assert runs.count("ledger-event.py") == 1 and "--events-file" in runs
+    assert "dispatch-approved.py" in runs
+    names = [s.get("name") for s in job["steps"]]
+    assert names[0] == "Validate dispatch payload"
+    assert names.index("Record in ledger (one commit)") < names.index(
+        "Hand off (escalation issue on the last attempt)"
+    )
+
+
+def test_failed_prepare_never_runs_merge_verdict(workflow):
+    """Only one of record-prepare-failure and merge-verdict can run."""
+    assert "needs.prepare.result == 'success'" in workflow["jobs"]["merge-verdict"]["if"]

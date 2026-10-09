@@ -216,8 +216,10 @@ def _handle_escalated(
         "",
         "The automatic review did not approve or reject this PR. The reviewers",
         "disagreed, one asked for a human, a safe verdict was below the tier's",
-        "confidence threshold, or a deterministic check (hard-fail pattern or",
-        "denylisted file) fired. Nothing is applied until a human decides.",
+        "confidence threshold, a deterministic check (hard-fail pattern or",
+        "denylisted file) fired, or the review failed three times (a reviewer",
+        "left no valid verdict, or the review input could not be prepared).",
+        "The reason below says which. Nothing is applied until a human decides.",
         "",
         *details_lines,
     ]

@@ -32,6 +32,12 @@ ends as "review_error", which pr-discovery retries. After --max-review-errors
 review_error events for the same (pr_number, head_sha) in --ledger-path, the
 run escalates instead.
 
+--prepare-failed records the same kind of attempt for a run whose prepare job
+failed (no reviewer ran): a review_error with cause "prepare_failed", or on
+the third attempt an escalation. It needs no verdicts, config or diff. Without
+it a prepare that always fails (unusable base SHA, empty diff, a file name
+with a newline) would be queued again by pr-discovery every day.
+
 Output JSON written to --output path (and to stdout for caller inspection):
   {
     "verdict": "approved" | "escalated" | "rejected" | "review_error",
@@ -442,14 +448,20 @@ def build_ledger_events(
     verdict = output["verdict"]
     if verdict == "review_error":
         details: dict[str, Any] = {"attempt": output["attempt"], "errors": output["errors"]}
-        if output.get("origin_errors"):
-            details["origin_errors"] = output["origin_errors"]
+        for key in ("cause", "origin_errors"):
+            if output.get(key):
+                details[key] = output[key]
         return [event("review_error", details)]
 
-    events = [event("review_1", _review_details(output["review_1"], ""))]
-    if not single_review:
-        events.append(event("review_2", _review_details(output["review_2"], "")))
+    events: list[dict[str, Any]] = []
+    # A run that escalates after failed prepares has no reviews to record.
+    if "review_1" in output:
+        events.append(event("review_1", _review_details(output["review_1"], "")))
+        if not single_review:
+            events.append(event("review_2", _review_details(output["review_2"], "")))
     summary: dict[str, Any] = {"verdict": verdict, "reasoning": output["reasoning"][:2000]}
+    if output.get("cause"):
+        summary["cause"] = output["cause"]
     if "policy" in output:
         summary["policy"] = output["policy"]
     if output.get("origin_errors"):
@@ -480,9 +492,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--review-1",
-        required=True,
         metavar="PATH",
-        help="Path to reviewer-1 verdict JSON file",
+        help="Path to reviewer-1 verdict JSON file (required unless --prepare-failed)",
     )
     parser.add_argument(
         "--review-2",
@@ -511,13 +522,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Single-review fast path: decide on review-1 alone",
     )
     parser.add_argument(
-        "--config", required=True, metavar="PATH", help="Path to .if-fork/config.yaml"
+        "--prepare-failed",
+        action="store_true",
+        help=(
+            "The prepare job failed and no reviewer ran: record a review_error "
+            "with cause prepare_failed (escalated on the last attempt)"
+        ),
+    )
+    parser.add_argument("--config", metavar="PATH", help="Path to .if-fork/config.yaml")
+    parser.add_argument(
+        "--diff", metavar="PATH", help="Pinned unified diff that was reviewed"
     )
     parser.add_argument(
-        "--diff", required=True, metavar="PATH", help="Pinned unified diff that was reviewed"
-    )
-    parser.add_argument(
-        "--files", required=True, metavar="PATH", help="Changed file list, one path per line"
+        "--files", metavar="PATH", help="Changed file list, one path per line"
     )
     parser.add_argument(
         "--retry-missing",
@@ -562,6 +579,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Path to write the merged-verdict JSON output",
     )
     args = parser.parse_args(argv)
+    if args.prepare_failed:
+        return args
+    missing = [
+        flag
+        for flag, value in (
+            ("--review-1", args.review_1),
+            ("--config", args.config),
+            ("--diff", args.diff),
+            ("--files", args.files),
+        )
+        if not value
+    ]
+    if missing:
+        parser.error(f"{', '.join(missing)} required unless --prepare-failed is set")
     if not args.single_review and not args.review_2:
         parser.error("--review-2 is required unless --single-review is set")
     return args
@@ -605,8 +636,42 @@ def _failed_review(label: str, error: str) -> ReviewerVerdict:
     }
 
 
+def _prepare_failed(args: argparse.Namespace) -> int:
+    """Record a failed prepare as one review attempt; escalate on the last one."""
+    ledger_path = Path(args.ledger_path) if args.ledger_path else None
+    attempt = count_review_errors(ledger_path, args.pr_number, args.head_sha) + 1
+    base: OutputVerdict = {
+        "pr_number": args.pr_number,
+        "head_sha": args.head_sha,
+        "cause": "prepare_failed",
+    }
+    if attempt < args.max_review_errors:
+        output: OutputVerdict = {
+            **base,
+            "verdict": "review_error",
+            "attempt": attempt,
+            "errors": ["prepare job failed; the review input was not pinned"],
+            "reasoning": f"Review attempt {attempt}: the review input could not be prepared.",
+        }
+        return _write_outputs(args, output, EXIT_REVIEW_ERROR)
+    output = {
+        **base,
+        "verdict": "escalated",
+        "escalation_action": "open_review_disagreement_issue",
+        "reasoning": (
+            f"The review input could not be prepared in {attempt} attempts, so no "
+            "reviewer ran. Check the prepare job log of the latest run: for example "
+            "the PR head moved, the base SHA is unusable, the diff is empty, or a "
+            "file name contains a newline."
+        ),
+    }
+    return _write_outputs(args, output, EXIT_ESCALATED)
+
+
 def main(argv: list[str] | None = None) -> int:  # noqa: C901
     args = parse_args(argv)
+    if args.prepare_failed:
+        return _prepare_failed(args)
 
     try:
         config = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))

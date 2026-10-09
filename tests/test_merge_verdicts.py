@@ -623,3 +623,53 @@ def test_origin_failure_escalates_on_third_attempt(tmp_path: Path) -> None:
     assert code == merge_verdicts.EXIT_ESCALATED  # type: ignore[attr-defined]
     assert output["verdict"] == "escalated"
     assert output["origin_errors"]
+
+
+# ===========================================================================
+# 20. A failed prepare is a review attempt (Opus NEW-7)
+# ===========================================================================
+def _run_prepare_failed(tmp_path: Path, earlier_errors: int) -> tuple[int, dict[str, Any], list]:
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text("".join(
+        json.dumps({"event": "review_error", "pr_number": PR_NUMBER, "head_sha": HEAD_SHA}) + "\n"
+        for _ in range(earlier_errors)
+    ))
+    out = tmp_path / "out.json"
+    events_path = tmp_path / "events.jsonl"
+    code = merge_verdicts.main([  # type: ignore[attr-defined]
+        "--prepare-failed",
+        "--ledger-path", str(ledger),
+        "--pr-number", str(PR_NUMBER),
+        "--head-sha", HEAD_SHA,
+        "--output", str(out),
+        "--events-out", str(events_path),
+    ])
+    events = [json.loads(line) for line in events_path.read_text().splitlines()]
+    return code, json.loads(out.read_text()), events
+
+
+def test_prepare_failed_records_review_error(tmp_path: Path) -> None:
+    code, output, events = _run_prepare_failed(tmp_path, 0)
+    assert code == merge_verdicts.EXIT_REVIEW_ERROR  # type: ignore[attr-defined]
+    assert output["verdict"] == "review_error"
+    assert [e["event"] for e in events] == ["review_error"]
+    assert events[0]["details"]["cause"] == "prepare_failed"
+    assert events[0]["details"]["attempt"] == 1
+
+
+def test_third_prepare_failure_escalates_without_review_events(tmp_path: Path) -> None:
+    """Regression: a prepare that always fails must end, not be queued daily."""
+    code, output, events = _run_prepare_failed(tmp_path, 2)
+    assert code == merge_verdicts.EXIT_ESCALATED  # type: ignore[attr-defined]
+    assert output["verdict"] == "escalated"
+    assert output["escalation_action"] == "open_review_disagreement_issue"
+    assert [e["event"] for e in events] == ["merged_verdict", "escalated"]
+    assert events[0]["details"]["cause"] == "prepare_failed"
+
+
+def test_review_inputs_required_without_prepare_failed() -> None:
+    with pytest.raises(SystemExit) as exc:
+        merge_verdicts.parse_args([  # type: ignore[attr-defined]
+            "--review-2", "b", "--pr-number", "1", "--head-sha", "x", "--output", "o",
+        ])
+    assert exc.value.code == merge_verdicts.EXIT_ERROR  # type: ignore[attr-defined]

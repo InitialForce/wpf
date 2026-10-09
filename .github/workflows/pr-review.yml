@@ -14,6 +14,7 @@
 #                    review-2 ──┤─→ merge-verdict
 #                       (review-2 runs independently; no shared cache or output
 #                        with review-1 until both are complete)
+#   prepare failed → record-prepare-failure (review_error, cause prepare_failed)
 #
 # prepare pins what is reviewed: it fetches refs/pull/N/head from dotnet/wpf,
 # checks that it equals HEAD_SHA, and writes the diff from the merge base,
@@ -482,7 +483,101 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
   # ---------------------------------------------------------------------------
-  # Job 6: merge-verdict — Collapse both reviewer outputs into a final decision,
+  # Job 6: record-prepare-failure — a failed prepare counts as a review attempt
+  # Some prepare failures never go away (unusable base SHA, empty diff, a file
+  # name with a newline). Without a ledger event pr-discovery would queue the
+  # same pair every day. This records review_error (cause prepare_failed), so
+  # the 3-attempt rule in merge-verdicts.py escalates it on the third failure.
+  # ---------------------------------------------------------------------------
+  record-prepare-failure:
+    name: Record a failed prepare as review_error
+    needs: [gate, prepare]
+    if: >-
+      always() &&
+      needs.gate.outputs.proceed == 'true' &&
+      needs.prepare.result == 'failure'
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+
+    steps:
+      - name: Validate dispatch payload
+        run: |
+          if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::pr_number/head_sha missing or malformed"
+            exit 1
+          fi
+
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install pyyaml
+
+      - name: Import bot GPG key
+        uses: ./.github/actions/import-bot-gpg
+        with:
+          gpg-private-key: ${{ secrets.GH_BOT_GPG_KEY }}
+          gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
+          gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
+
+      # Exits 4 (review_error) or, on the third attempt, 2 (escalated).
+      - name: Count the failed prepare as a review attempt
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set +e
+          python tools/merge-verdicts.py \
+            --prepare-failed \
+            --ledger-path .if-fork/patch-ledger.jsonl \
+            --pr-number "$PR_NUMBER" \
+            --head-sha "$HEAD_SHA" \
+            --output "$RUNNER_TEMP/merged-verdict.json" \
+            --events-out "$RUNNER_TEMP/review-events.jsonl" \
+            --run-url "$RUN_URL"
+          rc=$?
+          set -e
+          if [ "$rc" -ne 2 ] && [ "$rc" -ne 4 ]; then
+            echo "::error::merge-verdicts.py failed (exit $rc)"
+            exit 1
+          fi
+
+      - name: Record in ledger (one commit)
+        env:
+          GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
+          GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          python tools/ledger-event.py \
+            --events-file "$RUNNER_TEMP/review-events.jsonl" \
+            --actor pr-review \
+            --message "ledger: review pr#$PR_NUMBER prepare_failed" \
+            --push
+
+      # escalated → one review-disagreement issue per PR; review_error → nothing
+      - name: Hand off (escalation issue on the last attempt)
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          python tools/dispatch-approved.py \
+            --verdict "$RUNNER_TEMP/merged-verdict.json" \
+            --repo "$GITHUB_REPOSITORY" \
+            --token-env GH_TOKEN
+
+  # ---------------------------------------------------------------------------
+  # Job 7: merge-verdict — Collapse both reviewer outputs into a final decision,
   # apply the code checks, record it in the ledger (one commit), then hand off.
   # ---------------------------------------------------------------------------
   merge-verdict:
