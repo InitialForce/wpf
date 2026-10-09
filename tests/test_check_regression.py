@@ -22,6 +22,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 # Paths relative to repo root
 REPO_ROOT = Path(__file__).parent.parent
 SCRIPT = REPO_ROOT / "tools" / "check-regression.py"
@@ -555,3 +557,97 @@ class TestMergeOnly:
     def test_baseline_required_without_merge_only(self) -> None:
         code, _ = _run_multi(current=[CURRENT_PASS], baseline=None)
         assert code == 1
+
+
+class TestAllocationMeasurementRequired:
+    """Regression: a missing Memory.BytesAllocatedPerOperation was read as 0,
+    so the hard Allocated gate reported a 100% improvement (or skipped the
+    check against a zero baseline) and passed."""
+
+    @staticmethod
+    def _write(tmp_path: Path, name: str, doc: dict[str, Any]) -> str:
+        path = tmp_path / name
+        path.write_text(json.dumps(doc))
+        return str(path)
+
+    def _current_with(self, tmp_path: Path, memory: Any, drop: bool = False) -> tuple[str, str]:
+        current = json.loads(Path(CURRENT_PASS).read_text())
+        bench = current["Benchmarks"][0]
+        if drop:
+            bench.pop("Memory", None)
+        elif memory is not None or "Memory" in bench:
+            bench["Memory"] = memory
+        return self._write(tmp_path, "current.json", current), bench["FullName"]
+
+    @pytest.mark.parametrize(
+        "memory",
+        [
+            None,
+            {},
+            {"BytesAllocatedPerOperation": None},
+            {"BytesAllocatedPerOperation": "100"},
+            {"BytesAllocatedPerOperation": True},
+            {"BytesAllocatedPerOperation": -1},
+        ],
+        ids=["null-memory", "empty-memory", "null", "string", "bool", "negative"],
+    )
+    def test_invalid_allocation_fails(self, tmp_path: Path, memory: Any) -> None:
+        cur, name = self._current_with(tmp_path, memory)
+        code, data = _run_multi(current=[cur])
+        assert code == 2
+        failed = [s for s in data["scenarios"] if s["name"] == name]
+        assert failed and failed[0]["reason"] == "no_measurement"
+
+    def test_missing_memory_block_fails(self, tmp_path: Path) -> None:
+        cur, name = self._current_with(tmp_path, None, drop=True)
+        code, data = _run_multi(current=[cur])
+        assert code == 2
+        assert any(s["name"] == name and s["verdict"] == "fail" for s in data["scenarios"])
+
+    @pytest.mark.parametrize("value", ["NaN", "Infinity"])
+    def test_non_finite_values_fail(self, tmp_path: Path, value: str) -> None:
+        current = json.loads(Path(CURRENT_PASS).read_text())
+        current["Benchmarks"][0]["Memory"] = {"BytesAllocatedPerOperation": 0}
+        text = json.dumps(current).replace(
+            '"BytesAllocatedPerOperation": 0', f'"BytesAllocatedPerOperation": {value}', 1
+        )
+        cur = tmp_path / "current.json"
+        cur.write_text(text)
+        code, _ = _run_multi(current=[str(cur)])
+        assert code == 2
+        current["Benchmarks"][0]["Memory"] = {"BytesAllocatedPerOperation": 0}
+        current["Benchmarks"][0]["Statistics"]["Mean"] = 1.0
+        text = json.dumps(current).replace('"Mean": 1.0', f'"Mean": {value}', 1)
+        cur.write_text(text)
+        code, _ = _run_multi(current=[str(cur)])
+        assert code == 2
+
+    def test_measured_zero_allocation_is_fine(self, tmp_path: Path) -> None:
+        current = json.loads(Path(CURRENT_PASS).read_text())
+        baseline = json.loads(Path(BASELINE).read_text())
+        for doc in (current, baseline):
+            doc["Benchmarks"][0]["Memory"] = {"BytesAllocatedPerOperation": 0}
+        cur = self._write(tmp_path, "current.json", current)
+        base = self._write(tmp_path, "baseline.json", baseline)
+        code, data = _run_multi(current=[cur], baseline=base)
+        assert code == 0, data
+
+    def test_baseline_without_allocation_is_an_error(self, tmp_path: Path) -> None:
+        baseline = json.loads(Path(BASELINE).read_text())
+        baseline["Benchmarks"][0]["Memory"] = {"BytesAllocatedPerOperation": None}
+        base = self._write(tmp_path, "baseline.json", baseline)
+        code, _ = _run_multi(current=[CURRENT_PASS], baseline=base)
+        assert code == 2
+
+    def test_regeneration_refuses_missing_allocation(self, tmp_path: Path) -> None:
+        cur, _ = self._current_with(tmp_path, {"BytesAllocatedPerOperation": None})
+        out = tmp_path / "baseline.json"
+        code, _ = _run_multi(
+            "--merge-only", "--merged-output", str(out), current=[cur], baseline=None
+        )
+        assert code == 2
+
+    def test_checked_in_baseline_is_valid(self) -> None:
+        code, _ = _run_multi(current=[str(REPO_ROOT / "perf" / "baseline.json")],
+                             baseline=str(REPO_ROOT / "perf" / "baseline.json"))
+        assert code == 0

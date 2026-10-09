@@ -8,9 +8,13 @@ then checks each scenario for performance regressions.
 BenchmarkDotNet writes one JSON report per benchmark class, so --current takes
 one or more files and merges them. Every baseline scenario must be present in
 the merged current results with a measurement; a missing or failed scenario is
-a 'fail' (reason missing_in_current or no_measurement). --merge-only writes the
-merged reports to --merged-output (used to regenerate perf/baseline.json) and
-fails the same way when a benchmark produced no measurement.
+a 'fail' (reason missing_in_current or no_measurement). A measurement needs a
+finite Statistics.Mean and a finite, non-negative
+Memory.BytesAllocatedPerOperation; a measured zero allocation is fine, a
+missing or null one is not. A baseline entry without both is an error.
+--merge-only writes the merged reports to --merged-output (used to regenerate
+perf/baseline.json) and fails the same way when a benchmark has no
+measurement.
 
 Thresholds (applied to both Mean latency and Allocated bytes):
   > warn_threshold  (default 5%)  -> status: warning, exit 0
@@ -53,6 +57,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -136,21 +141,53 @@ def merge_bdn_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
     return merged
 
 
-def unmeasured_benchmarks(data: dict[str, Any]) -> list[str]:
-    """Return FullNames of benchmarks that have no numeric Statistics.Mean.
+def _finite_number(value: Any) -> bool:
+    """True for a finite int or float. JSON booleans, NaN and Infinity are not
+    measurements."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
 
-    BenchmarkDotNet keeps a failed benchmark in the report without statistics.
+
+def measurement_problem(bench: dict[str, Any]) -> str | None:
+    """Say why a benchmark entry has no usable measurement, or return None.
+
+    Both metrics are required: Statistics.Mean and
+    Memory.BytesAllocatedPerOperation, each a finite number (allocation also
+    not negative). A measured zero allocation is fine; a missing, null or
+    non-numeric one is not, because the Allocated gate would otherwise read
+    it as 0 and pass. BenchmarkDotNet keeps a failed benchmark in the report
+    without statistics.
     """
-    names: list[str] = []
+    stats = bench.get("Statistics")
+    mean = stats.get("Mean") if isinstance(stats, dict) else None
+    if not _finite_number(mean):
+        return "no Statistics.Mean"
+    memory = bench.get("Memory")
+    allocated: Any = (
+        memory.get("BytesAllocatedPerOperation") if isinstance(memory, dict) else None
+    )
+    if not _finite_number(allocated) or allocated < 0:
+        return "no Memory.BytesAllocatedPerOperation"
+    return None
+
+
+def unmeasured_benchmarks(data: dict[str, Any]) -> dict[str, str]:
+    """Map the FullName of every benchmark without a usable measurement to
+    the reason (see measurement_problem)."""
+    problems: dict[str, str] = {}
     for bench in data.get("Benchmarks", []):
         if not isinstance(bench, dict):
             continue
         name = bench.get("FullName")
-        stats = bench.get("Statistics")
-        mean = stats.get("Mean") if isinstance(stats, dict) else None
-        if isinstance(name, str) and name and not isinstance(mean, (int, float)):
-            names.append(name)
-    return names
+        if not isinstance(name, str) or not name:
+            continue
+        problem = measurement_problem(bench)
+        if problem:
+            problems[name] = problem
+    return problems
 
 
 def extract_benchmarks(data: dict[str, Any]) -> dict[str, dict[str, float]]:
@@ -158,7 +195,7 @@ def extract_benchmarks(data: dict[str, Any]) -> dict[str, dict[str, float]]:
     Extract per-benchmark Mean and Allocated metrics from a BDN JSON.
 
     Returns a dict mapping FullName -> {"Mean": <ns>, "Allocated": <bytes>}.
-    Benchmarks without a numeric Statistics.Mean are left out; see
+    Benchmarks without both measurements are left out; see
     unmeasured_benchmarks().
     """
     result: dict[str, dict[str, float]] = {}
@@ -173,21 +210,11 @@ def extract_benchmarks(data: dict[str, Any]) -> dict[str, dict[str, float]]:
         if not isinstance(full_name, str) or not full_name:
             continue
 
-        # Mean latency (nanoseconds) from Statistics.Mean
-        stats = bench.get("Statistics", {})
-        if not isinstance(stats, dict):
+        if measurement_problem(bench):
             continue
-        mean_val = stats.get("Mean")
-        if not isinstance(mean_val, (int, float)):
-            continue
-
-        # Allocation from Memory.BytesAllocatedPerOperation
-        memory = bench.get("Memory", {})
-        allocated: float = 0.0
-        if isinstance(memory, dict):
-            alloc_val = memory.get("BytesAllocatedPerOperation")
-            if isinstance(alloc_val, (int, float)):
-                allocated = float(alloc_val)
+        # Mean latency (nanoseconds) and allocated bytes per operation.
+        mean_val = bench["Statistics"]["Mean"]
+        allocated = float(bench["Memory"]["BytesAllocatedPerOperation"])
 
         result[full_name] = {
             "Mean": float(mean_val),
@@ -513,7 +540,8 @@ def main(argv: list[str] | None = None) -> int:
     except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
         print(f"ERROR loading --current file: {exc}", file=sys.stderr)
         return 1
-    unmeasured = set(unmeasured_benchmarks(current_raw))
+    unmeasured_reasons = unmeasured_benchmarks(current_raw)
+    unmeasured = set(unmeasured_reasons)
 
     if args.merged_output:
         Path(args.merged_output).write_text(
@@ -526,7 +554,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if unmeasured:
             for name in sorted(unmeasured):
-                print(f"  FAILED  {name}: no measurement", file=sys.stderr)
+                print(f"  FAILED  {name}: {unmeasured_reasons[name]}", file=sys.stderr)
             return 2
         print(
             f"Merged {len(current_raw['Benchmarks'])} benchmarks from "
@@ -540,6 +568,13 @@ def main(argv: list[str] | None = None) -> int:
     except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
         print(f"ERROR loading --baseline file: {exc}", file=sys.stderr)
         return 1
+
+    # A baseline entry without both measurements cannot gate anything.
+    bad_baseline = unmeasured_benchmarks(baseline_raw)
+    if bad_baseline:
+        for name, problem in sorted(bad_baseline.items()):
+            print(f"ERROR: baseline {name}: {problem}", file=sys.stderr)
+        return 2
 
     # Extract metrics
     try:
