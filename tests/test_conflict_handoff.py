@@ -222,7 +222,9 @@ def test_nightly_merge_rejects_bad_sha(tmp_path: Path, git_env: dict[str, str]) 
 # ---------------------------------------------------------------------------
 
 
-def _finish(work: Path, env: dict[str, str], out: Path) -> subprocess.CompletedProcess[str]:
+def _finish(
+    work: Path, env: dict[str, str], out: Path, conflict_resolved: str = "false"
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["bash", str(FINISH)],
         cwd=work,
@@ -236,6 +238,7 @@ def _finish(work: Path, env: dict[str, str], out: Path) -> subprocess.CompletedP
             "BASE_SHA": git(work, env, "rev-parse", "origin/if/main"),
             "TRUSTED": str(REPO_ROOT),
             "OUT": str(out),
+            "CONFLICT_RESOLVED": conflict_resolved,
         },
     )
 
@@ -265,6 +268,21 @@ def test_finish_pushes_clean_branch_with_trailers(tmp_path: Path, git_env: dict[
     assert (out / "pushed").read_text().strip() == "true"
     msg = git(origin, git_env, "log", "-1", "--format=%B", "claude/cherry-pick-pr-123")
     assert "Upstream-PR-Head: " + "a" * 40 in msg
+    assert "Conflict-Resolved-By" not in msg
+
+
+def test_finish_marks_an_agent_resolution(tmp_path: Path, git_env: dict[str, str]) -> None:
+    origin, work = _origin_and_clone(tmp_path, git_env)
+    git(work, git_env, "checkout", "-q", "-b", "claude/cherry-pick-pr-123")
+    commit_file(work, git_env, "src/x.cs", "class X {}\n", "pick")
+    r = _finish(work, git_env, tmp_path / "out", conflict_resolved="true")
+    assert r.returncode == 0, r.stderr
+    trailers = git(
+        origin, git_env, "log", "-1",
+        "--format=%(trailers:key=Conflict-Resolved-By,valueonly)",
+        "claude/cherry-pick-pr-123",
+    )
+    assert trailers == "claude"
 
 
 def test_finish_refuses_more_than_one_commit(tmp_path: Path, git_env: dict[str, str]) -> None:

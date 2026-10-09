@@ -173,6 +173,18 @@ def test_cherry_pick_ok(tmp_path, env, origin, trusted, bot_key) -> None:
     assert verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1]) == ("ok", "")
 
 
+def test_conflict_resolved_cherry_pick_needs_a_person(
+    tmp_path, env, origin, trusted, bot_key
+) -> None:
+    msg = (
+        "pick\n\nUpstream-PR: https://github.com/dotnet/wpf/pull/77\n"
+        f"Upstream-PR-Head: {UPSTREAM_HEAD}\nConflict-Resolved-By: claude\n"
+    )
+    sha = make_pick(origin, env, {"src/b.cs": "b\n"}, msg=msg)
+    result, reason = verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])
+    assert result == "refuse" and "needs-human-merge" in reason
+
+
 def test_wrong_fingerprint_refused(tmp_path, env, origin, trusted) -> None:
     sha = make_pick(origin, env, {"src/b.cs": "b\n"})
     result, reason = verify(tmp_path, env, origin, trusted, sha, BRANCH, "0" * 40)
@@ -239,14 +251,20 @@ def staging(
     origin: Path,
     resolve: dict[str, str],
     extra_commit: bool = False,
+    fork_file: str = "src/a.cs",
+    trailer: str = "",
 ) -> tuple[str, Path]:
-    """Build upstream from the if/main base and a bot-signed merge into if/staging."""
+    """Build upstream from the if/main base and a bot-signed merge into if/staging.
+
+    Upstream changes src/a.cs and global.json. The fork changes fork_file
+    first: src/a.cs gives a conflict, any other file a clean merge.
+    """
     up = tmp_path / "upstream"
     run(tmp_path, env, "git", "clone", "-q", "-b", "if/main", str(origin), str(up))
     run(up, env, "git", "checkout", "-q", "-b", "release/10.0")
     commit(up, env, {"src/a.cs": "upstream\n", "global.json": '{"v":2}\n'}, "upstream", sign=False)
     run(origin, env, "git", "checkout", "-q", "if/main")
-    commit(origin, env, {"src/a.cs": "fork\n"}, "fork patch")
+    commit(origin, env, {fork_file: "fork\n"}, "fork patch")
     run(origin, env, "git", "checkout", "-q", "-b", "if/staging")
     if extra_commit:
         commit(origin, env, {"src/z.cs": "z\n"}, "sneaky", sign=False)
@@ -260,7 +278,7 @@ def staging(
     for path, text in resolve.items():
         (origin / path).write_text(text)
         run(origin, env, "git", "add", path)
-    run(origin, env, "git", "commit", "-q", "-S", "-m", "Merge upstream")
+    run(origin, env, "git", "commit", "-q", "-S", "-m", "Merge upstream" + trailer)
     sha = run(origin, env, "git", "rev-parse", "HEAD")
     run(origin, env, "git", "update-ref", "refs/pull/5/head", sha)
     run(origin, env, "git", "checkout", "-q", "if/main")
@@ -268,9 +286,34 @@ def staging(
 
 
 def test_staging_ok(tmp_path, env, origin, trusted, bot_key) -> None:
-    sha, up = staging(tmp_path, env, origin, {"src/a.cs": "fork+upstream\n"})
+    sha, up = staging(tmp_path, env, origin, {}, fork_file="src/f.cs")
     result = verify(tmp_path, env, origin, trusted, sha, "if/staging", bot_key[1], upstream=up)
     assert result == ("ok", "")
+
+
+def test_staging_with_a_conflict_resolution_needs_a_person(
+    tmp_path, env, origin, trusted, bot_key
+) -> None:
+    # Even without the trailer: content that differs from git's own merge is
+    # a resolution nobody reviewed.
+    sha, up = staging(tmp_path, env, origin, {"src/a.cs": "fork+upstream\n"})
+    result, reason = verify(
+        tmp_path, env, origin, trusted, sha, "if/staging", bot_key[1], upstream=up
+    )
+    assert result == "refuse" and "needs-human-merge" in reason and "src/a.cs" in reason
+
+
+def test_staging_with_conflict_trailer_needs_a_person(
+    tmp_path, env, origin, trusted, bot_key
+) -> None:
+    sha, up = staging(
+        tmp_path, env, origin, {}, fork_file="src/f.cs",
+        trailer="\n\nConflict-Resolved-By: claude",
+    )
+    result, reason = verify(
+        tmp_path, env, origin, trusted, sha, "if/staging", bot_key[1], upstream=up
+    )
+    assert result == "refuse" and "needs-human-merge" in reason
 
 
 def test_staging_refuses_non_upstream_commit(tmp_path, env, origin, trusted, bot_key) -> None:

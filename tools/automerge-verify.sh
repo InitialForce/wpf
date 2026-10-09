@@ -52,6 +52,12 @@ bot_signed() {
     | awk -v f="$KEY_FPR" '$2 == "VALIDSIG" && ($3 == f || $NF == f) {ok = 1} END {exit !ok}'
 }
 
+# Nobody reviews what the conflict agent writes, so a person merges it.
+HUMAN_MERGE="a person must review and merge it (needs-human-merge)"
+agent_resolved() {
+  [ -n "$(git log -1 --format='%(trailers:key=Conflict-Resolved-By,valueonly)' "$1")" ]
+}
+
 # --- Protected paths and the file denylist ---------------------------------
 git diff --name-only "$MAIN...HEAD" > "$OUT/changed.txt"
 PROTECTED=$(grep -E '^(\.github/workflows/|\.if-fork/config\.yaml$|\.if-fork/prompts/)' "$OUT/changed.txt" || true)
@@ -69,6 +75,7 @@ case "$HEAD_BRANCH" in
     [[ "$BRANCH_PR" =~ ^[0-9]+$ ]] || refuse "bad branch name $HEAD_BRANCH"
     [ "$(git rev-list --count "$MAIN..HEAD")" -eq 1 ] || refuse "cherry-pick PR must have exactly one commit"
     bot_signed HEAD || refuse "commit $HEAD_SHA is not signed by the bot key"
+    agent_resolved HEAD && refuse "Claude resolved a conflict in this cherry-pick; $HUMAN_MERGE"
     UP_URL=$(git log -1 --format='%(trailers:key=Upstream-PR,valueonly)' HEAD | head -n1)
     UP_HEAD=$(git log -1 --format='%(trailers:key=Upstream-PR-Head,valueonly)' HEAD | head -n1)
     [ "$UP_URL" = "https://github.com/dotnet/wpf/pull/$BRANCH_PR" ] \
@@ -101,6 +108,9 @@ case "$HEAD_BRANCH" in
       fi
     done > "$OUT/resolved.txt"
     deny "$OUT/resolved.txt"
+    if agent_resolved HEAD || [ -s "$OUT/resolved.txt" ]; then
+      refuse "the sync merge holds conflict resolutions ($(tr '\n' ' ' < "$OUT/resolved.txt")); $HUMAN_MERGE"
+    fi
     ;;
   *)
     refuse "branch $HEAD_BRANCH is not a pipeline branch"

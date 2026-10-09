@@ -483,9 +483,13 @@ jobs:
         run: |
           set -euo pipefail
           SHORT=$(git rev-parse --short "$UPSTREAM_SHA")
+          # Claude's resolution is not reviewed by anyone, so the trailer
+          # makes automerge leave this merge to a person.
+          TRAILERS=()
+          if [ "$HAS_CONFLICTS" = true ]; then TRAILERS=(--trailer "Conflict-Resolved-By: claude"); fi
           if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
             git commit -m "Merge upstream release/10.0 ($SHORT) into if/main" \
-                       -m "Upstream: dotnet/wpf@$UPSTREAM_SHA"
+                       -m "Upstream: dotnet/wpf@$UPSTREAM_SHA" "${TRAILERS[@]}"
           fi
           if ! git merge-base --is-ancestor "$UPSTREAM_SHA" HEAD; then
             echo "::error::HEAD does not contain upstream $UPSTREAM_SHA after the merge."
@@ -494,6 +498,8 @@ jobs:
           OLD=$(git rev-parse -q --verify "origin/$STAGING_BRANCH" || true)
           git push --force-with-lease="refs/heads/$STAGING_BRANCH:$OLD" origin "HEAD:refs/heads/$STAGING_BRANCH"
           echo "pushed=true" >> "$GITHUB_OUTPUT"
+        env:
+          HAS_CONFLICTS: ${{ needs.sync.outputs.has_conflicts }}
 
       - name: Open or update the sync PR
         if: steps.push.outputs.pushed == 'true'
@@ -501,9 +507,24 @@ jobs:
           set -euo pipefail
           SHORT=$(git rev-parse --short "$UPSTREAM_SHA")
           RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          if [ "$HAS_CONFLICTS" = true ]; then
+            MERGE_NOTE="**A person must merge this PR.** The merge conflicted with the fork in $(sed 's/.*/`&`/' "$RUNNER_TEMP/merge/conflicts.txt" | paste -sd ' '), and Claude wrote the resolution (commit trailer \`Conflict-Resolved-By: claude\`). Nobody has reviewed that resolution. \`automerge.yml\` will not merge this PR. Review the resolved files, then merge it by hand with a merge commit when \`Build\` passes."
+          else
+            MERGE_NOTE="The \`Build\` workflow runs on this PR. When it passes, \`automerge.yml\` merges this PR with a merge commit (unless \`IF_AUTOMERGE_FROZEN=true\`)."
+          fi
+          cat > "$RUNNER_TEMP/pr-body.md" <<EOF
+          Nightly upstream sync. Merges dotnet/wpf \`release/10.0\` at \`$UPSTREAM_SHA\` into \`if/main\`.
+
+          $MERGE_NOTE
+
+          The nightly job keeps this one PR up to date; it does not open a new one each night.
+
+          Run: $RUN_URL
+          EOF
           if [ -n "$OPEN_PR" ]; then
             gh pr edit "$OPEN_PR" --repo "$GITHUB_REPOSITORY" \
-              --title "Merge upstream release/10.0 ($SHORT) into if/main"
+              --title "Merge upstream release/10.0 ($SHORT) into if/main" \
+              --body-file "$RUNNER_TEMP/pr-body.md"
             gh pr comment "$OPEN_PR" --repo "$GITHUB_REPOSITORY" \
               --body "if/staging rebuilt on upstream \`$UPSTREAM_SHA\`. Run: $RUN_URL"
             PR="$OPEN_PR"
@@ -511,20 +532,19 @@ jobs:
             URL=$(gh pr create --repo "$GITHUB_REPOSITORY" \
               --base "$MAIN_BRANCH" --head "$STAGING_BRANCH" \
               --title "Merge upstream release/10.0 ($SHORT) into if/main" \
-              --body "Nightly upstream sync. Merges dotnet/wpf \`release/10.0\` at \`$UPSTREAM_SHA\` into \`if/main\`.
-
-          The \`Build\` workflow runs on this PR. When it passes, \`automerge.yml\` merges this PR with a merge commit (unless \`IF_AUTOMERGE_FROZEN=true\`). The nightly job keeps this one PR up to date; it does not open a new one each night.
-
-          Run: $RUN_URL")
+              --body-file "$RUNNER_TEMP/pr-body.md")
             PR="${URL##*/}"
           fi
           # Label separately so a missing label cannot fail PR creation.
           gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label automated \
             || echo "::warning::Could not add label 'automated' to PR #$PR; automerge.yml will skip it."
+          bash "$TRUSTED/tools/human-merge-label.sh" "$PR" "$HAS_CONFLICTS"
           echo "::notice::Sync PR: #$PR"
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           OPEN_PR: ${{ needs.sync.outputs.open_pr }}
+          HAS_CONFLICTS: ${{ needs.sync.outputs.has_conflicts }}
+          TRUSTED: ${{ github.workspace }}/trusted
 
       - name: Close blocked-sync issue after a successful sync
         if: steps.push.outputs.pushed == 'true'

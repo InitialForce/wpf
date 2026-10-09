@@ -304,3 +304,12 @@ def test_if_main_commit_is_pinned_across_jobs() -> None:
     check = next(s for s in jobs["finalize"]["steps"] if s.get("id") == "check")["run"]
     assert "origin/$MAIN_BRANCH" not in check
     assert 'git merge-base "$BASE_SHA" "$UPSTREAM_SHA"' in check
+
+
+def test_agent_resolution_is_marked_for_a_person(finalize_steps: list[dict]) -> None:
+    push = _step(finalize_steps, "Commit merge and push")
+    assert '--trailer "Conflict-Resolved-By: claude"' in push["run"]
+    assert push["env"]["HAS_CONFLICTS"] == "${{ needs.sync.outputs.has_conflicts }}"
+    pr = _step(finalize_steps, "Open or update the sync PR")
+    assert 'bash "$TRUSTED/tools/human-merge-label.sh" "$PR" "$HAS_CONFLICTS"' in pr["run"]
+    assert "A person must merge this PR" in pr["run"]

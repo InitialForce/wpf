@@ -572,3 +572,17 @@ def test_if_main_commit_is_pinned_across_jobs(workflow: dict) -> None:
 def test_scripts_refuse_a_missing_base_sha() -> None:
     for script in (APPLY_SCRIPT, FINISH_SCRIPT):
         assert '[[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]' in script.read_text(), script.name
+
+
+def test_agent_resolution_is_marked_for_a_person(workflow: dict) -> None:
+    finish = next(s for s in workflow["jobs"]["finalize"]["steps"] if s.get("id") == "finish")
+    assert finish["env"]["CONFLICT_RESOLVED"] == "true"
+    # The clean path in cherry-pick must not set it.
+    pick_finish = next(
+        s for s in workflow["jobs"]["cherry-pick"]["steps"] if s.get("id") == "finish"
+    )
+    assert "CONFLICT_RESOLVED" not in pick_finish["env"]
+    open_pr = next(s for s in workflow["jobs"]["open-pr"]["steps"] if s.get("id") == "open-pr")
+    assert open_pr["env"]["CONFLICT_RESOLVED"] == "${{ needs.finalize.outputs.pushed == 'true' }}"
+    assert 'bash tools/human-merge-label.sh "$PR_NUM" "$CONFLICT_RESOLVED"' in open_pr["run"]
+    assert "A person must merge this PR" in open_pr["run"]

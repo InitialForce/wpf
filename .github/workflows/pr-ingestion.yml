@@ -594,6 +594,8 @@ jobs:
           BRANCH: ${{ needs.cherry-pick.outputs.branch }}
           OUT: ${{ runner.temp }}/finish
           TRUSTED: ${{ github.workspace }}/trusted
+          # Adds the Conflict-Resolved-By trailer: automerge refuses it.
+          CONFLICT_RESOLVED: "true"
 
       - name: Escalate when the resolution was not accepted
         if: steps.overlay.outputs.reason != '' || steps.finish.outputs.reason != ''
@@ -652,32 +654,43 @@ jobs:
         run: |
           set -euo pipefail
           RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          if [ "$CONFLICT_RESOLVED" = true ]; then
+            MERGE_NOTE="**A person must merge this PR.** The cherry-pick conflicted with the fork, and Claude wrote the resolution (commit trailer \`Conflict-Resolved-By: claude\`). Nobody has reviewed that resolution: the two reviews covered the upstream diff only. \`automerge.yml\` will not merge this PR. Review the resolved files against the upstream PR, then merge it by hand when \`Build\` passes."
+          else
+            MERGE_NOTE="The \`Build\` workflow runs on this PR. When it passes, \`automerge.yml\` merges this PR (unless \`IF_AUTOMERGE_FROZEN=true\`)."
+          fi
+          cat > "$RUNNER_TEMP/pr-body.md" <<EOF
+          Automated cherry-pick of https://github.com/dotnet/wpf/pull/$PR_NUMBER.
+
+          Reviewed and approved upstream head: \`$PINNED_HEAD_SHA\`. Passed: pre-flight, approval check against the ledger, commit and file denylists (if/main's copies).
+
+          $MERGE_NOTE
+
+          Run: $RUN_URL
+          EOF
           PR_NUM=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --head "$BRANCH" \
                      --base if/main --json number --jq '.[0].number // empty')
           if [ -n "$PR_NUM" ]; then
+            gh pr edit "$PR_NUM" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/pr-body.md"
             gh pr comment "$PR_NUM" --repo "$GITHUB_REPOSITORY" \
               --body "Branch re-applied from upstream head \`$PINNED_HEAD_SHA\`. Run: $RUN_URL"
           else
             PR_URL=$(gh pr create --repo "$GITHUB_REPOSITORY" \
               --base if/main --head "$BRANCH" \
               --title "cherry-pick: $UPSTREAM_TITLE (upstream #$PR_NUMBER)" \
-              --body "Automated cherry-pick of https://github.com/dotnet/wpf/pull/$PR_NUMBER.
-
-          Reviewed and approved upstream head: \`$PINNED_HEAD_SHA\`. Passed: pre-flight, approval check against the ledger, commit and file denylists (if/main's copies).
-
-          The \`Build\` workflow runs on this PR. When it passes, \`automerge.yml\` merges this PR (unless \`IF_AUTOMERGE_FROZEN=true\`).
-
-          Run: $RUN_URL")
+              --body-file "$RUNNER_TEMP/pr-body.md")
             PR_NUM="${PR_URL##*/}"
           fi
           gh pr edit "$PR_NUM" --repo "$GITHUB_REPOSITORY" --add-label automated \
             || echo "::warning::Could not add label 'automated' to PR #$PR_NUM; automerge.yml will skip it."
+          bash tools/human-merge-label.sh "$PR_NUM" "$CONFLICT_RESOLVED"
           echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
           echo "::notice::Internal PR #$PR_NUM"
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BRANCH: ${{ needs.cherry-pick.outputs.branch }}
           UPSTREAM_TITLE: ${{ needs.cherry-pick.outputs.title }}
+          CONFLICT_RESOLVED: ${{ needs.finalize.outputs.pushed == 'true' }}
 
       - name: Emit cherry_picked ledger event
         run: |

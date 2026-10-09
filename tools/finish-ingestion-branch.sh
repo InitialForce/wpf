@@ -4,7 +4,10 @@
 #
 # Environment: PR_NUMBER, PINNED_HEAD_SHA, BRANCH, BASE_SHA (the pinned if/main
 # commit the branch was made from), TRUSTED (if/main checkout whose tools and
-# config are used), OUT (directory for result files).
+# config are used), OUT (directory for result files), and CONFLICT_RESOLVED
+# (true when the commit holds files the conflict agent wrote; the commit then
+# gets a "Conflict-Resolved-By: claude" trailer, and automerge leaves the PR
+# to a person).
 # The current checkout must be on $BRANCH with exactly one commit on top of
 # BASE_SHA.
 #
@@ -34,8 +37,11 @@ if ! python3 "$TRUSTED/tools/check-denylist.py" --config "$TRUSTED/.if-fork/conf
   refuse file_denylist
 fi
 
-git commit --amend --no-edit \
-  --trailer "Upstream-PR: https://github.com/dotnet/wpf/pull/$PR_NUMBER" \
-  --trailer "Upstream-PR-Head: $PINNED_HEAD_SHA"
+TRAILERS=(--trailer "Upstream-PR: https://github.com/dotnet/wpf/pull/$PR_NUMBER"
+          --trailer "Upstream-PR-Head: $PINNED_HEAD_SHA")
+if [ "${CONFLICT_RESOLVED:-false}" = true ]; then
+  TRAILERS+=(--trailer "Conflict-Resolved-By: claude")
+fi
+git commit --amend --no-edit "${TRAILERS[@]}"
 git push --force-with-lease origin "HEAD:refs/heads/$BRANCH"
 echo true > "$OUT/pushed"
