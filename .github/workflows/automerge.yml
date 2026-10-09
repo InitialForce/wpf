@@ -4,8 +4,14 @@
 # passed on the exact head commit. This replaces GitHub auto-merge, which
 # would merge at once when the branch has no required status checks.
 #
+# Runs on every Build completion of a pipeline branch, every 30 minutes, and
+# by hand. Each run processes every open pipeline PR (tools/automerge-run.sh),
+# not only the one whose build just finished. GitHub keeps only one pending
+# run per concurrency group and drops the others; because every run looks at
+# all PRs, a dropped run loses nothing.
+#
 # A PR is merged only when all of these hold:
-#   - Build concluded "success" for a pull_request event on the PR head
+#   - the newest pull_request Build run on the PR head concluded "success"
 #   - the PR is open, from this repository, based on if/main
 #   - the head branch is if/staging (nightly upstream sync) or
 #     claude/cherry-pick-pr-<N> (pr-ingestion.yml)
@@ -13,14 +19,20 @@
 #     account (not just any bot)
 #   - tools/automerge-verify.sh passes, using if/main's tools, config and
 #     bot public key, never the PR's:
-#       * no .github/workflows/**, .if-fork/config.yaml or .if-fork/prompts/**
+#       * no fork-owned path (.github/, .if-fork/, tools/, tests/, test/,
+#         docs/, perf/, packaging/InitialForce.*, agent configuration)
+#       * cherry-pick: only files under src/ and eng/
 #       * no file on file_denylist (whole diff for a cherry-pick; for the
 #         sync PR, the files whose content differs from git's own merge)
+#       * no conflict resolution written by Claude (trailer
+#         Conflict-Resolved-By, or for the sync PR any file that differs
+#         from git's own merge); a person merges those
 #       * cherry-pick: exactly one commit, signed by the bot key, whose
 #         Upstream-PR-Head trailer has an approved ledger outcome
 #       * sync: a bot-signed merge commit; every other commit is upstream's
 #   - the PR contains the current if/main tip (ledger-only commits on
-#     if/main are ignored)
+#     if/main are ignored), and if/main has not moved between verification
+#     and the merge call
 #   - autonomy-check allows "auto-merge" (IF_AUTONOMY_ENABLED=true and
 #     IF_AUTOMERGE_FROZEN is not "true")
 # When if/main has moved on, the PR is rebuilt by the workflow that made it
@@ -39,6 +51,9 @@ on:
   workflow_run:
     workflows: [Build]
     types: [completed]
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
 
 # One merge decision at a time for if/main, so each decision sees the tip it
 # checked against.
@@ -54,9 +69,10 @@ jobs:
   gate:
     name: Autonomy gate
     if: >-
+      github.event_name != 'workflow_run' || (
       github.event.workflow_run.event == 'pull_request' &&
       (github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure') &&
-      (github.event.workflow_run.head_branch == 'if/staging' || startsWith(github.event.workflow_run.head_branch, 'claude/cherry-pick-pr-'))
+      (github.event.workflow_run.head_branch == 'if/staging' || startsWith(github.event.workflow_run.head_branch, 'claude/cherry-pick-pr-')))
     uses: ./.github/workflows/autonomy-check.yml
     with:
       requested_action: auto-merge
@@ -73,12 +89,6 @@ jobs:
       CONCLUSION: ${{ github.event.workflow_run.conclusion }}
 
     steps:
-      - name: Validate event
-        run: |
-          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Invalid head SHA"; exit 1; }
-          [[ "$HEAD_BRANCH" == if/staging || "$HEAD_BRANCH" =~ ^claude/cherry-pick-pr-[0-9]+$ ]] \
-            || { echo "::error::Not a pipeline branch"; exit 1; }
-
       - name: Generate GH App token
         id: app-token
         uses: actions/create-github-app-token@v2
@@ -86,10 +96,14 @@ jobs:
           app-id: ${{ secrets.GH_APP_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
 
-      - name: Find the PR for this build
-        id: pr
+      - name: Find the PR whose build failed
+        id: failed
+        if: github.event_name == 'workflow_run' && env.CONCLUSION == 'failure'
         run: |
           set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Invalid head SHA"; exit 1; }
+          [[ "$HEAD_BRANCH" == if/staging || "$HEAD_BRANCH" =~ ^claude/cherry-pick-pr-[0-9]+$ ]] \
+            || { echo "::error::Not a pipeline branch"; exit 1; }
           # workflow_run.pull_requests is empty for some events; fall back to
           # looking the PR up by head branch.
           PR=$(jq -r '.workflow_run.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH")
@@ -97,11 +111,7 @@ jobs:
             PR=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --head "$HEAD_BRANCH" \
                    --base if/main --json number --jq '.[0].number // empty')
           fi
-          if [ -z "$PR" ]; then
-            echo "::notice::No open PR for $HEAD_BRANCH. Nothing to do."
-            echo "eligible=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          [ -n "$PR" ] || { echo "::notice::No open PR for $HEAD_BRANCH."; exit 0; }
           gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" > "$RUNNER_TEMP/pr.json"
           REASON=$(jq -r --arg repo "$GITHUB_REPOSITORY" --arg sha "$HEAD_SHA" --arg bot "$BOT_LOGIN" '
             if .state != "open" then "PR is not open"
@@ -111,105 +121,17 @@ jobs:
             elif ([.labels[].name] | index("automated")) == null then "PR has no automated label"
             elif .head.sha != $sha then "PR head moved to \(.head.sha) after the build"
             else "" end' "$RUNNER_TEMP/pr.json")
-          echo "number=$PR" >> "$GITHUB_OUTPUT"
           if [ -n "$REASON" ]; then
-            echo "::notice::Not merging PR #$PR: $REASON"
-            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Not reporting on PR #$PR: $REASON"
           else
-            echo "eligible=true" >> "$GITHUB_OUTPUT"
+            echo "number=$PR" >> "$GITHUB_OUTPUT"
           fi
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BOT_LOGIN: ${{ steps.app-token.outputs.app-slug }}[bot]
 
-      - name: Check out if/main (trusted tools, policy and bot key)
-        if: steps.pr.outputs.eligible == 'true' && env.CONCLUSION == 'success'
-        uses: actions/checkout@v4
-        with:
-          ref: if/main
-          path: trusted
-          persist-credentials: false
-
-      - name: Check out if/main (work tree)
-        if: steps.pr.outputs.eligible == 'true' && env.CONCLUSION == 'success'
-        uses: actions/checkout@v4
-        with:
-          ref: if/main
-          path: work
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Set up Python
-        if: steps.pr.outputs.eligible == 'true' && env.CONCLUSION == 'success'
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Verify commits, denylist and base
-        id: verify
-        if: steps.pr.outputs.eligible == 'true' && env.CONCLUSION == 'success'
-        working-directory: work
-        run: |
-          set -euo pipefail
-          pip install --quiet pyyaml
-          if [ "$HEAD_BRANCH" = if/staging ]; then
-            git remote add upstream https://github.com/dotnet/wpf.git
-            git fetch -q --no-tags upstream release/10.0
-          fi
-          bash "$TRUSTED/tools/automerge-verify.sh"
-          RESULT=$(cat "$OUT/result")
-          echo "result=$RESULT" >> "$GITHUB_OUTPUT"
-          if [ -f "$OUT/upstream_pr" ]; then
-            echo "upstream_pr=$(cat "$OUT/upstream_pr")" >> "$GITHUB_OUTPUT"
-            echo "upstream_head=$(cat "$OUT/upstream_head")" >> "$GITHUB_OUTPUT"
-          fi
-          if [ "$RESULT" != ok ]; then
-            echo "::notice::PR #$PR not merged ($RESULT): $(cat "$OUT/reason")"
-          fi
-        env:
-          PR: ${{ steps.pr.outputs.number }}
-          BOT_FPR: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
-          TRUSTED: ${{ github.workspace }}/trusted
-          OUT: ${{ runner.temp }}/verify
-
-      - name: Rebuild the branch on the new if/main
-        if: steps.verify.outputs.result == 'behind' && needs.gate.outputs.proceed == 'true'
-        run: |
-          set -euo pipefail
-          if [ "$HEAD_BRANCH" = if/staging ]; then
-            jq -n '{event_type: "nightly-rebase", client_payload: {force: true}}' \
-              | gh api "repos/$GITHUB_REPOSITORY/dispatches" --input -
-            echo "::notice::if/main moved; asked nightly-rebase to rebuild if/staging."
-          else
-            jq -n --argjson pr "$UPSTREAM_PR" --arg sha "$UPSTREAM_HEAD" \
-              '{event_type: "pr-ingestion-requested", client_payload: {pr_number: $pr, head_sha: $sha}}' \
-              | gh api "repos/$GITHUB_REPOSITORY/dispatches" --input -
-            echo "::notice::if/main moved; asked pr-ingestion to re-apply upstream #$UPSTREAM_PR."
-          fi
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          UPSTREAM_PR: ${{ steps.verify.outputs.upstream_pr }}
-          UPSTREAM_HEAD: ${{ steps.verify.outputs.upstream_head }}
-
-      - name: Merge PR (build passed)
-        if: steps.verify.outputs.result == 'ok' && needs.gate.outputs.proceed == 'true'
-        run: |
-          gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --merge --match-head-commit "$HEAD_SHA"
-          echo "::notice::Merged PR #$PR at $HEAD_SHA."
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          PR: ${{ steps.pr.outputs.number }}
-
-      - name: Note frozen auto-merge
-        if: steps.verify.outputs.result == 'ok' && needs.gate.outputs.proceed != 'true'
-        run: |
-          echo "::notice::Build passed on PR #$PR but auto-merge is blocked ($GATE_REASON). Merge it by hand."
-        env:
-          PR: ${{ steps.pr.outputs.number }}
-          GATE_REASON: ${{ needs.gate.outputs.reason }}
-
       - name: Comment once on a failed build
-        if: steps.pr.outputs.eligible == 'true' && env.CONCLUSION == 'failure'
+        if: steps.failed.outputs.number != ''
         run: |
           set -euo pipefail
           MARKER="<!-- automerge-build-failed:$HEAD_SHA -->"
@@ -223,5 +145,41 @@ jobs:
           It merges on its own when a later build of this PR passes."
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          PR: ${{ steps.pr.outputs.number }}
+          PR: ${{ steps.failed.outputs.number }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
+
+      - name: Check out if/main (trusted tools, policy and bot key)
+        uses: actions/checkout@v4
+        with:
+          ref: if/main
+          path: trusted
+          persist-credentials: false
+
+      - name: Check out if/main (work tree)
+        uses: actions/checkout@v4
+        with:
+          ref: if/main
+          path: work
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify and merge every eligible PR
+        working-directory: work
+        run: |
+          set -euo pipefail
+          pip install --quiet pyyaml
+          git remote add upstream https://github.com/dotnet/wpf.git
+          bash "$TRUSTED/tools/automerge-run.sh"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BOT_LOGIN: ${{ steps.app-token.outputs.app-slug }}[bot]
+          BOT_FPR: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
+          TRUSTED: ${{ github.workspace }}/trusted
+          OUT: ${{ runner.temp }}/automerge
+          PROCEED: ${{ needs.gate.outputs.proceed }}
+          GATE_REASON: ${{ needs.gate.outputs.reason }}

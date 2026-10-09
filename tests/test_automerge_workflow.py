@@ -31,10 +31,15 @@ def _steps(workflow: dict) -> dict[str, dict]:
     return {s["name"]: s for s in workflow["jobs"]["merge"]["steps"]}
 
 
-def test_triggered_by_build_completion(workflow: dict) -> None:
-    wr = workflow["on"]["workflow_run"]
-    assert wr["workflows"] == ["Build"]
-    assert wr["types"] == ["completed"]
+RUN_SCRIPT = REPO_ROOT / "tools" / "automerge-run.sh"
+
+
+def test_triggers_build_completion_schedule_and_dispatch(workflow: dict) -> None:
+    on = workflow["on"]
+    assert on["workflow_run"]["workflows"] == ["Build"]
+    assert on["workflow_run"]["types"] == ["completed"]
+    assert on["schedule"] == [{"cron": "*/30 * * * *"}]
+    assert "workflow_dispatch" in on
 
 
 def test_build_workflow_name_matches() -> None:
@@ -49,16 +54,26 @@ def test_gate_requests_auto_merge(workflow: dict) -> None:
     assert "bypass_for_human_dispatch" not in gate["with"]
 
 
-def test_only_pipeline_branches_and_pull_request_events(workflow: dict) -> None:
+def test_build_events_limited_to_pipeline_branches(workflow: dict) -> None:
     cond = workflow["jobs"]["gate"]["if"]
+    assert "github.event_name != 'workflow_run'" in cond
     assert "workflow_run.event == 'pull_request'" in cond
     assert "'if/staging'" in cond
     assert "'claude/cherry-pick-pr-'" in cond
 
 
-def test_eligibility_checks(workflow: dict) -> None:
-    step = _steps(workflow)["Find the PR for this build"]
-    run = step["run"]
+def test_every_run_processes_all_prs(workflow: dict) -> None:
+    step = _steps(workflow)["Verify and merge every eligible PR"]
+    assert 'bash "$TRUSTED/tools/automerge-run.sh"' in step["run"]
+    assert step["env"]["PROCEED"] == "${{ needs.gate.outputs.proceed }}"
+    assert step["env"]["BOT_FPR"] == "${{ secrets.GH_BOT_GPG_FINGERPRINT }}"
+    assert step["env"]["TRUSTED"] == "${{ github.workspace }}/trusted"
+    assert step["env"]["BOT_LOGIN"] == "${{ steps.app-token.outputs.app-slug }}[bot]"
+    assert "if" not in step
+
+
+def test_eligibility_checks_in_run_script() -> None:
+    text = RUN_SCRIPT.read_text()
     for needle in (
         '.state != "open"',
         '.base.ref != "if/main"',
@@ -66,19 +81,16 @@ def test_eligibility_checks(workflow: dict) -> None:
         ".user.login != $bot",
         'index("automated")',
         ".head.sha != $sha",
+        "actions/workflows/build.yml/runs?event=pull_request&head_sha=",
+        '"$TRUSTED/tools/automerge-verify.sh"',
     ):
-        assert needle in run, f"missing eligibility check {needle!r}"
-    assert step["env"]["BOT_LOGIN"] == "${{ steps.app-token.outputs.app-slug }}[bot]"
+        assert needle in text, f"missing check {needle!r}"
 
 
 def test_verify_uses_trusted_if_main(workflow: dict) -> None:
     steps = _steps(workflow)
     trusted = steps["Check out if/main (trusted tools, policy and bot key)"]
     assert trusted["with"] == {"ref": "if/main", "path": "trusted", "persist-credentials": False}
-    verify = steps["Verify commits, denylist and base"]
-    assert 'bash "$TRUSTED/tools/automerge-verify.sh"' in verify["run"]
-    assert verify["env"]["TRUSTED"] == "${{ github.workspace }}/trusted"
-    assert verify["env"]["BOT_FPR"] == "${{ secrets.GH_BOT_GPG_FINGERPRINT }}"
 
 
 def test_protected_paths_and_denylist_in_verify_script() -> None:
@@ -91,23 +103,17 @@ def test_protected_paths_and_denylist_in_verify_script() -> None:
     assert '"$TRUSTED/docs/bot-gpg-pubkey.asc"' in text
 
 
-def test_merge_requires_verified_up_to_date_head_and_gate(workflow: dict) -> None:
-    steps = _steps(workflow)
-    assert "env.CONCLUSION == 'success'" in steps["Verify commits, denylist and base"]["if"]
-    step = steps["Merge PR (build passed)"]
-    assert "steps.verify.outputs.result == 'ok'" in step["if"]
-    assert "needs.gate.outputs.proceed == 'true'" in step["if"]
-    assert "--merge" in step["run"]
-    assert "--match-head-commit" in step["run"]
-    assert "--squash" not in step["run"]
-    assert "--auto" not in step["run"]
+def test_merge_is_a_pinned_merge_commit() -> None:
+    text = RUN_SCRIPT.read_text()
+    assert '--merge --match-head-commit "$sha"' in text
+    assert "--squash" not in text and "--auto" not in text
+    assert "update-branch" not in text
 
 
-def test_behind_pr_is_rebuilt_not_updated_by_github(workflow: dict) -> None:
-    step = _steps(workflow)["Rebuild the branch on the new if/main"]
-    assert "steps.verify.outputs.result == 'behind'" in step["if"]
-    assert '"nightly-rebase"' in step["run"] and "force: true" in step["run"]
-    assert '"pr-ingestion-requested"' in step["run"]
+def test_behind_pr_is_rebuilt_not_updated_by_github() -> None:
+    text = RUN_SCRIPT.read_text()
+    assert '"nightly-rebase"' in text and "force: true" in text
+    assert '"pr-ingestion-requested"' in text
     assert "update-branch" not in WORKFLOW_PATH.read_text().replace("update-branch, whose", "")
 
 
@@ -116,8 +122,9 @@ def test_concurrency_bound_to_if_main(workflow: dict) -> None:
 
 
 def test_failed_build_comment_is_deduplicated(workflow: dict) -> None:
-    step = _steps(workflow)["Comment once on a failed build"]
-    assert "env.CONCLUSION == 'failure'" in step["if"]
+    steps = _steps(workflow)
+    assert "env.CONCLUSION == 'failure'" in steps["Find the PR whose build failed"]["if"]
+    step = steps["Comment once on a failed build"]
     assert "automerge-build-failed:$HEAD_SHA" in step["run"]
     assert "grep -qF" in step["run"]
 
