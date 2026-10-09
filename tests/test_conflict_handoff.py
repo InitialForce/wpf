@@ -389,3 +389,17 @@ def test_prepare_drops_agent_output_files_the_tree_brought(
     assert r.returncode == 0, r.stderr
     assert not (conflicted / ".escalation.md").exists()
     assert not (conflicted / ".resolver-delete.txt").exists()
+
+
+@pytest.mark.parametrize(
+    "path", ["tools/ledger-event.py", ".if-fork/patch-ledger.jsonl", "docs/bot-gpg-pubkey.asc"]
+)
+def test_finish_refuses_fork_owned_path(tmp_path: Path, git_env: dict[str, str], path: str) -> None:
+    origin, work = _origin_and_clone(tmp_path, git_env)
+    git(work, git_env, "checkout", "-q", "-b", "claude/cherry-pick-pr-123")
+    commit_file(work, git_env, path, "x\n", "pick")
+    out = tmp_path / "out"
+    r = _finish(work, git_env, out)
+    assert r.returncode == 0, r.stderr
+    assert (out / "reason").read_text().strip() == "file_denylist"
+    assert git(origin, git_env, "branch", "--list", "claude/*") == ""

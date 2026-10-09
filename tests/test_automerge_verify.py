@@ -215,7 +215,8 @@ def test_trailer_for_other_pr_refused(tmp_path, env, origin, trusted, bot_key) -
 
 
 def test_denylisted_file_refused(tmp_path, env, origin, trusted, bot_key) -> None:
-    sha = make_pick(origin, env, {"global.json": "{}\n"})
+    # eng/ passes the src/ and eng/ allowlist, but file_denylist still applies.
+    sha = make_pick(origin, env, {"eng/Versions.props": "<Project />\n"})
     result, reason = verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])
     assert result == "refuse" and "denylisted" in reason
 
@@ -224,6 +225,39 @@ def test_protected_path_refused(tmp_path, env, origin, trusted, bot_key) -> None
     sha = make_pick(origin, env, {".github/workflows/x.yml": "on: push\n"})
     result, reason = verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])
     assert result == "refuse" and "human merge" in reason
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "tools/ledger-event.py",
+        ".if-fork/patch-ledger.jsonl",
+        "docs/bot-gpg-pubkey.asc",
+        ".github/actions/import-bot-gpg/action.yml",
+        "tests/conftest.py",
+        "test/InitialForce.WpfSmoke/Perf/PerfHarness.cs",
+        "packaging/InitialForce.WPF/InitialForce.WPF.csproj",
+        "src/Microsoft.DotNet.Wpf/CLAUDE.md",
+    ],
+)
+def test_fork_owned_path_refused(tmp_path, env, origin, trusted, bot_key, path) -> None:
+    sha = make_pick(origin, env, {path: "x\n"})
+    result, reason = verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])
+    assert result == "refuse" and "fork-owned" in reason and path in reason
+
+
+@pytest.mark.parametrize("path", ["Directory.Build.props", "packaging/Directory.Build.props"])
+def test_cherry_pick_outside_src_and_eng_refused(
+    tmp_path, env, origin, trusted, bot_key, path
+) -> None:
+    sha = make_pick(origin, env, {path: "<Project />\n"})
+    result, reason = verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])
+    assert result == "refuse" and "outside src/ and eng/" in reason
+
+
+def test_cherry_pick_in_eng_is_ok(tmp_path, env, origin, trusted, bot_key) -> None:
+    sha = make_pick(origin, env, {"eng/Build.props": "<Project />\n"})
+    assert verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1]) == ("ok", "")
 
 
 def test_ledger_only_move_is_still_ok(tmp_path, env, origin, trusted, bot_key) -> None:
@@ -253,6 +287,7 @@ def staging(
     extra_commit: bool = False,
     fork_file: str = "src/a.cs",
     trailer: str = "",
+    upstream_extra: dict[str, str] | None = None,
 ) -> tuple[str, Path]:
     """Build upstream from the if/main base and a bot-signed merge into if/staging.
 
@@ -262,7 +297,8 @@ def staging(
     up = tmp_path / "upstream"
     run(tmp_path, env, "git", "clone", "-q", "-b", "if/main", str(origin), str(up))
     run(up, env, "git", "checkout", "-q", "-b", "release/10.0")
-    commit(up, env, {"src/a.cs": "upstream\n", "global.json": '{"v":2}\n'}, "upstream", sign=False)
+    changes = {"src/a.cs": "upstream\n", "global.json": '{"v":2}\n', **(upstream_extra or {})}
+    commit(up, env, changes, "upstream", sign=False)
     run(origin, env, "git", "checkout", "-q", "if/main")
     commit(origin, env, {fork_file: "fork\n"}, "fork patch")
     run(origin, env, "git", "checkout", "-q", "-b", "if/staging")
@@ -333,3 +369,15 @@ def test_staging_refuses_resolution_that_edits_denylisted_file(
         tmp_path, env, origin, trusted, sha, "if/staging", bot_key[1], upstream=up
     )
     assert result == "refuse" and "global.json" in reason
+
+
+def test_staging_refuses_upstream_change_to_fork_owned_path(
+    tmp_path, env, origin, trusted, bot_key
+) -> None:
+    sha, up = staging(
+        tmp_path, env, origin, {}, fork_file="src/f.cs", upstream_extra={"tools/x.py": "x\n"}
+    )
+    result, reason = verify(
+        tmp_path, env, origin, trusted, sha, "if/staging", bot_key[1], upstream=up
+    )
+    assert result == "refuse" and "fork-owned" in reason and "tools/x.py" in reason
