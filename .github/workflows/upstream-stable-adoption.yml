@@ -18,8 +18,11 @@ on:
         required: true
         type: string
 
+# Own group: this workflow writes only if/mirror/release/10.0. Sharing
+# nightly-rebase's group let a scheduled nightly run replace a pending
+# adoption run (GitHub keeps one pending run per group).
 concurrency:
-  group: release-branch-write
+  group: upstream-mirror-write
   cancel-in-progress: false
 
 permissions:
@@ -51,22 +54,18 @@ jobs:
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
 
+    # Reads public upstream tags only: no App token, no stored credentials.
+    permissions:
+      contents: read
     outputs:
       tag_sha: ${{ steps.fetch.outputs.tag_sha }}
       tag_verified: ${{ steps.fetch.outputs.tag_verified }}
 
     steps:
-      - name: Generate GH App token
-        id: app-token
-        uses: tibdex/github-app-token@v2
-        with:
-          app_id: ${{ secrets.GH_APP_ID }}
-          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
 
       - name: Add upstream remote and fetch tag
         id: fetch
@@ -193,17 +192,16 @@ jobs:
           app_id: ${{ secrets.GH_APP_ID }}
           private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
 
+      # nightly-rebase syncs upstream release/10.0, which contains the tag.
+      # force: rebuild if/staging even when the open sync PR already has
+      # this upstream commit or it was reported blocked.
       - name: Dispatch nightly-rebase workflow
         run: |
-          gh api "repos/$GITHUB_REPOSITORY/dispatches" \
-            --field event_type=nightly-rebase \
-            --field "client_payload[trigger]=upstream-stable-adoption" \
-            --field "client_payload[upstream_tag]=$UPSTREAM_TAG" \
-            --field "client_payload[mirror_sha]=$MIRROR_SHA"
-          echo "::notice::Dispatched nightly-rebase event for tag '$UPSTREAM_TAG'."
+          jq -n '{event_type: "nightly-rebase", client_payload: {force: true, trigger: "upstream-stable-adoption"}}' \
+            | gh api "repos/$GITHUB_REPOSITORY/dispatches" --input -
+          echo "::notice::Dispatched nightly-rebase (force) after adopting '$UPSTREAM_TAG'."
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          MIRROR_SHA: ${{ needs.promote-mirror.outputs.mirror_sha }}
 
   # ---------------------------------------------------------------------------
   # Job 5: Summarise the adoption in the run summary (no issue: failures are

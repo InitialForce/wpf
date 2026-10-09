@@ -313,3 +313,11 @@ def test_agent_resolution_is_marked_for_a_person(finalize_steps: list[dict]) -> 
     pr = _step(finalize_steps, "Open or update the sync PR")
     assert 'bash "$TRUSTED/tools/human-merge-label.sh" "$PR" "$HAS_CONFLICTS"' in pr["run"]
     assert "A person must merge this PR" in pr["run"]
+
+
+def test_open_pr_is_rebuilt_when_if_main_moved(sync_steps: list[dict]) -> None:
+    run = _step(sync_steps, "Decide whether a sync is needed")["run"]
+    assert 'git diff --name-only "origin/$STAGING_BRANCH...origin/$MAIN_BRANCH"' in run
+    assert "grep -vxF .if-fork/patch-ledger.jsonl" in run
+    # A PR with Claude's resolution waits for a person; it is not rebuilt.
+    assert "Conflict-Resolved-By" in run

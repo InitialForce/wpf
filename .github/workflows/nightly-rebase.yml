@@ -150,9 +150,20 @@ jobs:
           if [ -n "$OPEN_PR" ] && [ "$FORCE" != "true" ] \
              && git rev-parse --verify -q "origin/$STAGING_BRANCH" >/dev/null \
              && git merge-base --is-ancestor "$UPSTREAM_SHA" "origin/$STAGING_BRANCH"; then
-            echo "result=already-proposed" >> "$GITHUB_OUTPUT"
-            echo "::notice::PR #$OPEN_PR already proposes upstream $UPSTREAM_SHA. Nothing to do."
-            exit 0
+            # The open PR has this upstream commit. Rebuild only when if/main
+            # moved on (beyond ledger commits) and automerge could merge the
+            # result: a scheduled run then does what a force dispatch from
+            # automerge would have, even if it replaced that pending run.
+            # A PR with Claude's resolution waits for a person instead.
+            BEHIND=$(git diff --name-only "origin/$STAGING_BRANCH...origin/$MAIN_BRANCH" \
+                     | grep -vxF .if-fork/patch-ledger.jsonl || true)
+            AGENT=$(git log -1 --format='%(trailers:key=Conflict-Resolved-By,valueonly)' "origin/$STAGING_BRANCH")
+            if [ -z "$BEHIND" ] || [ -n "$AGENT" ]; then
+              echo "result=already-proposed" >> "$GITHUB_OUTPUT"
+              echo "::notice::PR #$OPEN_PR already proposes upstream $UPSTREAM_SHA. Nothing to do."
+              exit 0
+            fi
+            echo "::notice::if/main moved on since if/staging was built. Rebuilding it."
           fi
 
           # A SHA that already failed stays failed until upstream moves or a

@@ -203,16 +203,13 @@ def test_notify_writes_summary_not_issue(jobs: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Gate 11: concurrency group matches the shared release-branch-write key
+# Gate 11: own concurrency group, so nightly-rebase cannot replace a pending run
 # ---------------------------------------------------------------------------
 def test_concurrency_group(workflow: dict) -> None:
-    """The workflow must share the 'release-branch-write' concurrency group."""
+    """The workflow has its own group, not nightly-rebase's release-branch-write."""
     concurrency = workflow.get("concurrency", {})
     assert isinstance(concurrency, dict), "'concurrency' must be a mapping"
-    group = concurrency.get("group", "")
-    assert "release-branch-write" in group, (
-        f"concurrency.group must contain 'release-branch-write'; got {group!r}"
-    )
+    assert concurrency.get("group") == "upstream-mirror-write"
     assert concurrency.get("cancel-in-progress") is False, (
         "cancel-in-progress must be false to prevent concurrent branch writes"
     )
@@ -248,3 +245,18 @@ def test_actionlint() -> None:
     assert result.returncode == 0, (
         f"actionlint failed:\n{result.stdout}\n{result.stderr}"
     )
+
+
+def test_verify_tag_holds_no_credentials(jobs: dict) -> None:
+    job = jobs["verify-tag"]
+    assert job["permissions"] == {"contents": "read"}
+    text = str(job)
+    assert "GH_APP" not in text and "app-token" not in text
+    checkouts = [s for s in job["steps"] if "actions/checkout" in str(s.get("uses", ""))]
+    assert checkouts and all(s["with"]["persist-credentials"] is False for s in checkouts)
+
+
+def test_nightly_dispatch_sends_force(jobs: dict) -> None:
+    step = next(s for s in jobs["trigger-rebase"]["steps"] if "run" in s)
+    assert "force: true" in step["run"]
+    assert "upstream_tag" not in step["run"] and "mirror_sha" not in step["run"]
