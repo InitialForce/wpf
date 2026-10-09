@@ -21,6 +21,7 @@ Covers all validation gates from bead wpf-1kh:
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import types
@@ -512,3 +513,113 @@ def test_review_2_required_without_single_review() -> None:
             "--config", "c", "--diff", "d", "--files", "f",
         ])
     assert exc.value.code == merge_verdicts.EXIT_ERROR  # type: ignore[attr-defined]
+
+
+# ===========================================================================
+# 19. Origin checks: a verdict counts only when its own review job produced it
+# ===========================================================================
+def _origin_args(
+    tmp_path: Path, n: int, rv: dict[str, Any], **override: str
+) -> list[str]:
+    path = tmp_path / f"r{n}.json"
+    write_json(path, rv)
+    origin = {
+        "id": f"model-review-{n}",
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "upload": "success",
+    }
+    origin.update(override)
+    return [
+        f"--review-{n}", str(path),
+        f"--review-{n}-id", origin["id"],
+        f"--review-{n}-sha256", origin["sha256"],
+        f"--review-{n}-upload", origin["upload"],
+    ]
+
+
+def _run_origin(
+    tmp_path: Path, r1_args: list[str], r2_args: list[str]
+) -> tuple[int, dict[str, Any], list[dict[str, Any]]]:
+    out = tmp_path / "out.json"
+    events_path = tmp_path / "events.jsonl"
+    code = merge_verdicts.main([  # type: ignore[attr-defined]
+        *r1_args, *r2_args,
+        "--pr-number", str(PR_NUMBER),
+        "--head-sha", HEAD_SHA,
+        "--output", str(out),
+        "--events-out", str(events_path),
+        "--retry-missing",
+        *policy_args(tmp_path),
+    ])
+    events = [json.loads(line) for line in events_path.read_text().splitlines()]
+    return code, json.loads(out.read_text()), events
+
+
+def test_origin_checks_pass_for_genuine_verdicts(tmp_path: Path) -> None:
+    code, output, _ = _run_origin(
+        tmp_path,
+        _origin_args(tmp_path, 1, _safe_rv("model-review-1")),
+        _origin_args(tmp_path, 2, _safe_rv("model-review-2")),
+    )
+    assert code == merge_verdicts.EXIT_APPROVED  # type: ignore[attr-defined]
+    assert "origin_errors" not in output
+
+
+def test_reviewer_id_of_other_job_is_not_counted(tmp_path: Path) -> None:
+    """Regression (Opus NEW-3): review-1 writing a review-2 verdict must not
+    count as the second review."""
+    code, output, events = _run_origin(
+        tmp_path,
+        _origin_args(tmp_path, 1, _safe_rv("model-review-1")),
+        _origin_args(tmp_path, 2, _safe_rv("model-review-1")),
+    )
+    assert code == merge_verdicts.EXIT_REVIEW_ERROR  # type: ignore[attr-defined]
+    assert output["verdict"] == "review_error"
+    assert "reviewer_id" in output["origin_errors"][0]
+    assert events[0]["details"]["origin_errors"] == output["origin_errors"]
+
+
+def test_failed_upload_is_not_counted(tmp_path: Path) -> None:
+    """Regression (Opus NEW-3): if review-2's own upload failed (for example
+    because another job took the artifact name first), the file is not its."""
+    code, output, _ = _run_origin(
+        tmp_path,
+        _origin_args(tmp_path, 1, _safe_rv("model-review-1")),
+        _origin_args(tmp_path, 2, _safe_rv("model-review-2"), upload="failure"),
+    )
+    assert code == merge_verdicts.EXIT_REVIEW_ERROR  # type: ignore[attr-defined]
+    assert output["origin_errors"] == ["review-2 upload step did not succeed (failure)"]
+
+
+@pytest.mark.parametrize("sha", ["", "0" * 64])
+def test_verdict_file_not_matching_job_hash_is_not_counted(tmp_path: Path, sha: str) -> None:
+    code, output, _ = _run_origin(
+        tmp_path,
+        _origin_args(tmp_path, 1, _safe_rv("model-review-1")),
+        _origin_args(tmp_path, 2, _safe_rv("model-review-2"), sha256=sha),
+    )
+    assert code == merge_verdicts.EXIT_REVIEW_ERROR  # type: ignore[attr-defined]
+    assert "hash" in output["origin_errors"][0]
+
+
+def test_origin_failure_escalates_on_third_attempt(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text("".join(
+        json.dumps({"event": "review_error", "pr_number": PR_NUMBER, "head_sha": HEAD_SHA}) + "\n"
+        for _ in range(2)
+    ))
+    out = tmp_path / "out.json"
+    code = merge_verdicts.main([  # type: ignore[attr-defined]
+        *_origin_args(tmp_path, 1, _safe_rv("model-review-1")),
+        *_origin_args(tmp_path, 2, _safe_rv("model-review-1")),
+        "--pr-number", str(PR_NUMBER),
+        "--head-sha", HEAD_SHA,
+        "--output", str(out),
+        "--retry-missing",
+        "--ledger-path", str(ledger),
+        *policy_args(tmp_path),
+    ])
+    output = json.loads(out.read_text())
+    assert code == merge_verdicts.EXIT_ESCALATED  # type: ignore[attr-defined]
+    assert output["verdict"] == "escalated"
+    assert output["origin_errors"]

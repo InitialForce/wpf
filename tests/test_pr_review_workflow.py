@@ -693,3 +693,48 @@ def test_every_job_validates_payload(workflow, job):
     first = workflow["jobs"][job]["steps"][0]
     assert first["name"] == "Validate dispatch payload"
     assert "^[0-9a-f]{40}$" in first["run"]
+
+
+# ---------------------------------------------------------------------------
+# Origin checks (Opus NEW-3): one review job must not stand in for the other
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("n", [1, 2])
+def test_review_jobs_output_their_origin(workflow, n):
+    job = workflow["jobs"][f"review-{n}"]
+    outputs = job["outputs"]
+    assert outputs["reviewer_id"] == "${{ steps.settings.outputs.reviewer_id }}"
+    assert outputs["verdict_sha256"] == "${{ steps.verdict.outputs.sha256 }}"
+    assert outputs["upload"] == "${{ steps.upload.outcome }}"
+    ids = [s.get("id") for s in job["steps"]]
+    assert ids.index("verdict") < ids.index("upload"), "hash the verdict before uploading it"
+
+
+def test_merge_verdict_downloads_verdicts_by_exact_name(workflow):
+    steps = workflow["jobs"]["merge-verdict"]["steps"]
+    downloads = [s["with"] for s in steps if "download-artifact" in s.get("uses", "")]
+    assert all("pattern" not in w and "merge-multiple" not in w for w in downloads)
+    names = {w.get("name") for w in downloads}
+    assert {"review-1.json", "review-2.json"} <= names
+
+
+def test_merge_verdict_passes_origin_of_each_verdict(workflow):
+    step = next(
+        s for s in workflow["jobs"]["merge-verdict"]["steps"] if s.get("id") == "merge"
+    )
+    for n in (1, 2):
+        for field, output in (("ID", "reviewer_id"), ("SHA256", "verdict_sha256"),
+                              ("UPLOAD", "upload")):
+            assert step["env"][f"REVIEW_{n}_{field}"] == (
+                f"${{{{ needs.review-{n}.outputs.{output} }}}}"
+            )
+        for flag in ("id", "sha256", "upload"):
+            assert f'--review-{n}-{flag} "$REVIEW_{n}_{flag.upper()}"' in step["run"]
+
+
+def test_merge_verdict_fails_job_on_origin_errors(workflow):
+    steps = workflow["jobs"]["merge-verdict"]["steps"]
+    last = steps[-1]
+    assert "origin_errors" in last["run"] and "exit 1" in last["run"]
+    names = [s.get("name", "") for s in steps]
+    assert names.index("Record review outcome in ledger (one commit)") < len(steps) - 1

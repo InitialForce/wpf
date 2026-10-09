@@ -186,6 +186,11 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    # merge-verdict checks the verdict against these (origin checks).
+    outputs:
+      reviewer_id: ${{ steps.settings.outputs.reviewer_id }}
+      verdict_sha256: ${{ steps.verdict.outputs.sha256 }}
+      upload: ${{ steps.upload.outcome }}
 
     steps:
       - name: Validate dispatch payload
@@ -224,6 +229,7 @@ jobs:
           import yaml
           c = yaml.safe_load(open(".if-fork/config.yaml"))
           print(f"model={c['claude_models']['review_1']}")
+          print(f"reviewer_id={c['claude_models']['review_1']}-review-1")
           print(f"max_turns={c['claude_limits']['max_turns_review']}")
           EOF
 
@@ -231,7 +237,7 @@ jobs:
         id: load-prompt-1
         shell: bash
         env:
-          MODEL: ${{ steps.settings.outputs.model }}
+          REVIEWER_ID: ${{ steps.settings.outputs.reviewer_id }}
         run: |
           mkdir -p review-output
           {
@@ -242,7 +248,7 @@ jobs:
             echo
             echo "- PR number: $PR_NUMBER (https://github.com/dotnet/wpf/pull/$PR_NUMBER)"
             echo "- Pinned head SHA: $HEAD_SHA"
-            echo "- Reviewer ID: $MODEL-review-1"
+            echo "- Reviewer ID: $REVIEWER_ID"
             echo "- Verdict file: review-output/review-1.json"
             echo '__EOF_PROMPT__'
           } >> "$GITHUB_OUTPUT"
@@ -270,7 +276,19 @@ jobs:
       # Upload whatever verdict exists, even when the reviewer hit its turn
       # limit after writing it. merge-verdict treats a missing file as a
       # review_error, which pr-discovery retries.
+      # The hash goes to merge-verdict as a job output, which no other job
+      # can set, so a verdict file swapped in by another job is caught.
+      - name: Hash review-1 verdict
+        id: verdict
+        if: always()
+        run: |
+          F=review-output/review-1.json
+          if [ -f "$F" ] && [ ! -L "$F" ]; then
+            echo "sha256=$(sha256sum "$F" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Upload review-1 artifact
+        id: upload
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -300,6 +318,10 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    outputs:
+      reviewer_id: ${{ steps.settings.outputs.reviewer_id }}
+      verdict_sha256: ${{ steps.verdict.outputs.sha256 }}
+      upload: ${{ steps.upload.outcome }}
 
     steps:
       - name: Validate dispatch payload
@@ -338,6 +360,7 @@ jobs:
           import yaml
           c = yaml.safe_load(open(".if-fork/config.yaml"))
           print(f"model={c['claude_models']['review_2']}")
+          print(f"reviewer_id={c['claude_models']['review_2']}-review-2")
           print(f"max_turns={c['claude_limits']['max_turns_review']}")
           EOF
 
@@ -345,7 +368,7 @@ jobs:
         id: load-prompt-2
         shell: bash
         env:
-          MODEL: ${{ steps.settings.outputs.model }}
+          REVIEWER_ID: ${{ steps.settings.outputs.reviewer_id }}
         run: |
           mkdir -p review-output
           {
@@ -356,7 +379,7 @@ jobs:
             echo
             echo "- PR number: $PR_NUMBER (https://github.com/dotnet/wpf/pull/$PR_NUMBER)"
             echo "- Pinned head SHA: $HEAD_SHA"
-            echo "- Reviewer ID: $MODEL-review-2"
+            echo "- Reviewer ID: $REVIEWER_ID"
             echo "- Verdict file: review-output/review-2.json"
             echo '__EOF_PROMPT__'
           } >> "$GITHUB_OUTPUT"
@@ -378,7 +401,19 @@ jobs:
             --disallowedTools Bash,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task,Read(//proc/**),Read(//home/runner/work/_temp/**)
           github_token: ${{ github.token }}
 
+      # The hash goes to merge-verdict as a job output, which no other job
+      # can set, so a verdict file swapped in by another job is caught.
+      - name: Hash review-2 verdict
+        id: verdict
+        if: always()
+        run: |
+          F=review-output/review-2.json
+          if [ -f "$F" ] && [ ! -L "$F" ]; then
+            echo "sha256=$(sha256sum "$F" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Upload review-2 artifact
+        id: upload
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -500,12 +535,21 @@ jobs:
           name: review-input
           path: ${{ runner.temp }}/review-input
 
-      - name: Download review verdicts
+      # Exact artifact names. A name pattern with merge-multiple would let any
+      # other artifact named review-*.json overwrite a verdict file.
+      - name: Download review-1 verdict
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          pattern: "review-*.json"
-          merge-multiple: true
+          name: review-1.json
+          path: ${{ runner.temp }}/verdicts/
+
+      - name: Download review-2 verdict
+        if: vars.IF_REVIEW_DOUBLE_REQUIRED != 'false'
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: review-2.json
           path: ${{ runner.temp }}/verdicts/
 
       - name: Import bot GPG key
@@ -516,20 +560,34 @@ jobs:
           gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
 
       # merge-verdicts.py exits 0 approved, 1 rejected, 2 escalated, 3 error,
-      # 4 review_error. Only 3 fails the step.
+      # 4 review_error. Only 3 fails the step. A verdict that fails the origin
+      # checks (reviewer_id, hash, upload outcome from its own job) counts as
+      # missing, and the last step fails the job.
       - name: Merge verdicts
         id: merge
         env:
           DOUBLE_REQUIRED: ${{ vars.IF_REVIEW_DOUBLE_REQUIRED }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REVIEW_1_ID: ${{ needs.review-1.outputs.reviewer_id }}
+          REVIEW_1_SHA256: ${{ needs.review-1.outputs.verdict_sha256 }}
+          REVIEW_1_UPLOAD: ${{ needs.review-1.outputs.upload }}
+          REVIEW_2_ID: ${{ needs.review-2.outputs.reviewer_id }}
+          REVIEW_2_SHA256: ${{ needs.review-2.outputs.verdict_sha256 }}
+          REVIEW_2_UPLOAD: ${{ needs.review-2.outputs.upload }}
         run: |
-          REVIEW_2_ARGS=(--review-2 "$RUNNER_TEMP/verdicts/review-2.json")
+          REVIEW_2_ARGS=(--review-2 "$RUNNER_TEMP/verdicts/review-2.json"
+            --review-2-id "$REVIEW_2_ID"
+            --review-2-sha256 "$REVIEW_2_SHA256"
+            --review-2-upload "$REVIEW_2_UPLOAD")
           if [ "$DOUBLE_REQUIRED" = "false" ]; then
             REVIEW_2_ARGS=(--single-review)
           fi
           set +e
           python tools/merge-verdicts.py \
             --review-1 "$RUNNER_TEMP/verdicts/review-1.json" \
+            --review-1-id "$REVIEW_1_ID" \
+            --review-1-sha256 "$REVIEW_1_SHA256" \
+            --review-1-upload "$REVIEW_1_UPLOAD" \
             "${REVIEW_2_ARGS[@]}" \
             --config .if-fork/config.yaml \
             --diff "$RUNNER_TEMP/review-input/pr.diff" \
@@ -578,3 +636,12 @@ jobs:
             --verdict "$RUNNER_TEMP/merged-verdict.json" \
             --repo "$GITHUB_REPOSITORY" \
             --token-env GH_TOKEN
+
+      # After the outcome is recorded: a verdict that did not come from its own
+      # review job means one job tried to stand in for another. Make it visible.
+      - name: Fail when a verdict failed the origin checks
+        run: |
+          if jq -e '(.origin_errors // []) | length > 0' "$RUNNER_TEMP/merged-verdict.json" > /dev/null; then
+            echo "::error::A reviewer verdict did not come from its own review job. See the Merge verdicts step output."
+            exit 1
+          fi

@@ -20,6 +20,13 @@ never produces "approved":
     on added and removed lines, and the file list (--files) is matched against
     config file_denylist. Any hit turns "approved" into "escalated".
 
+Origin checks (pr-review.yml passes --review-N-id, --review-N-sha256 and
+--review-N-upload from each review job's outputs). A verdict counts only when
+its review job's upload step succeeded, the file's SHA-256 equals the hash that
+job recorded, and its reviewer_id is the job's reviewer ID. Otherwise the
+verdict is treated as missing and the problem is listed in "origin_errors",
+so one reviewer cannot stand in for the other.
+
 A reviewer that crashed or ran out of turns is not a human escalation. The run
 ends as "review_error", which pr-discovery retries. After --max-review-errors
 review_error events for the same (pr_number, head_sha) in --ledger-path, the
@@ -47,12 +54,13 @@ so the caller (CI workflow) knows to open or update the GitHub issue.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import yaml
 
@@ -143,6 +151,30 @@ def load_reviewer_json(path: Path, label: str) -> ReviewerVerdict:
     # "reasoning", "concerns" and "categories" are optional; "rationale" is
     # accepted as an alias for "reasoning" (the review prompts use it).
     return dict(obj)
+
+
+class Origin(NamedTuple):
+    """What a review job recorded about its own verdict. None means not checked."""
+
+    reviewer_id: str | None = None
+    sha256: str | None = None
+    upload: str | None = None
+
+
+def origin_problem(path: Path, rv: ReviewerVerdict, label: str, origin: Origin) -> str | None:
+    """Return why a loaded verdict did not come from its own review job, or None."""
+    if origin.sha256 is not None:
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if not origin.sha256:
+            return f"{label} job recorded no verdict hash, but a verdict file was downloaded"
+        if actual != origin.sha256.lower():
+            return f"{label} file does not match the hash its review job recorded"
+    if origin.reviewer_id is not None and rv.get("reviewer_id") != origin.reviewer_id:
+        return (
+            f"{label} reviewer_id {str(rv.get('reviewer_id'))[:100]!r} "
+            f"is not its job's reviewer ID {origin.reviewer_id!r}"
+        )
+    return None
 
 
 def count_review_errors(ledger_path: Path | None, pr_number: int, head_sha: str) -> int:
@@ -409,9 +441,10 @@ def build_ledger_events(
 
     verdict = output["verdict"]
     if verdict == "review_error":
-        return [event("review_error", {
-            "attempt": output["attempt"], "errors": output["errors"],
-        })]
+        details: dict[str, Any] = {"attempt": output["attempt"], "errors": output["errors"]}
+        if output.get("origin_errors"):
+            details["origin_errors"] = output["origin_errors"]
+        return [event("review_error", details)]
 
     events = [event("review_1", _review_details(output["review_1"], ""))]
     if not single_review:
@@ -419,6 +452,8 @@ def build_ledger_events(
     summary: dict[str, Any] = {"verdict": verdict, "reasoning": output["reasoning"][:2000]}
     if "policy" in output:
         summary["policy"] = output["policy"]
+    if output.get("origin_errors"):
+        summary["origin_errors"] = output["origin_errors"]
     events.append(event("merged_verdict", summary))
     events.append(event(_OUTCOME_EVENTS[verdict], {"source": "merged_verdict"}))
     if verdict == "approved":
@@ -454,6 +489,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="PATH",
         help="Path to reviewer-2 verdict JSON file (omit only with --single-review)",
     )
+    for n in (1, 2):
+        parser.add_argument(
+            f"--review-{n}-id",
+            metavar="ID",
+            help=f"Reviewer ID of the review-{n} job; the verdict's reviewer_id must match",
+        )
+        parser.add_argument(
+            f"--review-{n}-sha256",
+            metavar="HEX",
+            help=f"SHA-256 the review-{n} job recorded for its verdict file (may be empty)",
+        )
+        parser.add_argument(
+            f"--review-{n}-upload",
+            metavar="OUTCOME",
+            help=f"Outcome of the review-{n} job's upload step; anything but success fails",
+        )
     parser.add_argument(
         "--single-review",
         action="store_true",
@@ -516,12 +567,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def _load_or_error(path: Path, label: str, errors: list[str]) -> ReviewerVerdict | None:
+def _origin(args: argparse.Namespace, n: int) -> Origin:
+    return Origin(
+        reviewer_id=getattr(args, f"review_{n}_id"),
+        sha256=getattr(args, f"review_{n}_sha256"),
+        upload=getattr(args, f"review_{n}_upload"),
+    )
+
+
+def _load_or_error(
+    path: Path, label: str, origin: Origin, errors: list[str], origin_errors: list[str]
+) -> ReviewerVerdict | None:
+    """Load a verdict that passed the origin checks, or record why it did not."""
+    if origin.upload is not None and origin.upload != "success":
+        problem = f"{label} upload step did not succeed ({origin.upload or 'no outcome'})"
+        errors.append(problem)
+        origin_errors.append(problem)
+        return None
     try:
-        return load_reviewer_json(path, label)
+        rv = load_reviewer_json(path, label)
     except ReviewLoadError as exc:
         errors.append(str(exc))
         return None
+    problem = origin_problem(path, rv, label, origin)
+    if problem:
+        errors.append(problem)
+        origin_errors.append(problem)
+        return None
+    return rv
 
 
 def _failed_review(label: str, error: str) -> ReviewerVerdict:
@@ -550,11 +623,14 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         die(EXIT_ERROR, "pinned diff or file list is empty")
 
     errors: list[str] = []
-    r1 = _load_or_error(Path(args.review_1), "review-1", errors)
+    origin_errors: list[str] = []
+    r1 = _load_or_error(Path(args.review_1), "review-1", _origin(args, 1), errors, origin_errors)
     r2 = (
         None
         if args.single_review
-        else _load_or_error(Path(args.review_2), "review-2", errors)
+        else _load_or_error(
+            Path(args.review_2), "review-2", _origin(args, 2), errors, origin_errors
+        )
     )
 
     if errors and not args.retry_missing:
@@ -572,6 +648,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
                 "errors": errors,
                 "reasoning": f"Review attempt {attempt} produced no valid verdict.",
             }
+            if origin_errors:
+                output["origin_errors"] = origin_errors
             return _write_outputs(args, output, EXIT_REVIEW_ERROR)
         # Out of retries: hand it to a human.
         if r1 is None:
@@ -589,6 +667,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
         head_sha=args.head_sha,
     )
     output, exit_code = apply_policy(output, exit_code, policy)
+    if origin_errors:
+        output["origin_errors"] = origin_errors
     return _write_outputs(args, output, exit_code)
 
 
