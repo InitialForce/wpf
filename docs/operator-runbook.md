@@ -220,7 +220,7 @@ gh workflow run pr-review.yml --repo InitialForce/wpf -f pr_number=<N> -f head_s
 The daily review rate is `discovery.max_reviews_per_run` in `.if-fork/config.yaml` (10).
 
 ### Releases
-`auto-release.yml` (09:23 UTC) tags at most once a day, and only when `src/` changed since the last published release. It then dispatches `release.yml` on `if/main` with the tag. `release.yml` runs only from `if/main` (any other ref is refused) and treats the tag as data. It calls `build.yml` on the tag's commit, runs the perf gate on the pack (placeholder benchmarks), and publishes to nuget.org, GitHub Packages and a GitHub Release. No `.snupkg` is made; the Windows PDBs ship inside the `.nupkg`. The `publish` job uses the `wpf-nuget-publish` environment, which still requires `oysteinkrog` to approve each release until that reviewer is removed.
+`auto-release.yml` (09:23 UTC) tags at most once a day, and only when `src/` changed since the last published release. It then dispatches `release.yml` on `if/main` with the tag. A release that failed or whose dispatch was lost is retried: for a release tag at most 7 days old with no GitHub Release and no successful or running Release run, `auto-release.yml` dispatches `release.yml` again (up to 3 runs per tag) instead of making a new tag. `force=true` skips that retry. The tag is checked by `tools/verify-release-tag.sh` against `docs/bot-gpg-pubkey.asc` and the `GH_BOT_GPG_FINGERPRINT` secret; no repository variable is involved. `release.yml` runs only from `if/main` (any other ref is refused) and treats the tag as data. It calls `build.yml` on the tag's commit, runs the perf gate on the pack (placeholder benchmarks), and publishes to nuget.org, GitHub Packages and a GitHub Release. No `.snupkg` is made; the Windows PDBs ship inside the `.nupkg`. The `publish` job uses the `wpf-nuget-publish` environment, which still requires `oysteinkrog` to approve each release until that reviewer is removed.
 ```bash
 # Release now, skipping the once-a-day and src/-changed checks:
 gh workflow run auto-release.yml --repo InitialForce/wpf -f force=true
@@ -229,7 +229,7 @@ gh workflow run release.yml --repo InitialForce/wpf --ref if/main -f tag=<tag>
 ```
 
 ### Regenerate the perf baseline
-`perf/baseline.json` holds seed numbers that were never measured, and the harness benchmarks are placeholder loops, so the release perf gate measures nothing real either way. Regenerating the baseline only makes the gate consistent with the placeholder harness.
+`perf/baseline.json` holds seed numbers that were never measured, and the harness benchmarks are placeholder loops, so the release perf gate measures nothing real either way. Regenerating the baseline only makes the gate consistent with the placeholder harness. `tools/check-regression.py` fails any benchmark without a finite `Mean` and a finite, non-negative `BytesAllocatedPerOperation` (a measured 0 is fine), and regeneration refuses such reports too.
 1. `gh workflow run release.yml --repo InitialForce/wpf --ref if/main -f tag=<tag> -f regenerate_perf_baseline=true`
 2. Download the `perf-baseline-<version>` artifact from that run and review it.
 3. Commit it as `perf/baseline.json` on `if/main`.
