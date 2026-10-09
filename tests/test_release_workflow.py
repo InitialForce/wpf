@@ -16,6 +16,7 @@ Trust model being checked:
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -338,20 +339,48 @@ def test_actionlint_release_yml() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_release_notes_agent_has_no_bash_and_read_only_token(workflow: dict) -> None:
-    """The notes agent reads community PR titles: Read tool only, no secrets
+def test_release_notes_agent_has_no_tools_and_read_only_token(workflow: dict) -> None:
+    """The notes agent reads community PR titles: no tools at all, no secrets
     beyond the Anthropic key, read-only GITHUB_TOKEN, no environment."""
     job = workflow["jobs"]["release-notes"]
     assert job["permissions"] == {"contents": "read"}
     assert "environment" not in job
     claude = next(s for s in job["steps"] if "claude-code-action" in str(s.get("uses", "")))
     args = claude["with"]["claude_args"]
-    assert "--allowedTools Read" in args
-    assert "Bash" not in args.split("--disallowedTools")[0]
-    assert "Bash" in args.split("--disallowedTools")[1]
+    assert "--allowedTools" not in args
+    denied = set(args.split("--disallowedTools")[1].split()[0].split(","))
+    assert {"Bash", "Read", "Glob", "Grep", "Write", "Edit", "WebFetch"} <= denied
     assert claude["with"]["github_token"] == "${{ github.token }}"
     combined = _steps_combined_run(job)
     assert "git log" in combined, "the commit list is prepared before the agent runs"
+    assert "<untrusted_input>" in combined
+
+
+def test_release_notes_agent_loads_only_trusted_settings(workflow: dict) -> None:
+    """Shared Claude rule (round 2, Astra HIGH): no project or local settings,
+    hooks or MCP servers from the checkout, and /proc and the runner's _temp
+    folder denied explicitly."""
+    job = workflow["jobs"]["release-notes"]
+    claude = next(s for s in job["steps"] if "claude-code-action" in str(s.get("uses", "")))
+    args = claude["with"]["claude_args"].split()
+    assert args[args.index("--setting-sources") + 1] == "user"
+    assert "--strict-mcp-config" in args
+    assert "--mcp-config" not in args
+    denied = args[args.index("--disallowedTools") + 1].split(",")
+    assert "Read(//proc/**)" in denied
+    assert "Read(//home/runner/work/_temp/**)" in denied
+    settings = json.loads(claude["with"]["settings"])
+    assert settings["disableAllHooks"] is True
+    assert "Read(//proc/**)" in settings["permissions"]["deny"]
+
+
+def test_release_notes_prompt_delimiter_is_random(workflow: dict) -> None:
+    """A commit subject equal to a fixed heredoc delimiter could end the
+    prompt output early and add other step outputs."""
+    step = next(s for s in workflow["jobs"]["release-notes"]["steps"]
+                if s.get("id") == "load-prompt")
+    assert "openssl rand -hex" in step["run"]
+    assert "__EOF_PROMPT__" not in step["run"]
 
 
 def test_perf_gate_passes_every_report(workflow: dict) -> None:
