@@ -1,10 +1,11 @@
 # Known Risks — InitialForce WPF Fork
 
-**Date:** 2026-04-27
+**Date:** 2026-04-27, corrected against the pipeline on 2026-10-09
 **Owner:** Øystein Krog
 **Sources:** PLAN.md §11, round-3-critique (pessimist, security, operations), round-4-critique (2× review skeptic)
 
 Each entry: severity (critical/high/med/low), mitigation status, owner, related runbook/register ID.
+Statements about the pipeline describe branch `fix/autonomy-pipeline` as of 2026-10-09; repository settings were read from GitHub the same day.
 
 ---
 
@@ -13,14 +14,13 @@ Each entry: severity (critical/high/med/low), mitigation status, owner, related 
 **Severity:** high
 **Status:** monitoring
 
-Both review-1 and review-2 use the same base model (`claude-opus-4-7`), read the same diff, and apply the same hard-fail pattern list. Cognitive science research on expert review documents that same-framework same-stimulus reviewers have correlated error modes. A prompt injection vector that fools one instance may fool both.
+Both reviewers run the same model, `claude-fable-5-1` (`claude_models.review_1` and `review_2` in `.if-fork/config.yaml`), on the same pinned diff, with the same hard-fail pattern list. Same-model, same-input reviewers have correlated errors. A prompt injection that fools one instance may fool both.
 
 **Mitigation:**
-- review-2 runs at temperature 0.7 vs review-1 at 0.0 — different probability mass sampled.
-- review-2 receives the diff plus surrounding source file context; review-1 receives the diff only. Forces different reasoning anchors.
-- Hard-fail patterns are applied to raw diff bytes before LLM reasoning begins (deterministic pre-filter).
-- `Process.Start`, `AppContext.TryGetSwitch`, `Assembly.Load*`, `BinaryFormatter` added to hard-fail list per round-4 finding #2.
-- Roslyn analyzer (deterministic third gate) deferred to v1.1 — will catch patterns LLM reviewers evaluate probabilistically.
+- The two reviewers have different prompts (`pr-review-1.md`, `pr-review-2.md`) and run as separate jobs. Each verdict is accepted only from its own job's artifact.
+- `tools/merge-verdicts.py` applies the hard-fail patterns, `file_denylist` and the tier confidence floor deterministically to the pinned diff after the reviews. A hit turns `approved` into `escalated`, whatever the reviewers said.
+- A conflict resolution written by Claude after review is never merged without a person (RISK-017).
+- Roslyn analyzer (deterministic third gate): not built.
 
 **Owner:** Øystein Krog
 
@@ -31,14 +31,18 @@ Both review-1 and review-2 use the same base model (`claude-opus-4-7`), read the
 ## RISK-002: Prompt injection via upstream PR content
 
 **Severity:** high
-**Status:** mitigated
+**Status:** partly mitigated
 
-An attacker who can open a PR on `dotnet/wpf` can craft a PR body or code comment that attempts to override reviewer instructions (imperative injection: `IGNORE PRIOR INSTRUCTIONS`), assert false social-proof facts (plausible-looking security team annotations with embedded confidence scores), or embed base64-encoded payloads.
+An attacker who can open a PR on `dotnet/wpf` can put instructions in the PR body, a code comment or a conflict hunk, to steer a reviewer or the conflict agent.
 
 **Mitigation:**
-- All PR body and diff content is wrapped in `<untrusted_input>...</untrusted_input>` delimiters in every reviewer prompt.
-- Hard-fail patterns include: `IGNORE`, `SYSTEM:`, `[INST]`, new `[DllImport]`, `unsafe`, `extern`, `Marshal.`, `SecurityCritical` removal, `LinkDemand` removal, `Assert(...)` removal, P/Invoke signature changes, base64-encoded strings, suspicious URLs, `Process.Start`, `AppContext.TryGetSwitch`, `Assembly.Load*`, `BinaryFormatter`.
-- Any hard-fail pattern match → automatic `unsafe` verdict + `prompt-injection-suspected` label, bypassing LLM confidence scoring.
+- Reviewers read only a pinned diff artifact (`review-input/`), never the live PR. Prompts mark that content as `<untrusted_input>`.
+- Hard-fail patterns in `review_hard_fail_patterns` (`[DllImport`, `unsafe`, `extern`, `base64`, URLs outside github.com and microsoft.com, `[SecurityCritical]`, `[LinkDemand]`, `Demand()`, `Process.Start`, `AppContext.TryGetSwitch`, `Assembly.Load*`, `BinaryFormatter`, `XmlSerializer.Deserialize`) are checked by `merge-verdicts.py` on the diff, not by the model. A match escalates.
+- Every Claude step loads only trusted settings (`--setting-sources user`, `--strict-mcp-config`, hooks off), has no shell, and has reads of `/proc` and the runner's `_temp` folder denied. Tool rules limit writes to the step's output files.
+- No Claude job holds the App token, the GPG key or a stored git credential. They do hold `ANTHROPIC_API_KEY`.
+- Conflict resolutions go to a person before merge (RISK-017).
+
+**Residual risk:** Read deny rules are applied by Claude Code on a best-effort basis to Grep and Glob; nobody has tested on GitHub whether `/proc/self/environ` is out of reach in every tool. A leaked `ANTHROPIC_API_KEY` costs money but gives no write access to the repository.
 
 **Owner:** Øystein Krog
 
@@ -48,15 +52,16 @@ An attacker who can open a PR on `dotnet/wpf` can craft a PR body or code commen
 
 ## RISK-003: No Authenticode signing — dependency confusion attack surface
 
-**Severity:** high
-**Status:** mitigated (primary mitigation in place; signing deferred to trigger conditions)
+**Severity:** med
+**Status:** needs review
 
-An attacker can register `InitialForce.WPF` on public nuget.org. An unsigned package from the private GitHub Packages feed is indistinguishable at the file level from an unsigned malicious package from nuget.org. Without `packageSourceMapping`, NuGet restore may resolve the malicious package.
+The packages are not Authenticode-signed. `release.yml` publishes `InitialForce.WPF` and `InitialForce.WPF.RuntimeOverride` to public nuget.org (24 versions are public there) and to GitHub Packages. The original mitigation assumed a private GitHub Packages feed only.
 
 **Mitigation:**
-- `packageSourceMapping` in SC's `NuGet.config` maps `InitialForce.*` exclusively to the GitHub Packages feed. This is the primary mitigation (DECISION_LOG.md DEC-009).
-- `InitialForce.*` namespace reserved on public nuget.org (placeholder packages, immediately unlisted after publish).
-- Authenticode signing enabled when signing triggers are met (see known-limitations.md §Signing).
+- The package IDs are published from this repository's nuget.org account, so nobody else can publish under those exact IDs.
+- `packageSourceMapping` in SC's `NuGet.config` should map `InitialForce.*` to one feed. Not checked against SC's current config.
+- Whether the `InitialForce.*` prefix is reserved on nuget.org is not checked.
+- Authenticode signing: deferred (known-limitations.md §Signing).
 
 **Owner:** Øystein Krog
 
@@ -64,39 +69,38 @@ An attacker can register `InitialForce.WPF` on public nuget.org. An unsigned pac
 
 ---
 
-## RISK-004: GitHub App `contents:write` — compromised runner push
+## RISK-004: Repository-level secrets and the App's ruleset bypass
 
 **Severity:** high
-**Status:** mitigated
+**Status:** open (owner action planned)
 
-The `initial-force-wpf-bot` GitHub App has `contents:write` at the installation level. A compromised GitHub Actions runner that obtains the App's installation token (valid 1 hour) can push to any non-protected branch. `claude/*` branches auto-merge after 24h if CI passes, so a fast-moving attacker could craft a passing PR with a subtle payload.
+All seven secrets (`ANTHROPIC_API_KEY`, `GH_APP_ID`, `GH_APP_PRIVATE_KEY`, `GH_BOT_GPG_FINGERPRINT`, `GH_BOT_GPG_KEY`, `GH_BOT_GPG_KEY_ID`, `NUGET_ORG_API_KEY`) are repository secrets. The environments `bot-credentials` and `wpf-nuget-publish` hold none and have no branch policy. So any workflow on any branch of this repository, including a same-repository PR's own copy of a workflow, can read every secret. The App has `contents: write`, and the ruleset `if-fork-protected-branches` (deletion and force-push rules on `if/main` and `if/release/*`) lists the App and repository admins as bypass actors. The ruleset requires no status check and no code-owner review.
 
 **Mitigation:**
-- Branch protection on `claude/*` prefix: require status checks, signed commits, no force-push from non-bot accounts.
-- `GH_APP_PRIVATE_KEY` stored in the `bot-credentials` Environment secret, not a repo secret — prevents PR workflows from accessing it.
-- 90-day rotation cadence for the App private key (monthly per operator runbook, stricter than the 90-day minimum).
-- CODEOWNERS: `.github/workflows/ @InitialForce/platform-team` — the bot's token cannot edit its own CI.
-- App installation scoped to `InitialForce/wpf` only — confirmed at App settings level, not just documented.
+- Pipeline jobs that run candidate code or an agent hold no App token and no GPG key, and check out without stored credentials.
+- `automerge.yml` merges only bot-signed pipeline PRs that pass `tools/automerge-verify.sh`, and never a change to a fork-owned path (`.github/`, `.if-fork/`, `tools/`, `docs/` and others).
+- Planned by the owner: move `NUGET_ORG_API_KEY` into `wpf-nuget-publish`, `GH_APP_*` and `GH_BOT_GPG_*` into `bot-credentials`, and `ANTHROPIC_API_KEY` into a new `claude` environment, each limited to `if/main`. Every job that reads a secret must then name its environment.
+- App key rotation: monthly per the operator runbook ("Rotate a secret").
+- CODEOWNERS lists `@oysteinkrog` for every path, but nothing enforces it until the ruleset requires code-owner review.
 
 **Owner:** Øystein Krog
 
-**Related:** PLAN.md §3.7, round-3-critique/04-security.md finding #2
+**Related:** PLAN.md §3.7, round-3-critique/04-security.md finding #2, operator-runbook.md "Rotate a secret"
 
 ---
 
 ## RISK-005: Ledger tampering
 
 **Severity:** high
-**Status:** mitigated
+**Status:** partly mitigated
 
-The `patch-ledger.jsonl` is the source of truth for which patches have been applied, reviewed, and published. The bot has `contents:write` and could theoretically overwrite ledger history. An external actor with repo write access could also tamper.
+`patch-ledger.jsonl` decides what gets applied: ingestion and automerge require an `approved` outcome for the exact upstream head. The bot and any repository admin can write it.
 
 **Mitigation:**
-- Ledger is append-only by design; `tools/ledger-validate.py` in CI fails if any non-trailing line is modified or removed.
-- `regenerate-state.py` re-derives `patch-state.json` from the JSONL on every PR; a diff mismatch fails CI.
-- Audit branch (`audit/`) has branch protection (no force-push, no deletion, signed commits required) — provides an independent append-only record.
-- Cosign keyless signing of audit JSON artifacts, pushed to Sigstore Rekor (external append-only transparency log).
-- Detection via daily CI validation; operator spot-checks monthly per operator-runbook.md.
+- Each entry carries the hash of the previous one. `tools/ledger-validate.py` runs in every `Build` and fails when an old line changed or was removed.
+- Ledger commits are GPG-signed by the bot. `--strict-signature` checks that, but only when run by hand (weekly checklist).
+- `.if-fork/` is fork-owned: `automerge.yml` never merges a pipeline PR that changes it.
+- There is no separate audit branch and no external transparency log. `patch-state.json` is stale and not checked.
 
 **Owner:** Øystein Krog
 
@@ -109,13 +113,13 @@ The `patch-ledger.jsonl` is the source of truth for which patches have been appl
 **Severity:** high
 **Status:** monitoring
 
-`h3xds1nz` and other allowlisted contributors are known, targetable GitHub identities. An attacker who compromises an allowlisted account can open a PR that passes all Tier-S predicates and gets fast-path routed to 2× Opus review — the only automated gate. A sufficiently legitimate-looking 3-file perf patch could receive `safe` verdicts and auto-merge within 24 hours.
+`h3xds1nz` and other allowlisted contributors are known, targetable GitHub identities. An attacker who controls one can open a PR that discovery picks up and two Fable reviewers may approve. If it applies cleanly, touches only `src/` or `eng/`, and passes Build, `automerge.yml` merges it and the next `auto-release.yml` publishes it.
 
 **Mitigation:**
-- 2× independent Opus review is the primary gate; both reviewers must agree on `safe`.
-- Velocity check: if an allowlisted author has zero PRs in the last 30 days, the first new PR lowers automatic confidence by 0.15 — enough to escalate to human review.
-- `patch-ledger.jsonl` records author per event; incident response can quickly audit all patches from a compromised author (operator-runbook.md I-9).
-- Allowlist changes require a human-reviewed PR to `.if-fork/config.yaml` with CODEOWNERS approval.
+- Two independent reviews must both approve, and the deterministic checks in `merge-verdicts.py` must pass.
+- The ledger records each PR's events; incident response can find every patch from an author (operator-runbook.md I-9).
+- `author_allowlist` lives in `.if-fork/config.yaml`, which is fork-owned, so only a person can change it.
+- There is no velocity check on allowlisted authors.
 
 **Owner:** Øystein Krog
 
@@ -123,16 +127,18 @@ The `patch-ledger.jsonl` is the source of truth for which patches have been appl
 
 ---
 
-## RISK-007: Cherry-pick SHA smuggling (force-push between triage and execution)
+## RISK-007: Cherry-pick SHA smuggling (force-push between review and ingestion)
 
 **Severity:** high
 **Status:** mitigated
 
-Between triage (when a PR is evaluated) and ingestion (when it is cherry-picked), a contributor can force-push a new commit to their fork branch. GitHub returns the current HEAD on `gh pr view`, not the SHA at triage time. If ingestion fetches the new HEAD, it applies a commit that was never reviewed.
+Between review and ingestion a contributor can force-push a new commit to their PR branch. If ingestion applied the new head, it would apply a commit nobody reviewed.
 
 **Mitigation:**
-- `head_sha` is captured in the `discovered` event of `patch-ledger.jsonl` at triage time.
-- `pr-ingestion.yml` asserts that `gh pr view --json headRefOid` matches the ledger's `head_sha` before proceeding. Mismatch → abort + escalation issue `"PR HEAD changed since triage — re-triage required"`.
+- Review pins `head_sha`, and the review dispatch carries it.
+- `tools/check-approval.py` requires an `approved` outcome for that exact `(pr_number, head_sha)`, with no later `rejected` or `escalated`.
+- `tools/apply-upstream-pr.sh` refuses when the PR's current head is not the pinned SHA (`head_moved_after_review`).
+- `automerge.yml` checks the `Upstream-PR-Head` trailer against the ledger again before merging.
 
 **Owner:** Øystein Krog
 
@@ -178,17 +184,17 @@ The `RuntimePackAsset` override target fires at `AfterTargets="Build;CopyFilesTo
 
 ---
 
-## RISK-010: Roslyn analyzer (deterministic third gate) deferred to v1.1
+## RISK-010: Roslyn analyzer (deterministic third gate) not built
 
 **Severity:** med
 **Status:** accepted
 
-`Assembly.Load*`, `BinaryFormatter`, `Process.Start`, and `Process.GetCurrentProcess()` are not in the LLM hard-fail pattern list and are evaluated probabilistically by the LLM reviewers. A carefully crafted patch could contain conditional dead code using these primitives that both reviewers pass with moderate confidence. A deterministic Roslyn analyzer would catch these with zero false negatives.
+`Assembly.Load*`, `BinaryFormatter`, `Process.Start` and `AppContext.TryGetSwitch` are on `review_hard_fail_patterns`, which `merge-verdicts.py` matches as regular expressions against the diff text. A regex misses equivalent code written another way (reflection, an alias, a helper in another file). A Roslyn analyzer would see the semantics.
 
 **Mitigation:**
-- `Process.Start`, `AppContext.TryGetSwitch` added to hard-fail list per round-4 finding #2.
-- `Assembly.Load*`, `BinaryFormatter` partially mitigated by reviewer step-5 checklists.
-- Roslyn analyzer (`tools/analyzers/RoslynForkPolicy/`) is planned for v1.1 with rules IFP001–IFP005.
+- The hard-fail regexes, applied deterministically.
+- Both reviewers' checklists.
+- Roslyn analyzer (`tools/analyzers/RoslynForkPolicy/`, rules IFP001 to IFP005): planned, not built.
 
 **Owner:** Øystein Krog
 
@@ -196,18 +202,17 @@ The `RuntimePackAsset` override target fires at `AfterTargets="Build;CopyFilesTo
 
 ---
 
-## RISK-011: Rebase stack growth — conflict rate grows super-linearly
+## RISK-011: Patch stack growth raises the conflict rate
 
 **Severity:** med
 **Status:** monitoring
 
-As the carry patch stack grows (starting at ~34 patches, adding ~2/month), the probability that any upstream commit conflicts with a carried patch increases. At 100 patches, conflicts become near-certain during weekly rebasing. Manual conflict resolution time scales with stack depth.
+As the fork carries more patches, more upstream changes conflict with them, both in the nightly merge of upstream `release/10.0` and in new cherry-picks. Each conflict that Claude resolves now needs a person to review and merge (RISK-017), so the person's load grows with the stack.
 
 **Mitigation:**
-- Graduation detection (`tools/check-graduated.py`, content-based hunk comparison) automatically drops patches absorbed by upstream.
-- Stack-size cap: if carry stack exceeds 75 patches, freeze new ingestion and dedicate a sprint to upstreaming or retiring patches.
-- Quarterly human review gate: patches older than 6 months get an explicit keep/retire/upstream decision.
-- `rerere.enabled` and `rerere.autoupdate` reduce repeated conflict resolution time.
+- The ingestion pre-flight check (`tools/cherry-pick-pre-flight.sh`) skips a PR that upstream already contains.
+- A blocked nightly sync is retried only when upstream moves or a person asks, so a stuck conflict costs one Claude run, not one a night.
+- Not in place: a stack-size cap, a scheduled keep-or-retire review of old patches, `rerere`.
 
 **Owner:** Øystein Krog
 
@@ -233,17 +238,17 @@ Catastrophic operations (NuGet unlist, branch force-push recovery, credential ro
 
 ---
 
-## RISK-013: GitHub Packages outage — SC restore breaks
+## RISK-013: A package feed outage breaks SC restore
 
 **Severity:** med
 **Status:** accepted
 
-GitHub Packages has had multi-hour outages. SC cannot build if GitHub Packages is down and the NuGet cache is cold.
+SC cannot build if the feed it restores `InitialForce.WPF` from is down and its NuGet cache is cold. The packages are on nuget.org and GitHub Packages.
 
 **Mitigation:**
-- SC CI caches the NuGet package directory (`actions/cache`) — a warm cache survives a < 4h outage without breaking SC builds.
+- SC CI caches the NuGet package directory, so a warm cache survives a short outage.
+- The second feed can stand in for the first.
 - Incident runbook I-6 covers the response.
-- Secondary NuGet mirror (Azure Artifacts) is a v2 improvement if outages exceed once per quarter.
 
 **Owner:** Øystein Krog
 
@@ -251,17 +256,16 @@ GitHub Packages has had multi-hour outages. SC cannot build if GitHub Packages i
 
 ---
 
-## RISK-014: Audit log tamper resistance limited by bot write access
+## RISK-014: The ledger is the only audit record
 
 **Severity:** med
-**Status:** mitigated
+**Status:** accepted
 
-The bot has `contents:write` on `InitialForce/wpf` and could technically overwrite or rewrite the `audit/` orphan branch.
+There is no `audit/` branch and no Sigstore record; earlier plans described both. The audit trail is the ledger (RISK-005), the signed git history of `if/main`, PR comments and workflow run logs (kept 90 days by default). The bot can write all of these except run logs.
 
 **Mitigation:**
-- Branch protection on `audit/`: no force-push, no deletion, signed commits required. The bot can only append.
-- Cosign keyless bundles pushed to Sigstore Rekor (external append-only log) — these cannot be deleted.
-- GitHub Issues fallback: one issue per workflow run summary provides an additional append-only record.
+- Ledger hash chain and signatures (RISK-005).
+- Weekly `--strict-signature` check by hand.
 
 **Owner:** Øystein Krog
 
@@ -283,3 +287,58 @@ The `Microsoft.DotNet.Wpf.DncEng` package (contains `bilinearspan.lib`, needed f
 **Owner:** Øystein Krog
 
 **Related:** PLAN.md §12 open question 1, round-3-critique/01-pessimist.md finding #1
+
+---
+
+## RISK-016: The perf gates measure nothing
+
+**Severity:** high
+**Status:** open
+
+The `perf` job in `build.yml` runs no benchmark. The release perf gate runs `test/InitialForce.WpfSmoke/Perf/PerfHarness.cs`, whose benchmarks are placeholder loops that do not exercise WPF, against `perf/baseline.json`, whose numbers were never measured. A WPF performance or allocation regression merges and ships without any gate noticing.
+
+**Mitigation:**
+- None in the pipeline. Regressions are found only by SC validation (operator-runbook.md I-4).
+- Needed: benchmarks that load the packed WPF assemblies and exercise real paths, and a measured baseline.
+
+**Owner:** Øystein Krog
+
+**Related:** FORK.md "Pipeline status", operator-runbook.md "Regenerate the perf baseline"
+
+---
+
+## RISK-017: Unreviewed conflict resolutions by Claude
+
+**Severity:** high
+**Status:** mitigated by a human gate
+
+The two reviews cover the upstream diff. When the cherry-pick or the nightly merge conflicts, Claude writes the conflicted files, and its input includes the conflict hunks, which come from upstream. Nothing checks that content automatically.
+
+**Mitigation:**
+- The trusted `finalize` job marks such commits with the trailer `Conflict-Resolved-By: claude`. `automerge.yml` refuses that trailer, and for the sync PR any file that differs from git's own merge. The PR gets the label `needs-human-merge`, and a person reviews and merges it.
+- Claude cannot touch denylisted or fork-owned files: those conflicts escalate before Claude starts.
+
+**Residual risk:** the person may approve without reading the resolution closely. The runbook ("Merge a PR that needs a person") says what to compare.
+
+**Owner:** Øystein Krog
+
+**Related:** operator-runbook.md "Merge a PR that needs a person"
+
+---
+
+## RISK-018: Unpinned base commit when automerge merges
+
+**Severity:** med
+**Status:** partly mitigated
+
+GitHub's merge API checks the PR head (`--match-head-commit`) but not the base. If `if/main` moves between verification and the merge call, the PR merges onto a base it was not built with.
+
+**Mitigation:**
+- Merges run one at a time (concurrency group `automerge-if-main`), and only `automerge.yml`, a person and ledger commits write `if/main`.
+- `tools/automerge-run.sh` fetches `if/main` again right before `gh pr merge` and does not merge when it moved. What remains is the moment between that fetch and the merge call.
+- The next `Build` on `if/main` and the next release build test the merged result.
+- A full fix needs GitHub's merge queue or a required, strict status check on `if/main`.
+
+**Owner:** Øystein Krog
+
+**Related:** FORK.md stage 5, operator-runbook.md "Auto-merge trust checks"
