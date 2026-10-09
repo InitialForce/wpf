@@ -11,6 +11,7 @@ Covers:
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -222,3 +223,98 @@ def test_cli_version_bad_tag_exit_2() -> None:
         capture_output=True, text=True,
     )
     assert result.returncode == 2
+
+
+# ---------------------------------------------------------------------------
+# reconcile(): re-dispatch an unpublished release tag (lost dispatch)
+# ---------------------------------------------------------------------------
+
+def _tags(*names: str) -> list:
+    return [rv.parse_tag(n) for n in names]
+
+
+def _run(tag: str, status: str = "completed", conclusion: str = "failure") -> dict:
+    return {"displayTitle": f"Release {tag}", "status": status, "conclusion": conclusion}
+
+
+def _rec(tags: list, runs: list | None = None, published: set[str] | None = None,
+         today: str = "20261009"):
+    return rv.reconcile(tags=tags, published=published or set(), runs=runs or [],
+                        today=today, max_age_days=7, max_attempts=3)
+
+
+T = "if-10.0.8-perf.20261008"
+
+
+def test_reconcile_lost_dispatch_is_dispatched() -> None:
+    """Regression: the tag was pushed but release.yml never started. Before,
+    plan() skipped the tagged commit forever and nothing published it."""
+    r = _rec(_tags(T))
+    assert (r.action, r.tag) == ("dispatch", T)
+    assert "lost dispatch" in r.reason
+
+
+def test_reconcile_failed_runs_retry_up_to_limit() -> None:
+    assert _rec(_tags(T), [_run(T)]).action == "dispatch"
+    assert _rec(_tags(T), [_run(T), _run(T, conclusion="cancelled")]).action == "dispatch"
+    r = _rec(_tags(T), [_run(T)] * 3)
+    assert r.action == "none"
+    assert "gave up" in r.reason
+
+
+def test_reconcile_waits_for_running_release() -> None:
+    for status in ("queued", "in_progress", "waiting"):
+        r = _rec(_tags(T), [_run(T, status=status, conclusion="")])
+        assert (r.action, r.tag) == ("wait", T)
+
+
+def test_reconcile_successful_run_is_not_repeated() -> None:
+    assert _rec(_tags(T), [_run(T, conclusion="success")]).action == "none"
+
+
+def test_reconcile_published_tag_needs_nothing() -> None:
+    assert _rec(_tags(T), published={T}).action == "none"
+
+
+def test_reconcile_only_newest_tag() -> None:
+    """An older unpublished tag is superseded by a newer published one."""
+    newer = "if-10.0.8-perf.20261009"
+    assert _rec(_tags(T, newer), published={newer}).action == "none"
+    r = _rec(_tags(T, newer))
+    assert r.tag == newer
+
+
+def test_reconcile_ignores_old_tags_and_other_runs() -> None:
+    """The May tags that never published must not be re-released."""
+    assert _rec(_tags("if-10.0.0-perf.20260516")).action == "none"
+    other = {"displayTitle": "ci(release): fix", "status": "completed", "conclusion": "failure"}
+    assert _rec(_tags(T), [other] * 5).action == "dispatch"
+
+
+def test_reconcile_no_tags() -> None:
+    assert _rec([]).action == "none"
+
+
+def test_cli_reconcile_output(repo: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
+    _git(repo, "tag", T)
+    d = tmp_path_factory.mktemp("rec")
+    (d / "published.txt").write_text("")
+    (d / "runs.json").write_text(json.dumps([_run(T)]))
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "reconcile", "--repo", str(repo),
+         "--published-tags-file", str(d / "published.txt"),
+         "--runs-file", str(d / "runs.json"), "--today", "20261009"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    lines = dict(line.split("=", 1) for line in result.stdout.splitlines())
+    assert lines["action"] == "dispatch"
+    assert lines["tag"] == T
+    (d / "runs.json").write_text('{"not": "a list"}')
+    bad = subprocess.run(
+        [sys.executable, str(SCRIPT), "reconcile", "--repo", str(repo),
+         "--published-tags-file", str(d / "published.txt"),
+         "--runs-file", str(d / "runs.json")],
+        capture_output=True, text=True,
+    )
+    assert bad.returncode == 2

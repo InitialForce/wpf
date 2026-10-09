@@ -34,9 +34,28 @@ Usage
       GitHub Release (one per line), which release.yml creates only after a
       successful publish.
 
+  python tools/release-version.py reconcile \\
+      --published-tags-file <file> --runs-file <json> [--today yyyymmdd]
+      Decide whether auto-release.yml must (re)dispatch release.yml for an
+      existing tag before it plans a new one. Prints ``action=dispatch|wait|none``,
+      ``tag=<tag>`` and ``reason=<text>`` lines. <json> is
+      ``gh run list --workflow release.yml --event workflow_dispatch
+      --json displayTitle,status,conclusion``.
+
+Rules for ``reconcile`` (only the newest release tag is considered; older
+unpublished tags are superseded by it):
+  1. none if there is no release tag, it has a GitHub Release, or it is more
+     than --max-age-days (default 7) old.
+  2. wait if a Release run for it is queued or in progress.
+  3. none if a Release run for it succeeded (it ran but did not publish, for
+     example because the autonomy gate was off).
+  4. none if --max-attempts (default 3) Release runs for it already failed.
+  5. Otherwise dispatch. This repairs a lost dispatch: the tag was pushed but
+     release.yml never started.
+
 Rules for ``plan`` (``--force`` skips the first three):
-  1. Skip if <sha> already has a release tag (a failed release is not retried
-     automatically for the same commit).
+  1. Skip if <sha> already has a release tag (``reconcile`` retries its
+     release; ``plan`` never tags the same commit twice).
   2. Skip if a release tag already exists for today (at most one per day).
   3. Skip if src/ is unchanged between the last published tag and <sha>.
   4. Otherwise release <sha> as the next tag for today.
@@ -48,6 +67,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import re
 import subprocess
 import sys
@@ -179,6 +199,63 @@ def plan(
     return Plan(True, tag, f"{why}; tagging {short} as {tag}")
 
 
+@dataclass(frozen=True)
+class Reconcile:
+    action: str  # dispatch, wait or none
+    tag: str
+    reason: str
+
+
+ACTIVE_RUN_STATUSES = {"queued", "in_progress", "waiting", "requested", "pending"}
+
+
+def reconcile(
+    *,
+    tags: list[ReleaseTag],
+    published: set[str],
+    runs: list[dict[str, object]],
+    today: str,
+    max_age_days: int,
+    max_attempts: int,
+) -> Reconcile:
+    newest = latest(tags)
+    if newest is None:
+        return Reconcile("none", "", "no release tag yet")
+    if newest.name in published:
+        return Reconcile("none", "", f"newest tag {newest.name} is published")
+    age = (
+        datetime.datetime.strptime(today, "%Y%m%d")
+        - datetime.datetime.strptime(newest.date, "%Y%m%d")
+    ).days
+    if age > max_age_days:
+        return Reconcile(
+            "none", "", f"newest tag {newest.name} is unpublished but {age} days old"
+        )
+
+    # release.yml sets run-name to "Release <tag>".
+    mine = [r for r in runs if r.get("displayTitle") == f"Release {newest.name}"]
+    if any(r.get("status") in ACTIVE_RUN_STATUSES for r in mine):
+        return Reconcile("wait", newest.name, f"a Release run for {newest.name} is running")
+    if any(r.get("conclusion") == "success" for r in mine):
+        return Reconcile(
+            "none", "", f"a Release run for {newest.name} succeeded without publishing"
+        )
+    failed = len(mine)
+    if failed >= max_attempts:
+        return Reconcile(
+            "none", "", f"gave up on {newest.name} after {failed} failed Release runs"
+        )
+    if failed == 0:
+        why = "has no Release run (lost dispatch)"
+    else:
+        why = f"has {failed} failed Release run(s)"
+    return Reconcile(
+        "dispatch",
+        newest.name,
+        f"{newest.name} {why}; dispatching attempt {failed + 1} of {max_attempts}",
+    )
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -197,6 +274,14 @@ def main(argv: list[str] | None = None) -> int:
     p_plan.add_argument("--force", action="store_true")
     p_plan.add_argument("--repo", type=Path, default=Path.cwd())
 
+    p_rec = sub.add_parser("reconcile", help="re-dispatch an unpublished release tag")
+    p_rec.add_argument("--published-tags-file", type=Path, required=True)
+    p_rec.add_argument("--runs-file", type=Path, required=True)
+    p_rec.add_argument("--today", help="UTC date as yyyymmdd (default: today)")
+    p_rec.add_argument("--max-age-days", type=int, default=7)
+    p_rec.add_argument("--max-attempts", type=int, default=3)
+    p_rec.add_argument("--repo", type=Path, default=Path.cwd())
+
     args = parser.parse_args(argv)
 
     try:
@@ -212,6 +297,23 @@ def main(argv: list[str] | None = None) -> int:
             for line in args.published_tags_file.read_text().splitlines()
             if line.strip()
         }
+        if args.command == "reconcile":
+            runs = json.loads(args.runs_file.read_text() or "[]")
+            if not isinstance(runs, list) or not all(isinstance(r, dict) for r in runs):
+                raise ValueError("--runs-file must hold a JSON list of runs")
+            rec = reconcile(
+                tags=_release_tags(args.repo),
+                published=published,
+                runs=runs,
+                today=today,
+                max_age_days=args.max_age_days,
+                max_attempts=args.max_attempts,
+            )
+            print(f"action={rec.action}")
+            print(f"tag={rec.tag}")
+            print(f"reason={rec.reason}")
+            return 0
+
         result = plan(
             repo=args.repo,
             target=args.target,

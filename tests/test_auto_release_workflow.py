@@ -115,3 +115,24 @@ def test_runs_release_tag_check_before_pushing(workflow: dict) -> None:
     assert "PUBKEY_FILE=docs/bot-gpg-pubkey.asc" in run
     assert step["env"]["BOT_FPR"] == "${{ secrets.GH_BOT_GPG_FINGERPRINT }}"
     assert "IF_RELEASE_SIGNING_PUBKEY" not in WORKFLOW_PATH.read_text()
+
+
+def test_reconciles_unpublished_tag_before_planning(workflow: dict) -> None:
+    """Regression: a lost dispatch left a tag that was never released. The
+    reconcile step must run before plan, and plan must not run while a tag
+    is being re-dispatched or is still running."""
+    steps = workflow["jobs"]["tag"]["steps"]
+    ids = [s.get("id") for s in steps]
+    assert ids.index("reconcile") < ids.index("redispatch") < ids.index("plan")
+    rec = steps[ids.index("reconcile")]
+    assert "release-version.py reconcile" in rec["run"]
+    assert "--workflow release.yml" in rec["run"]
+    plan_if = steps[ids.index("plan")]["if"]
+    assert "steps.reconcile.outputs.action != 'wait'" in plan_if
+    assert "steps.redispatch.outputs.tag == ''" in plan_if
+    redispatch = steps[ids.index("redispatch")]
+    assert "tools/verify-release-tag.sh" in redispatch["run"]
+    name = "Dispatch release.yml on if/main for the tag"
+    dispatch = next(s for s in steps if s.get("name") == name)
+    assert "steps.redispatch.outputs.tag" in dispatch["if"]
+    assert "for attempt in 1 2 3" in dispatch["run"]
