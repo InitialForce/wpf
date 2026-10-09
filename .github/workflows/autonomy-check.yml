@@ -58,9 +58,12 @@ jobs:
             fi
           done
           if [ "$ACTION_KNOWN" != "true" ]; then
+            # The value is caller input: keep only [a-z0-9-] (others become
+            # '?') so it cannot add output lines or workflow commands.
+            SAFE_ACTION=$(printf '%s' "$REQUESTED_ACTION" | head -c 64 | tr -c 'a-z0-9-' '?')
             echo "proceed=false" >> "$GITHUB_OUTPUT"
-            echo "reason=unknown requested_action: $REQUESTED_ACTION" >> "$GITHUB_OUTPUT"
-            echo "::error::Autonomy gate: unknown requested_action '$REQUESTED_ACTION'. Blocked by default-deny."
+            echo "reason=unknown requested_action: $SAFE_ACTION" >> "$GITHUB_OUTPUT"
+            echo "::error::Autonomy gate: unknown requested_action '$SAFE_ACTION'. Blocked by default-deny."
             exit 0
           fi
 
