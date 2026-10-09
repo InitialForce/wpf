@@ -22,10 +22,11 @@ pushes. Denylisted files never reach you.
 
 ## Allowed tools
 
-- `Bash`: `git diff`, `git show` and `git status` only. No other command is allowed.
-- `Read`, `Grep`
-- `Edit`: files listed in `CONFLICT_FILES` only.
-- `Write`: `ESCALATION_ISSUE_PATH`, or a file in `CONFLICT_FILES`.
+- `Read`, `Grep`, `Glob`: the work tree, including `RESOLVER_INPUT`.
+- `Edit`, `Write`: files listed in `CONFLICT_FILES`, `ESCALATION_ISSUE_PATH`
+  (`.escalation.md`) and `.resolver-delete.txt`. Nothing else.
+- No shell, no web access. You do not need git: the three sides of every conflict are
+  already in `RESOLVER_INPUT`.
 
 This job has no push rights and no signing key. The workflow takes only the files in
 `CONFLICT_FILES` from your working tree. A later job checks them and commits them. Changes
@@ -41,6 +42,7 @@ Environment variables:
 |---|---|
 | `CONFIG_PATH` | Path to `.if-fork/config.yaml` |
 | `CONFLICT_FILES` | Newline-separated paths with conflicts |
+| `RESOLVER_INPUT` | Folder with, per conflicted path `<p>`: `<p>/base`, `<p>/ours` (the fork), `<p>/theirs` (upstream), `<p>/upstream.diff` (base to theirs) and `<p>/fork.diff` (base to ours). A side that does not exist has no file. |
 | `UPSTREAM_SHA` | The upstream commit being merged |
 | `ESCALATION_ISSUE_PATH` | Write here, and only here, if you cannot resolve safely |
 
@@ -51,7 +53,8 @@ Environment variables:
 Exactly one of:
 
 - **Resolved:** every file in `CONFLICT_FILES` is edited to its final content, with no
-  `<<<<<<<`, `=======` or `>>>>>>>` lines. `ESCALATION_ISSUE_PATH` is not written.
+  `<<<<<<<`, `=======` or `>>>>>>>` lines. A file that must be deleted goes on its own line
+  in `.resolver-delete.txt`. `ESCALATION_ISSUE_PATH` is not written.
 - **Escalated:** `ESCALATION_ISSUE_PATH` holds a short Markdown report: one section per file
   with the path, the reason (`hard_fail_pattern`, `too_large`, `semantic_conflict`,
   `low_confidence`) and the first 20 lines of the conflict. Leave the files as they are.
@@ -65,8 +68,8 @@ one issue. Do not open issues yourself.
 
 For each file in `CONFLICT_FILES`:
 
-1. Read the conflict. Use `git diff HEAD...$UPSTREAM_SHA -- <file>` to see what upstream
-   changed and `git diff $UPSTREAM_SHA...HEAD -- <file>` to see what the fork changed.
+1. Read the conflict. `RESOLVER_INPUT/<file>/upstream.diff` shows what upstream changed and
+   `RESOLVER_INPUT/<file>/fork.diff` what the fork changed.
 2. **Hard-fail check.** If the conflict region on either side matches any
    `review_hard_fail_patterns` entry in the config, escalate that file.
 3. **Size check.** More than `conflict_resolution.max_hunk_count` hunks or more than

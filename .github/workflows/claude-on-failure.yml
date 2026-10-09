@@ -120,6 +120,8 @@ jobs:
     runs-on: ubuntu-latest
     # The log can carry text from upstream PRs. Claude gets read-only access
     # and no stored credentials; the record job writes the issue and ledger.
+    # Claude reads only failure-input/ and the config, and writes only
+    # failure-output/analysis.md.
     permissions:
       actions: read
       contents: read
@@ -131,18 +133,22 @@ jobs:
 
       - name: Download failed run log
         run: |
+          mkdir -p failure-input failure-output
           gh run view "$FAILED_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --log-failed > /tmp/failed-run.log 2>&1 || true
+            --log-failed > failure-input/failed-run.log 2>&1 || true
           # A short excerpt so the analysis does not spend its turns paging
           # through a multi-megabyte build log.
           {
             echo "### Error lines (first 150)"
-            grep -nE 'error|Error|ERROR|fatal|FAILED|Exception|##\[error\]' /tmp/failed-run.log | head -150 || true
+            grep -nE 'error|Error|ERROR|fatal|FAILED|Exception|##\[error\]' failure-input/failed-run.log | head -150 || true
             echo
             echo "### Last 150 lines"
-            tail -150 /tmp/failed-run.log
-          } > /tmp/failed-run-excerpt.log
-          wc -l /tmp/failed-run.log /tmp/failed-run-excerpt.log
+            tail -150 failure-input/failed-run.log
+          } > failure-input/failed-run-excerpt.log
+          # The agent has no shell, so it gets the recent history as a file.
+          git log -30 --format='%h %ad %an %s' --date=short --name-only \
+            > failure-input/recent-commits.txt
+          wc -l failure-input/*
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -157,6 +163,9 @@ jobs:
             echo '__EOF_PROMPT__'
           } >> "$GITHUB_OUTPUT"
 
+      # Trusted settings only (no project settings, hooks or MCP servers),
+      # no shell, and the process environment and runner command files
+      # denied; a double slash is an absolute path in a permission rule.
       - name: Run failure analysis (Claude Sonnet)
         id: run-analysis
         continue-on-error: true
@@ -164,27 +173,31 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: ${{ steps.load-prompt.outputs.prompt }}
+          settings: '{"disableAllHooks": true}'
           claude_args: >-
             --max-turns 25
             --model claude-sonnet-4-6
-            --allowedTools "Read,Grep,Write,Bash(git log:*),Bash(git show:*),Bash(grep:*),Bash(tail:*),Bash(head:*),Bash(wc:*)"
-            --disallowedTools Edit,mcp__github__push_files,mcp__github__create_pull_request,mcp__github__issue_write
+            --setting-sources user
+            --strict-mcp-config
+            --allowedTools "Read(./failure-input/**),Read(./.if-fork/config.yaml),Edit(./failure-output/analysis.md)"
+            --disallowedTools "Bash,WebFetch,WebSearch,NotebookEdit,Task,Read(//proc/**),Read(/proc/**),Read(//home/runner/work/_temp/**),Read(/home/runner/work/_temp/**),Edit(//home/runner/work/_temp/**),mcp__github__push_files,mcp__github__create_pull_request,mcp__github__issue_write"
           github_token: ${{ github.token }}
         env:
           CONFIG_PATH: .if-fork/config.yaml
-          LOG_PATH: /tmp/failed-run.log
-          LOG_EXCERPT_PATH: /tmp/failed-run-excerpt.log
+          LOG_PATH: failure-input/failed-run.log
+          LOG_EXCERPT_PATH: failure-input/failed-run-excerpt.log
+          RECENT_COMMITS_PATH: failure-input/recent-commits.txt
           FAILED_WORKFLOW_NAME: ${{ env.FAILED_WORKFLOW }}
           FAILED_WORKFLOW_URL: ${{ env.FAILED_RUN_URL }}
           FAILED_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          ANALYSIS_PATH: /tmp/failure-analysis-result.md
+          ANALYSIS_PATH: failure-output/analysis.md
 
       - name: Upload analysis result artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: failure-analysis-${{ env.FAILED_RUN_ID }}
-          path: /tmp/failure-analysis-result.md
+          path: failure-output/analysis.md
           if-no-files-found: ignore
           retention-days: 30
 
@@ -220,7 +233,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: failure-analysis-${{ env.FAILED_RUN_ID }}
-          path: /tmp/
+          path: ${{ runner.temp }}/analysis
         continue-on-error: true
 
       - name: Open failure issue
@@ -231,8 +244,8 @@ jobs:
             echo "**Workflow:** $FAILED_WORKFLOW"
             echo "**First failed run:** $FAILED_RUN_URL"
             echo
-            if [ -s /tmp/failure-analysis-result.md ]; then
-              cat /tmp/failure-analysis-result.md
+            if [ -s "$RUNNER_TEMP/analysis/analysis.md" ]; then
+              cat "$RUNNER_TEMP/analysis/analysis.md"
             else
               echo "No automatic analysis is available for this run. Open the run log above."
             fi

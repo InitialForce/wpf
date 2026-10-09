@@ -293,11 +293,11 @@ def test_agent_job_has_no_credentials(workflow: dict) -> None:
     claude = next(s for s in job["steps"] if "claude-code-action" in str(s.get("uses", "")))
     assert claude["with"]["github_token"] == "${{ github.token }}"
     args = claude["with"]["claude_args"]
-    m = re.search(r'--allowedTools "([^"]+)"', args)
-    assert m, args
-    assert m.group(1) == (
-        "Read,Edit,Write,Grep,Bash(git diff:*),Bash(git show:*),Bash(git status:*)"
-    )
+    # The rules come from tools/prepare-resolver.sh: Edit only on the conflicts.
+    assert '--allowedTools "${{ steps.prepare.outputs.allowed }}"' in args
+    assert claude["if"] == "steps.prepare.outputs.run == 'true'"
+    deny = re.search(r'--disallowedTools "([^"]+)"', args)
+    assert deny and "Bash" in deny.group(1).split(","), args
     assert "upload-artifact" in text
 
 

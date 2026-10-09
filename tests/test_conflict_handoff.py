@@ -275,3 +275,99 @@ def test_finish_refuses_more_than_one_commit(tmp_path: Path, git_env: dict[str, 
     out = tmp_path / "out"
     _finish(work, git_env, out)
     assert (out / "reason").read_text().strip() == "not_exactly_one_commit"
+
+
+def test_collect_treats_a_listed_path_as_deleted(
+    conflicted: Path, git_env: dict[str, str], tmp_path: Path
+) -> None:
+    (conflicted / "a.txt").write_text("resolved\n")
+    (conflicted / "gone.txt").write_text("still here\n")
+    (conflicted / ".resolver-delete.txt").write_text("gone.txt\nnot-a-conflict.txt\n")
+    out = tmp_path / "res"
+    r = subprocess.run(
+        ["bash", str(HANDOFF), "collect", str(tmp_path / "conflicts.txt"), str(out),
+         ".resolver-delete.txt"],
+        cwd=conflicted, env=git_env, capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert (out / "deleted.txt").read_text() == "gone.txt\n"
+    assert not (out / "files" / "gone.txt").exists()
+    assert (out / "files" / "a.txt").read_text() == "resolved\n"
+
+
+# ---------------------------------------------------------------------------
+# prepare-resolver.sh
+# ---------------------------------------------------------------------------
+
+PREPARE = REPO_ROOT / "tools" / "prepare-resolver.sh"
+
+
+def _prepare(repo: Path, env: dict[str, str], lst: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", str(PREPARE), str(lst), ".resolver-input"],
+        cwd=repo, env=env, capture_output=True, text=True,
+    )
+
+
+def test_prepare_writes_sides_and_scoped_rules(
+    conflicted: Path, git_env: dict[str, str], tmp_path: Path
+) -> None:
+    r = _prepare(conflicted, git_env, tmp_path / "conflicts.txt")
+    assert r.returncode == 0, r.stderr
+    rules = r.stdout.strip().split(",")
+    assert rules == [
+        "Read(./**)",
+        "Edit(./.escalation.md)",
+        "Edit(./.resolver-delete.txt)",
+        "Edit(./a.txt)",
+        "Edit(./gone.txt)",
+    ]
+    side = conflicted / ".resolver-input" / "a.txt"
+    assert (side / "base").read_text() == "base\n"
+    assert (side / "ours").read_text() == "ours\n"
+    assert (side / "theirs").read_text() == "theirs\n"
+    assert "+theirs" in (side / "upstream.diff").read_text()
+    assert "+ours" in (side / "fork.diff").read_text()
+    # The fork deleted gone.txt, so there is no "ours" side.
+    assert not (conflicted / ".resolver-input" / "gone.txt" / "ours").exists()
+
+
+@pytest.mark.parametrize(
+    "path", ["CLAUDE.md", ".mcp.json", "src/AGENTS.md", ".claude/settings.json", "x/claude.md"]
+)
+def test_prepare_refuses_agent_configuration(
+    conflicted: Path, git_env: dict[str, str], tmp_path: Path, path: str
+) -> None:
+    f = conflicted / path
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("{}\n")
+    r = _prepare(conflicted, git_env, tmp_path / "conflicts.txt")
+    assert r.returncode == 3
+    assert r.stdout == ""
+    assert "agent configuration" in (conflicted / ".escalation.md").read_text()
+
+
+@pytest.mark.parametrize("name", ["a b.cs", "x),Edit(./**", "a*.cs", "../up.cs", "-rf"])
+def test_prepare_refuses_paths_rules_cannot_hold(
+    conflicted: Path, git_env: dict[str, str], tmp_path: Path, name: str
+) -> None:
+    lst = tmp_path / "odd.txt"
+    lst.write_text(name + "\n")
+    r = _prepare(conflicted, git_env, lst)
+    if name == "-rf":
+        # A leading dash is a valid file name and harmless inside Edit(./...).
+        assert r.returncode == 0 and "Edit(./-rf)" in r.stdout
+        return
+    assert r.returncode == 3, r.stdout
+    assert "characters" in (conflicted / ".escalation.md").read_text()
+
+
+def test_prepare_drops_agent_output_files_the_tree_brought(
+    conflicted: Path, git_env: dict[str, str], tmp_path: Path
+) -> None:
+    (conflicted / ".escalation.md").write_text("planted\n")
+    (conflicted / ".resolver-delete.txt").write_text("a.txt\n")
+    r = _prepare(conflicted, git_env, tmp_path / "conflicts.txt")
+    assert r.returncode == 0, r.stderr
+    assert not (conflicted / ".escalation.md").exists()
+    assert not (conflicted / ".resolver-delete.txt").exists()

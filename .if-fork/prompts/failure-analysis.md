@@ -19,9 +19,9 @@ Work in this order and stop as soon as you know the cause. Most failures need 3 
 
 ## Allowed tools
 
-- `Read`, `Grep` on the log files and the checkout
-- `Bash`: only `git log`, `git show`, `grep`, `tail`, `head`, `wc`
-- `Write`: `ANALYSIS_PATH` only
+- `Read`, `Grep`: the files in `failure-input/` and `CONFIG_PATH`
+- `Write`, `Edit`: `ANALYSIS_PATH` only
+- No shell and no web access
 
 ---
 
@@ -33,6 +33,7 @@ Environment variables:
 |---|---|
 | `LOG_EXCERPT_PATH` | Error lines and the last 150 lines of the failed jobs. Read this first. |
 | `LOG_PATH` | The full `gh run view --log-failed` output. Grep it; do not read it whole. |
+| `RECENT_COMMITS_PATH` | The last 30 commits of the checkout, with the files each one changed |
 | `FAILED_WORKFLOW_NAME` | Name of the failed workflow |
 | `FAILED_WORKFLOW_URL` | URL of the failed run |
 | `FAILED_HEAD_SHA` | Commit the run used |
@@ -70,6 +71,6 @@ Always write the file, even when the cause is unknown: say what you checked.
 
 1. Read `LOG_EXCERPT_PATH`. Find the first real error, not its follow-on noise.
 2. If the excerpt is not enough, grep `LOG_PATH` around that error.
-3. If the error names a fork file, `git log -3 -- <file>` and the relevant part of
-   `git show` tell you whether a recent commit caused it.
+3. If the error names a fork file, `RECENT_COMMITS_PATH` tells you whether a recent commit
+   changed it.
 4. Write the report.

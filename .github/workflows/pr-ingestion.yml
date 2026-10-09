@@ -12,10 +12,14 @@
 #     config.yaml) always come from a separate checkout of if/main
 #     ("trusted/"), never from the candidate tree.
 #   - Claude only runs in resolve-conflicts, a job with contents:read, no App
-#     token, no GPG key, no persisted credentials and read-only git tools. It
-#     hands back only the conflicted files, as an artifact. The finalize job
-#     recreates the conflict itself, takes only those paths from the
-#     artifact, checks them, and only then signs and pushes.
+#     token, no GPG key and no persisted credentials. Claude loads only the
+#     action's own user settings (no project settings, hooks or MCP servers
+#     from the candidate tree), has no shell, reads the work tree and edits
+#     only the conflicted files. tools/prepare-resolver.sh refuses to start
+#     it when the tree holds agent configuration. It hands back only the
+#     conflicted files, as an artifact. The finalize job recreates the
+#     conflict itself, takes only those paths from the artifact, checks them,
+#     and only then signs and pushes.
 #   - Nothing is pushed before the whole branch diff passes file_denylist.
 #   - cherry-pick records the if/main commit it starts from (main_sha).
 #     resolve-conflicts and finalize branch from exactly that commit, so a
@@ -402,7 +406,7 @@ jobs:
       - name: Recreate the conflicted cherry-pick
         run: |
           # Copy the scripts out first: the cherry-pick and the agent change the tree.
-          cp tools/apply-upstream-pr.sh tools/conflict-handoff.sh "$RUNNER_TEMP/"
+          cp tools/apply-upstream-pr.sh tools/conflict-handoff.sh tools/prepare-resolver.sh "$RUNNER_TEMP/"
           git config user.name "Claude (Initial Force WPF Bot)"
           git config user.email "wpf-bot@initialforce.com"
           git remote add upstream https://github.com/dotnet/wpf.git
@@ -420,6 +424,19 @@ jobs:
           OUT: ${{ runner.temp }}/apply
           TRUSTED: ${{ github.workspace }}
 
+      - name: Prepare the agent's input and tool rules
+        id: prepare
+        run: |
+          set +e
+          ALLOWED=$(bash "$RUNNER_TEMP/prepare-resolver.sh" "$RUNNER_TEMP/apply/conflicts.txt" .resolver-input)
+          RC=$?
+          set -e
+          case "$RC" in
+            0) { echo "run=true"; echo "allowed=$ALLOWED"; } >> "$GITHUB_OUTPUT" ;;
+            3) echo "run=false" >> "$GITHUB_OUTPUT" ;;
+            *) exit "$RC" ;;
+          esac
+
       - name: Load cherry-pick conflict prompt
         id: load-prompt-pick
         run: |
@@ -430,28 +447,38 @@ jobs:
             echo '__EOF_PROMPT__'
           } >> "$GITHUB_OUTPUT"
 
+      # Trusted settings only: --setting-sources user skips the tree's
+      # .claude/ and CLAUDE.md, --strict-mcp-config skips its .mcp.json, and
+      # disableAllHooks turns hooks off. The deny rules keep the process
+      # environment (/proc) and the runner's command files (_temp) out of
+      # reach; a double slash is an absolute path in a permission rule.
       - name: Resolve conflicts (Claude Sonnet)
         id: pick
+        if: steps.prepare.outputs.run == 'true'
         continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: ${{ steps.load-prompt-pick.outputs.prompt }}
+          settings: '{"disableAllHooks": true}'
           claude_args: >-
             --max-turns 30
             --model claude-sonnet-4-6
-            --allowedTools "Read,Edit,Write,Grep,Bash(git diff:*),Bash(git show:*),Bash(git status:*)"
-            --disallowedTools mcp__github__push_files,mcp__github__create_pull_request
+            --setting-sources user
+            --strict-mcp-config
+            --allowedTools "${{ steps.prepare.outputs.allowed }}"
+            --disallowedTools "Bash,WebFetch,WebSearch,NotebookEdit,Task,Read(//proc/**),Read(/proc/**),Read(//home/runner/work/_temp/**),Read(/home/runner/work/_temp/**),Edit(//home/runner/work/_temp/**),mcp__github__push_files,mcp__github__create_pull_request"
           github_token: ${{ github.token }}
         env:
           CONFIG_PATH: .if-fork/config.yaml
+          RESOLVER_INPUT: .resolver-input
           ESCALATION_ISSUE_PATH: ${{ github.workspace }}/.escalation.md
 
       - name: Collect the resolved conflict files
         if: always()
         run: |
           mkdir -p "$RUNNER_TEMP/resolution"
-          bash "$RUNNER_TEMP/conflict-handoff.sh" collect "$RUNNER_TEMP/apply/conflicts.txt" "$RUNNER_TEMP/resolution"
+          bash "$RUNNER_TEMP/conflict-handoff.sh" collect "$RUNNER_TEMP/apply/conflicts.txt" "$RUNNER_TEMP/resolution" .resolver-delete.txt
           if [ -f .escalation.md ]; then cp .escalation.md "$RUNNER_TEMP/resolution/escalation.md"; fi
 
       - name: Upload resolution

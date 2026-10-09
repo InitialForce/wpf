@@ -2,10 +2,12 @@
 # conflict-handoff.sh: move a conflict resolution from the untrusted agent job
 # to the trusted job that commits it.
 #
-#   conflict-handoff.sh collect <conflicts.txt> <outdir>
+#   conflict-handoff.sh collect <conflicts.txt> <outdir> [<delete list>]
 #       Run in the agent job after Claude. Copies each conflicted path that
 #       still exists to <outdir>/files/<path>, lists removed ones in
-#       <outdir>/deleted.txt. Nothing outside the conflict list is collected.
+#       <outdir>/deleted.txt. A conflicted path named in <delete list> (the
+#       agent has no shell, so it asks for a deletion there) counts as
+#       removed. Nothing outside the conflict list is collected.
 #
 #   conflict-handoff.sh apply <conflicts.txt> <resolution dir>
 #       Run in the trusted job after it has recreated the same conflicted
@@ -15,7 +17,7 @@
 #       Stages the result.
 set -euo pipefail
 
-mode="$1"; list="$2"; dir="$3"
+mode="$1"; list="$2"; dir="$3"; delete_list="${4:-/dev/null}"
 
 case "$mode" in
   collect)
@@ -23,7 +25,9 @@ case "$mode" in
     : > "$dir/deleted.txt"
     while IFS= read -r f; do
       [ -z "$f" ] && continue
-      if [ -e "$f" ] || [ -L "$f" ]; then
+      if grep -qxF -- "$f" "$delete_list" 2>/dev/null; then
+        echo "$f" >> "$dir/deleted.txt"
+      elif [ -e "$f" ] || [ -L "$f" ]; then
         mkdir -p "$dir/files/$(dirname "$f")"
         cp -P -- "$f" "$dir/files/$f"
       else
