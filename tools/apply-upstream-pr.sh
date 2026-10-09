@@ -39,7 +39,9 @@ UP_HEAD=$(jq -r .head.sha "$OUT/upr.json")
 MERGED=$(jq -r .merged "$OUT/upr.json")
 MERGE_SHA=$(jq -r '.merge_commit_sha // empty' "$OUT/upr.json")
 AUTHOR=$(jq -r .user.login "$OUT/upr.json")
-jq -r .title "$OUT/upr.json" | tr -d '\r' | head -c 200 > "$OUT/title"
+# One line only: the title goes into GITHUB_OUTPUT, where a newline would
+# start a new key.
+jq -r .title "$OUT/upr.json" | tr -d '\r\n' | head -c 200 > "$OUT/title"
 TITLE=$(cat "$OUT/title")
 
 if [ "$UP_HEAD" != "$PINNED_HEAD_SHA" ]; then
