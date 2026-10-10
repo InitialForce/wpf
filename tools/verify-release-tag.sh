@@ -44,7 +44,7 @@ fi
 
 GNUPGHOME=$(mktemp -d)
 export GNUPGHOME
-trap 'rm -rf "$GNUPGHOME"' EXIT
+trap 'gpgconf --homedir "$GNUPGHOME" --kill all 2>/dev/null; rm -rf "$GNUPGHOME"' EXIT
 gpg --batch --quiet --import "$PUBKEY_FILE" 2>/dev/null \
   || fail "Could not import $PUBKEY_FILE"
 KEYS=$(gpg --batch --with-colons --list-keys \

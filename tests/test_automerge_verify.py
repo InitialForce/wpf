@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -29,7 +30,7 @@ def run(cwd: Path, env: dict[str, str], *args: str) -> str:
 
 
 @pytest.fixture(scope="module")
-def bot_key(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, str]:
+def bot_key(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[Path, str]]:
     home = tmp_path_factory.mktemp("gnupg")
     home.chmod(0o700)
     env = {**os.environ, "GNUPGHOME": str(home)}
@@ -48,7 +49,9 @@ def bot_key(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, str]:
     )
     colons = run(home, env, "gpg", "--batch", "--with-colons", "--fingerprint")
     fpr = next(line.split(":")[9] for line in colons.splitlines() if line.startswith("fpr"))
-    return home, fpr
+    yield home, fpr
+    # gpg autostarts a gpg-agent and scdaemon per homedir; stop them or they outlive pytest.
+    subprocess.run(["gpgconf", "--homedir", str(home), "--kill", "all"], check=False)
 
 
 @pytest.fixture

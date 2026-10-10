@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,7 +59,7 @@ def _gen_key(gnupg: Path, uid: str) -> str:
 
 
 @pytest.fixture(scope="module")
-def env(tmp_path_factory: pytest.TempPathFactory) -> Env:
+def env(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Env]:
     base = tmp_path_factory.mktemp("verify-tag")
     gnupg = base / "gnupg"
     gnupg.mkdir(mode=0o700)
@@ -94,7 +95,9 @@ def env(tmp_path_factory: pytest.TempPathFactory) -> Env:
     tag("if-10.0.8-perf.20261009", main, other)
     tag("if-10.0.8-perf.20261010", main, None)
     tag("if-10.0.8-perf.20261011", side, bot)
-    return Env(repo, gnupg, bot, other, keys["bot"], keys["other"], keys["both"], main, side)
+    yield Env(repo, gnupg, bot, other, keys["bot"], keys["other"], keys["both"], main, side)
+    # gpg autostarts a gpg-agent and scdaemon per homedir; stop them or they outlive pytest.
+    subprocess.run(["gpgconf", "--homedir", str(gnupg), "--kill", "all"], check=False)
 
 
 def _verify(e: Env, tag: str, *, key: Path | None = None, fpr: str | None = None,

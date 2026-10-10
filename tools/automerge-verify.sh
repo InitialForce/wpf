@@ -43,6 +43,7 @@ MAIN=origin/if/main
 # --- Bot signatures --------------------------------------------------------
 GNUPGHOME=$(mktemp -d)
 export GNUPGHOME
+trap 'gpgconf --homedir "$GNUPGHOME" --kill all 2>/dev/null; rm -rf "$GNUPGHOME"' EXIT
 gpg --batch --quiet --import "$TRUSTED/docs/bot-gpg-pubkey.asc" 2>/dev/null
 KEY_FPR=$(gpg --batch --with-colons --fingerprint | awk -F: '/^fpr/ {print $10; exit}')
 [ -n "${BOT_FPR:-}" ] && [ "$KEY_FPR" = "$BOT_FPR" ] \
