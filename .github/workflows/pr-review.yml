@@ -258,6 +258,7 @@ jobs:
         id: review
         uses: anthropics/claude-code-action@v1
         with:
+          allowed_bots: initial-force-wpf-bot
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: ${{ steps.load-prompt-1.outputs.prompt }}
           # Trusted settings only: the user settings the action writes (hooks
@@ -389,6 +390,7 @@ jobs:
         id: review
         uses: anthropics/claude-code-action@v1
         with:
+          allowed_bots: initial-force-wpf-bot
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: ${{ steps.load-prompt-2.outputs.prompt }}
           # Same trusted-settings rule and tool limits as review-1.
