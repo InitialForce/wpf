@@ -210,18 +210,29 @@ else
     TEMP_PATCH="$(mktemp --suffix=".patch" "/tmp/cherry-pick-pre-flight-XXXXXX")"
     log_info "Temp patch file: $TEMP_PATCH"
 
-    # Fetch the PR's head ref into a local ref
+    # Fetch the PR's head ref and upstream main (the PR's base) into local refs
     FETCH_REF="refs/remotes/pr/${PR_NUMBER}"
-    if ! git fetch "${UPSTREAM_REF}" \
-            "refs/pull/${PR_NUMBER}/head:${FETCH_REF}" 2>&1 | \
+    MAIN_REF="refs/remotes/${UPSTREAM_REF}/main"
+    if ! git fetch --no-tags "${UPSTREAM_REF}" \
+            "+refs/pull/${PR_NUMBER}/head:${FETCH_REF}" \
+            "+refs/heads/main:${MAIN_REF}" 2>&1 | \
             while IFS= read -r line; do log_info "git-fetch: $line"; done; then
         log_error "Failed to fetch PR #${PR_NUMBER} from ${UPSTREAM_REF}"
         exit 1
     fi
+    if ! git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
+        log_error "Pinned sha $HEAD_SHA is not reachable from PR #${PR_NUMBER}"
+        exit 1
+    fi
 
-    # Export the diff of the PR's head commit (single commit diff)
-    if ! git format-patch -1 "${HEAD_SHA}" --stdout > "$TEMP_PATCH" 2>&1; then
-        log_error "git format-patch failed for sha: $HEAD_SHA"
+    # Export the PR's whole change: every commit from where it left main up
+    # to the pinned head. A single-commit diff missed multi-commit PRs.
+    if ! PR_BASE="$(git merge-base "${HEAD_SHA}" "${MAIN_REF}")"; then
+        log_error "No merge base between $HEAD_SHA and upstream main"
+        exit 1
+    fi
+    if ! git diff "${PR_BASE}" "${HEAD_SHA}" > "$TEMP_PATCH"; then
+        log_error "git diff failed for ${PR_BASE}..${HEAD_SHA}"
         exit 1
     fi
 

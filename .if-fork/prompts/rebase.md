@@ -8,22 +8,36 @@ All 12 hard prohibitions in `preamble.md` are in effect for this prompt.
 
 Read `.if-fork/config.yaml` before doing anything else.
 
-You are the nightly rebase agent. Rebase `if/staging` onto upstream `release/10.0`. On clean
-rebase: push and emit success event. On conflicts: attempt conflict resolution via
-`resolve-rebase-conflict.md`. On unresolvable conflicts: escalate and emit `rebase_failed`.
+This file describes the nightly upstream sync for any agent asked to reason about it. The
+sync itself is plain shell in `nightly-rebase.yml`; Claude is only invoked for conflicts,
+through `resolve-rebase-conflict.md`.
+
+The fork does not rebase. `if/main` carries merge commits and its ruleset forbids force
+pushes, so the sync merges upstream into the fork instead:
+
+1. If upstream `release/10.0` is already in `if/main`, stop.
+2. If the open PR `if/staging -> if/main` already contains the upstream SHA, stop.
+3. Reset `if/staging` to `if/main` and run `git merge --no-ff --no-commit <upstream SHA>`.
+4. Conflicts on files the fork deleted under `.github/` are resolved by keeping the deletion.
+   Conflicts on denylisted files escalate. Other conflicts go to Claude.
+5. The merge may only touch files upstream changed. The workflow commits it, force-pushes
+   `if/staging` (a bot-owned branch) and keeps exactly one sync PR open.
+6. `build.yml` runs on the PR. `automerge.yml` merges it with a merge commit when the build
+   passes and `IF_AUTOMERGE_FROZEN` is not `true`.
+7. If the sync is blocked, the workflow keeps one open issue titled
+   "Nightly upstream sync blocked" and emits one `rebase_failed` ledger event per upstream SHA.
 
 **Model:** `claude-sonnet-4-6` (see `config.claude_models.conflict_resolve`)
-**Trigger:** `nightly-rebase.yml` — job `attempt-rebase`
+**Trigger:** `nightly-rebase.yml` (03:07 UTC, or the `nightly-rebase` dispatch)
 
 ---
 
 ## Allowed tools
 
-- `Bash` — `git rebase`, `git status`, `git diff`, `git push`, `python tools/`
-- `Read`
-- `Grep`
+- `Bash`: read-only git (`git log`, `git diff`, `git show`, `git status`)
+- `Read`, `Grep`
 
-**Forbidden:** `git rebase --skip`; blanket `--theirs/--ours`; `git push --force`; direct ledger writes.
+**Forbidden:** `git rebase` of `if/main`; any push; direct ledger writes.
 
 ---
 
@@ -34,77 +48,12 @@ Environment variables:
 | Variable | Description |
 |---|---|
 | `CONFIG_PATH` | Path to `.if-fork/config.yaml` |
-| `UPSTREAM_SHA` | Specific upstream commit SHA to rebase onto (never a branch name) |
-| `CURRENT_BRANCH` | The branch currently being rebased |
-| `ESCALATION_ISSUE_PATH` | Write issue body here if escalating |
-| `RUN_URL` | URL of the current workflow run (for ledger event) |
+| `UPSTREAM_SHA` | Upstream commit being merged (never a branch name) |
+| `ESCALATION_ISSUE_PATH` | Write a report here if escalating |
 
 ---
 
 ## Output contract
 
-No stdout output. Actions taken:
-- On clean rebase: push with `--force-with-lease`; emit `autonomy_resumed` ledger event; exit 0.
-- On unresolvable conflicts: write `ESCALATION_ISSUE_PATH`; `git rebase --abort` has been called;
-  emit `rebase_failed` ledger event; exit 1.
-
-Escalation format (write to `ESCALATION_ISSUE_PATH`):
-```
-## Nightly Rebase Failed — Requires Human Review
-**Branch:** $CURRENT_BRANCH | **Upstream SHA:** $UPSTREAM_SHA
-**Reason:** <rebase_conflict | denylist_file | too_complex | verification_failed>
-**Conflicting files:** (list)
-**Suggested action:** Resolve manually, then `git rebase --continue` and push.
-```
-
----
-
-## Procedure
-
-**Step 1 — Load config.** Extract `config.file_denylist` and
-`config.conflict_resolution.max_conflict_lines`.
-
-**Step 2 — Verify preconditions:** clean working tree (`git status`); `UPSTREAM_SHA` is reachable.
-
-**Step 3 — Attempt rebase:**
-```bash
-git rebase "$UPSTREAM_SHA"
-```
-
-**Step 4 — If clean (exit 0):**
-- Verify no conflict markers: `grep -r "<<<<<<< " . --include="*.cs" -l`
-- Push: `git push origin "$CURRENT_BRANCH" --force-with-lease`
-- Emit success:
-```bash
-python tools/ledger-event.py \
-  --event autonomy_resumed \
-  --details "{\"reason\":\"rebase_clean\",\"upstream_sha\":\"$UPSTREAM_SHA\"}" \
-  --actor-run-url "$RUN_URL"
-```
-- Exit 0.
-
-**Step 5 — If conflicts:**
-- Capture conflicting files: `git diff --name-only --diff-filter=U > /tmp/conflict-files.txt`
-- Abort: `git rebase --abort`
-- If any conflicting file is in `file_denylist` OR total conflict lines > 80 → ESCALATE.
-- Otherwise: invoke `resolve-rebase-conflict.md` logic for resolution.
-- If resolved: push with `--force-with-lease`, emit success event, exit 0.
-- If unresolved → ESCALATE:
-```bash
-python tools/ledger-event.py \
-  --event rebase_failed \
-  --details "{\"reason\":\"...\",\"upstream_sha\":\"$UPSTREAM_SHA\"}" \
-  --actor-run-url "$RUN_URL"
-```
-Exit 1.
-
----
-
-## Hard-fail patterns
-
-- Never force-push to `if/main` or `if/release/*`.
-- Always use `--force-with-lease`, never `--force`.
-- If ANY conflicting file is in `file_denylist`: abort all resolution, escalate everything.
-- Rebase target is always `UPSTREAM_SHA` (specific commit), never a branch name.
-- Always `git rebase --abort` before exiting on any failure path.
-- Budget: 15 Claude turns max. On exhaustion: abort and escalate.
+No output of its own. Conflict resolution follows the contract in
+`resolve-rebase-conflict.md`.

@@ -1,8 +1,9 @@
 """
-Tests for .github/workflows/pr-discovery.yml and .if-fork/prompts/pr-discovery.md
+Tests for .github/workflows/pr-discovery.yml
 
 Validates YAML structure, job dependencies, permissions, autonomy-gate wiring,
-and the Haiku prompt file — without executing the workflow.
+the one-commit ledger write and the pr-discovered dispatch payload — without
+executing the workflow.
 If actionlint is available it is called as well; if not, the structural assertions
 below serve as the floor.
 """
@@ -19,7 +20,6 @@ import yaml
 REPO_ROOT = Path(__file__).parent.parent
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "pr-discovery.yml"
 AUTONOMY_CHECK_PATH = REPO_ROOT / ".github" / "workflows" / "autonomy-check.yml"
-PROMPT_PATH = REPO_ROOT / ".if-fork" / "prompts" / "pr-discovery.md"
 
 
 def _normalize_on_key(doc: dict) -> dict:
@@ -71,13 +71,12 @@ def test_has_workflow_dispatch_trigger(workflow):
 
 
 # ---------------------------------------------------------------------------
-# 3. Jobs: gate, discover, record — all present with correct needs
+# 3. Jobs: gate, discover
 # ---------------------------------------------------------------------------
 
-def test_has_all_three_jobs(workflow):
+def test_has_gate_and_discover_jobs(workflow):
     jobs = workflow.get("jobs", {})
-    for expected in ("gate", "discover", "record"):
-        assert expected in jobs, f"Missing job: {expected}"
+    assert set(jobs) == {"gate", "discover"}, f"Unexpected jobs: {sorted(jobs)}"
 
 
 def test_discover_needs_gate(workflow):
@@ -86,14 +85,6 @@ def test_discover_needs_gate(workflow):
     if isinstance(needs, str):
         needs = [needs]
     assert "gate" in needs, "discover job must declare 'needs: gate'"
-
-
-def test_record_needs_discover(workflow):
-    jobs = workflow.get("jobs", {})
-    needs = jobs["record"].get("needs", [])
-    if isinstance(needs, str):
-        needs = [needs]
-    assert "discover" in needs, "record job must declare 'needs: discover'"
 
 
 # ---------------------------------------------------------------------------
@@ -130,25 +121,41 @@ def test_discover_conditional_on_gate_proceed(workflow):
 
 
 # ---------------------------------------------------------------------------
-# 6. record job calls ledger-event.py
+# 6. discover job: deterministic tool, one ledger commit, dispatch payload
 # ---------------------------------------------------------------------------
 
-def test_record_calls_ledger_event(workflow):
-    record = workflow["jobs"]["record"]
-    steps = record.get("steps", [])
-    step_runs = " ".join(s.get("run", "") for s in steps)
-    assert "ledger-event.py" in step_runs, (
-        "record job must call tools/ledger-event.py"
+def _step_runs(workflow) -> str:
+    return "\n".join(s.get("run", "") for s in workflow["jobs"]["discover"]["steps"])
+
+
+def test_discover_uses_discover_prs_tool_not_a_model(workflow):
+    runs = _step_runs(workflow)
+    assert "tools/discover-prs.py" in runs
+    uses = [s.get("uses", "") for s in workflow["jobs"]["discover"]["steps"]]
+    assert not any("claude-code-action" in u for u in uses), (
+        "Discovery is deterministic; it must not call a model"
     )
 
 
-def test_record_emits_discovered_event(workflow):
-    record = workflow["jobs"]["record"]
-    steps = record.get("steps", [])
-    step_runs = " ".join(s.get("run", "") for s in steps)
-    assert "--event discovered" in step_runs, (
-        "record job must call ledger-event.py with --event discovered"
+def test_ledger_written_once_with_events_file(workflow):
+    runs = _step_runs(workflow)
+    assert runs.count("ledger-event.py") == 1, "Exactly one ledger-event.py call per run"
+    assert "--events-file" in runs, "All discovered events must go into one commit"
+
+
+def test_dispatch_payload_has_pr_number_and_head_sha(workflow):
+    runs = _step_runs(workflow)
+    assert '"pr-discovered"' in runs
+    assert "pr_number:" in runs and "head_sha:" in runs, (
+        "pr-discovered client_payload must carry pr_number and head_sha for pr-review.yml"
     )
+
+
+def test_dispatch_happens_after_ledger_push(workflow):
+    names = [s.get("name", "") for s in workflow["jobs"]["discover"]["steps"]]
+    record = next(i for i, n in enumerate(names) if n.startswith("Record discovered"))
+    dispatch = next(i for i, n in enumerate(names) if n.startswith("Dispatch reviews"))
+    assert record < dispatch
 
 
 # ---------------------------------------------------------------------------
@@ -214,50 +221,12 @@ def test_uses_tibdex_github_app_token(workflow):
 
 
 # ---------------------------------------------------------------------------
-# 10. Haiku prompt file exists and meets size/content requirements
+# 10. The retired Haiku discovery prompt stays retired
 # ---------------------------------------------------------------------------
 
-def test_prompt_file_exists():
-    assert PROMPT_PATH.exists(), f"Prompt file not found: {PROMPT_PATH}"
-
-
-def test_prompt_file_character_count():
-    content = PROMPT_PATH.read_text()
-    char_count = len(content)
-    assert 800 <= char_count <= 5000, (
-        f"Prompt file must be between 800 and 5000 characters; got {char_count}"
-    )
-
-
-def test_prompt_file_has_sections():
-    content = PROMPT_PATH.read_text()
-    # Count markdown section headers (## or ###)
-    sections = [line for line in content.splitlines() if line.startswith("##")]
-    assert len(sections) >= 3, (
-        "Prompt file must have at least 3 sections (## headings); "
-        f"found {len(sections)}: {sections}"
-    )
-
-
-def test_prompt_mentions_ledger_event():
-    content = PROMPT_PATH.read_text()
-    assert "ledger-event.py" in content, (
-        "Prompt must reference tools/ledger-event.py as the write path"
-    )
-
-
-def test_prompt_mentions_discovered_event():
-    content = PROMPT_PATH.read_text()
-    assert "discovered" in content, (
-        "Prompt must reference the 'discovered' ledger event type"
-    )
-
-
-def test_prompt_mentions_dotnet_wpf():
-    content = PROMPT_PATH.read_text()
-    assert "dotnet/wpf" in content, (
-        "Prompt must reference the upstream dotnet/wpf repository"
-    )
+def test_discovery_prompt_removed():
+    prompt = REPO_ROOT / ".if-fork" / "prompts" / "pr-discovery.md"
+    assert not prompt.exists(), "pr-discovery.md is unused since discovery has no model call"
 
 
 # ---------------------------------------------------------------------------
@@ -275,3 +244,15 @@ def test_actionlint_if_available():
     assert result.returncode == 0, (
         f"actionlint found issues:\n{result.stdout}\n{result.stderr}"
     )
+
+
+def test_lost_ingestion_handoffs_are_resent_after_ledger_push(workflow):
+    steps = workflow["jobs"]["discover"]["steps"]
+    names = [s.get("name", "") for s in steps]
+    record = next(i for i, n in enumerate(names) if n.startswith("Record discovered"))
+    resend = next(i for i, n in enumerate(names) if n.startswith("Re-send lost ingestion"))
+    assert record < resend
+    run = steps[resend]["run"]
+    assert '"pr-ingestion-requested"' in run
+    assert "pr_number:" in run and "head_sha:" in run
+    assert "--ingest-out" in _step_runs(workflow)

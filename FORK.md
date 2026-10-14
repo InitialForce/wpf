@@ -19,7 +19,7 @@ You add one `<PackageReference>`. MSBuild targets shipped in the package strip M
 `upstream/release/10.0` + **38 cherry-picked open community PRs** — mostly allocation reduction, boxing removal, `Hashtable`/`ArrayList` → generic collection swaps, dead-code cleanup, and a handful of correctness fixes (Indeterminate `ProgressBar` with `CacheMode`, `AdornerLayer` measuring, `ComboBoxAutomationPeer` cast, etc.). Full per-PR list with upstream links is in [Consumer-facing changes](#consumer-facing-changes) below.
 
 ### How safety works
-Every candidate PR is reviewed by two independent Claude Opus reviewers at different temperatures before it lands. Hard-fail patterns (`[DllImport`, `unsafe`, `BinaryFormatter`) auto-reject. Failed builds, failed smoke tests, or perf regressions block publish. A human approves every NuGet release. Full design is in [The autonomous pipeline](#pipeline).
+Every candidate PR is reviewed by two independent Claude Fable reviewers before it lands. Hard-fail patterns (`[DllImport`, `unsafe`, `BinaryFormatter`) auto-reject. A change reaches `if/main` only through a PR whose build and smoke gates passed. The perf gates exist but still measure placeholder benchmarks, not WPF (see [Pipeline status](#pipeline-status)). A NuGet version is published only after the same gates pass on the release tag, and only when `src/` changed. Full design is in [The autonomous pipeline](#pipeline).
 
 ### How to use it
 Replace all four WPF runtime DLLs:
@@ -46,8 +46,8 @@ Both packages are published to [nuget.org](https://www.nuget.org/packages?q=Init
 - **What it is.** A production fork of `dotnet/wpf` (`release/10.0`) maintained by [Initial Force AS](https://initialforce.com). Carries 38 cherry-picked open community PRs not yet in `release/10.0`, shipped as NuGet replacements for WPF's four core runtime DLLs.
 - **Why it exists.** Community contributors (notably **h3xds1nz**) merge perf and correctness fixes into `dotnet/wpf` `main` that don't all get backported to `release/10.0`. This fork lets us consume those improvements early, under a safety gate, as production NuGets.
 - **What you get today.** Real allocation reductions (`Hashtable` → `Dictionary`/`HashSet`, boxing removal in `DataBindEngine`, `Grid.Measure`, `UncommonField<bool>`, `AutomationPeer`), bug fixes (Indeterminate `ProgressBar` with `CacheMode`, `AdornerLayer` measuring, `ComboBoxAutomationPeer` `InvalidCastException`), and dead-code removal across `PresentationCore` / `PresentationFramework` / `WindowsBase` / `System.Xaml`. Full list: [Consumer-facing changes](#consumer-facing-changes).
-- **How autonomous review works.** Every candidate upstream PR is evaluated independently by two Claude Opus reviewers at different temperatures. Disagreements escalate to a human; unanimous approval triggers cherry-pick, build, smoke, and perf gating before the patch lands.
-- **Current operational status.** Phase 0 bootstrap complete. CI pipeline live, real WPF DLLs build under arcade, NuGet packages publish to `nuget.org` under the `InitialForce.*` reserved prefix. The initial 38-PR batch was applied by a human-supervised bulk cherry-pick (the autonomous review pipeline remains in default-deny mode until per-PR reviewer beads drain).
+- **How autonomous review works.** Every candidate upstream PR is evaluated independently by two Claude Fable reviewers. Disagreements escalate to a human; unanimous approval triggers cherry-pick, build, smoke, and perf gating before the patch lands.
+- **Current operational status.** See [Pipeline status](#pipeline-status). The pipeline was repaired in October 2026 after it had stalled since 2026-04-29; the repaired chain has not yet run end to end on GitHub.
 
 ---
 
@@ -168,7 +168,7 @@ The fork adds 159 files across the following categories. No file in this list mo
 | **GitHub Workflows** | 11 | `build.yml`, `nightly-rebase.yml`, `pr-discovery.yml`, `pr-review.yml`, `pr-ingestion.yml`, `release.yml`, `upstream-stable-adoption.yml`, `weekly-differential.yml`, `autonomy-check.yml`, `claude-on-failure.yml`, `test-autonomy-check.yml` |
 | **GitHub meta** | 5 | `.github/CODEOWNERS`, 4 issue templates (`cherry-pick-failure`, `perf-regression`, `review-disagreement`, `operator-followup`) |
 | **Fork config** | 14 | `.if-fork/config.yaml` (canonical policy), `.if-fork/patch-ledger.jsonl`, `.if-fork/patch-state.json`, `.if-fork/prompts/` (10 Claude prompt files) |
-| **Python tools** | 19 | `tools/ledger-event.py`, `tools/ledger-validate.py`, `tools/merge-verdicts.py`, `tools/check-regression.py`, `tools/check-denylist.py`, `tools/dispatch-approved.py`, `tools/compute-version.ps1`, and 12 others |
+| **Python tools** | 19 | `tools/ledger-event.py`, `tools/ledger-validate.py`, `tools/merge-verdicts.py`, `tools/check-regression.py`, `tools/check-denylist.py`, `tools/dispatch-approved.py`, `tools/release-version.py`, and 12 others |
 | **Python tests** | 55 | `tests/` — pytest suite; 646 tests covering all `tools/` scripts and workflow contracts, plus fixture data |
 | **Smoke + perf harness** | 26 | `test/InitialForce.WpfSmoke/` — 22-scenario NUnit harness + BenchmarkDotNet perf suite + helpers |
 | **Hello-world app** | 7 | `test/InitialForce.WpfHelloWorld/` — minimal WPF app used as build and smoke sanity target |
@@ -180,104 +180,176 @@ The fork adds 159 files across the following categories. No file in this list mo
 
 ## The autonomous pipeline {#pipeline}
 
-The fork's central capability is a fully autonomous pipeline that discovers candidate community PRs from `dotnet/wpf`, subjects each to a dual-reviewer Claude gate, cherry-picks approved patches onto a staging branch, and builds + smoke-tests them before any code reaches `if/main`. Human intervention is required only for escalations, merge freezes, and NuGet publish approvals.
+The pipeline runs without a person in the loop. Each day it finds new community PRs in `dotnet/wpf`, has two Claude Fable reviewers check each one, cherry-picks the approved ones onto `if/main`, and merges upstream `release/10.0` into the fork. Each change reaches `if/main` through a PR that merges itself once the `Build` workflow passes on it. A new NuGet version goes to nuget.org once a day, only after every gate passes, and only when `src/` changed since the last release.
+
+A person is needed only when something escalates: two reviewers disagree, a conflict touches a denylisted file or is too large for Claude, or a workflow keeps failing. Each of those leaves exactly one open issue labelled `automated`. A person also merges every PR that `automerge.yml` refuses: a PR where Claude resolved a conflict (label `needs-human-merge`), and a PR that changes fork-owned files or, for a cherry-pick, anything outside `src/` and `eng/`. `automerge.yml` explains the refusal in a comment on the PR.
+
+### Branches
+
+| Branch | What it is | Who writes it |
+|---|---|---|
+| `if/main` | The fork: upstream `release/10.0` plus the fork's patches. Default branch. Releases are tagged from here. | PR merges by `automerge.yml` or a person; ledger commits by the bot |
+| `if/staging` | The upstream sync candidate: `if/main` with the newest upstream `release/10.0` merged in. Rebuilt from `if/main` whenever upstream moves. | `nightly-rebase.yml` only |
+| `claude/cherry-pick-pr-<N>` | One approved upstream PR applied on top of `if/main`. | `pr-ingestion.yml` |
+| `if/mirror/release/10.0` | The newest upstream stable tag (`v10.0.<N>`) that the fork has adopted. | `upstream-stable-adoption.yml` |
+| `if/release/10.0` | The old release branch from before October 2026. No workflow uses it now; whether to delete it is the owner's decision. | nobody |
+
+`if/main` is never rebased. It has merge commits and its ruleset forbids force pushes, so upstream is merged in.
 
 ### Global safety knobs
 
-Three GitHub repository variables control autonomous behaviour. Default safe state has `IF_AUTONOMY_ENABLED=false` and `IF_AUTOMERGE_FROZEN=true`.
+Three repository variables control autonomous behaviour.
 
 | Variable | Effect |
 |---|---|
-| `IF_AUTONOMY_ENABLED` | Must be `"true"` for any Claude-driven job to run; otherwise all autonomous jobs skip globally (default-deny) |
-| `IF_AUTOMERGE_FROZEN` | When `"true"`, blocks auto-merge of cherry-pick PRs — a human must merge manually |
-| `IF_REVIEW_DOUBLE_REQUIRED` | Setting to `"false"` activates an emergency single-reviewer path, which requires a manual environment approval and always emits a `review_single_path_warning` ledger event |
+| `IF_AUTONOMY_ENABLED` | Must be `"true"` for any Claude job, discovery, ingestion, upstream sync or release to run. Otherwise they skip. |
+| `IF_AUTOMERGE_FROZEN` | When `"true"`, `automerge.yml` does not merge. PRs stay open with a green build until a person merges them or the freeze is lifted. |
+| `IF_REVIEW_DOUBLE_REQUIRED` | Setting to `"false"` activates an emergency single-reviewer path, which needs a manual environment approval and records a `review_single_path_warning` ledger event. |
 
-Additional safety layers: denylist for supply-chain and high-risk paths (`file_denylist` in `config.yaml`), hard-fail patterns that auto-reject any PR containing `[DllImport`, `unsafe`, `BinaryFormatter`, etc., SHA-smuggling prevention (ledger SHA vs dispatch payload), append-only GPG-signed hash-chained ledger, CODEOWNERS enforcement on policy and release paths, and a mandatory human approval gate at NuGet publish time.
+Other safety layers: `file_denylist` and `commit_denylist` in `config.yaml`, hard-fail patterns that reject any PR containing `[DllImport`, `unsafe`, `BinaryFormatter` and similar, the check that the applied upstream head equals the reviewed head (SHA-smuggling check), and the append-only, GPG-signed, hash-chained ledger.
 
-### Stage-by-stage summary
+### Daily schedule (UTC)
 
-**1. Discovery** (`pr-discovery.yml`, daily 04:17 UTC). A Claude Haiku agent (read-only tools, max 8 turns) scans `dotnet/wpf` for new community PRs, applies tier predicates (S/A/B) from `config.yaml`, and fires a `pr-discovered` dispatch for any new candidates. Denylist and hard-fail checks happen here first.
+| Time | Workflow | What it does |
+|---|---|---|
+| 02:41 | `upstream-release-poll.yml` | Looks for a new `dotnet/wpf` `v10.0.<N>` tag. If `if/mirror/release/10.0` does not contain it, sends `upstream-stable-released`. |
+| 03:07 | `nightly-rebase.yml` | Merges upstream `release/10.0` into `if/staging` and keeps one sync PR to `if/main` open. |
+| 04:17 | `pr-discovery.yml` | Finds new community PRs and dispatches up to 10 reviews. |
+| 09:23 | `auto-release.yml` | Tags the newest `if/main` commit whose build passed, if `src/` changed since the last release. The tag starts `release.yml`. |
+| Every 30 minutes | `automerge.yml` | Goes through every open pipeline PR and merges the ones that pass (it also runs when a `Build` finishes). |
+| Mondays 05:23 | `weekly-differential.yml` | Compares smoke results of the fork against its upstream base. |
 
-**2. Dual review** (`pr-review.yml`). Two Claude Opus reviewers run independently (max 12 turns each) — `review-1` at temperature 0.0 (diff only), `review-2` at temperature 0.7 (diff + source context). `tools/merge-verdicts.py` collapses their JSON outputs: both approve → `approved`; either rejects → `rejected`; disagreement or hard-fail → `escalated` (GitHub issue filed, human decides).
+### Stage by stage
 
-**3. Ingestion** (`pr-ingestion.yml`). Eight sequential jobs: autonomy gate → pre-flight check (already absorbed?) → SHA-smuggling check → Claude Sonnet cherry-pick (max 15 turns, with conflict-resolution retry) → denylist re-check on actual diff → build-and-test → perf gate → open PR to `if/staging`.
+**1. Discovery** (`pr-discovery.yml`, 04:17 UTC). `tools/discover-prs.py` lists upstream open PRs and PRs merged in the last 90 days, keeps community PRs (allowlisted author or "Community Contribution" label), and compares them with the ledger. A `(pr_number, head_sha)` pair is recorded once; a new head SHA is a new candidate. Applied, graduated and rejected PRs are skipped. All new events go into one `[skip ci]` ledger commit. It then dispatches `pr-discovered` with `pr_number` and `head_sha` for at most `discovery.max_reviews_per_run` (10) PRs a day, so the backlog of about 218 PRs takes about 22 days to drain. `dotnet-maestro` and `dotnet-bot` are excluded. No model call. `.if-fork/patch-state.json` is stale and nothing reads it.
 
-**4. Build** (`build.yml`). Five job groups on both `x64` and `arm64` Windows runners: Python lint (ruff + mypy --strict + pytest), YAML lint (actionlint), WPF build, 22-scenario NUnit smoke harness, and BenchmarkDotNet perf suite. An `aggregate` job diffs smoke results and fails the run if any required job did not succeed.
+**2. Dual review** (`pr-review.yml`). A `prepare` job fetches the PR at the pinned head and writes one `review-input/` artifact: the diff, the file list, `meta.json` and the full changed files. Two Claude Fable reviewers (`claude-fable-5-1` from `claude_models.review_1` and `review_2`, up to 40 turns each) review it independently, as separate jobs with different prompts (`pr-review-1.md`, `pr-review-2.md`). No temperature is set. Each reviewer job has a read-only token and no App token, checks out only `.if-fork/config.yaml` and `.if-fork/prompts/`, loads only trusted Claude settings, may read only `review-input/` and the config, and may write only its own verdict file. Bash, Edit, Glob, Grep, web tools and reads of `/proc` and the runner's `_temp` folder are denied.
+- `tools/merge-verdicts.py` combines them: both approve gives `approved`, both reject gives `rejected`, anything else gives `escalated` and one `review-disagreement` issue. The hard-fail patterns, `file_denylist` and the tier confidence floor are applied to the pinned diff before approval.
+- Each verdict counts only when its reviewer ID, file hash and upload outcome match its own job. Otherwise it is treated as missing and listed under `origin_errors`, and the run fails after recording.
+- A missing verdict, or a failed `prepare` (`review_error` with cause `prepare_failed`), is retried up to 3 times and then escalated.
+- The review events are pushed in one ledger commit before `tools/dispatch-approved.py` sends `pr-ingestion-requested` with `pr_number` and `head_sha`.
 
-**5. Perf gate** (`tools/check-regression.py`). Per-scenario delta versus baseline: ≤5% pass, 5–15% warning, >15% fail (exits non-zero and opens a `perf-regression` issue). Fails closed on zero-baseline or empty comparison.
+**3. Ingestion** (`pr-ingestion.yml`).
+- `tools/cherry-pick-pre-flight.sh` diffs the whole upstream PR and checks whether the fork already has it. Fully present: `graduated_upstream`, stop. Partly present: `escalated`, stop.
+- Every job first checks that `pr_number` is digits and `head_sha` is 40 hex characters. Payload values reach shell only through env.
+- The approval check (`tools/check-approval.py`) requires an `approved` outcome in the ledger for the exact `(pr_number, head_sha)`, with no later `rejected` or `escalated` event for that pair.
+- The cherry-pick job (`tools/apply-upstream-pr.sh`, no model) checks that the upstream PR head still equals the reviewed SHA and that nothing is on `commit_denylist`. It then applies the change on `claude/cherry-pick-pr-<N>` from `if/main`: a merged PR as its upstream merge commit (`git cherry-pick -x`), an open PR as one commit of its net diff.
+- The cherry-pick job records the `if/main` commit it started from. The conflict and `finalize` jobs work on exactly that commit, so a change that lands on `if/main` meanwhile cannot be overwritten.
+- Conflicts on denylisted files escalate. Other conflicts go to Claude Sonnet (`cherry-pick.md`, 30 turns) in a separate job with no credentials, no shell and only the action's own settings. A trusted `finalize` job takes only the conflicted files back (see "Where Claude runs" in the [runbook](docs/operator-runbook.md)). Nobody reviews what Claude wrote, so the commit gets the trailer `Conflict-Resolved-By: claude`, the PR gets the label `needs-human-merge`, and a person merges it.
+- Before any push, `if/main`'s own `check-denylist.py` and `config.yaml` (from a separate checkout, never the branch's copies) check the whole branch diff against `file_denylist`. That list also holds every fork-owned path (`.github/`, `.if-fork/`, `tools/`, `tests/`, `test/`, `docs/`, `perf/`, `packaging/InitialForce.*` and others) and agent configuration files (`.claude/`, `.mcp.json`, `CLAUDE.md`, `AGENTS.md`). The job then signs, pushes, opens (or reuses) one PR to `if/main`, labelled `automated`, and records `cherry_picked`.
 
-**6. Release** (`release.yml`). GPG tag verification + ancestor check → `dotnet pack` both NuGet packages → smoke/perf on the packed `.nupkg` → Claude Sonnet release notes from ledger diff → human approval at `wpf-nuget-publish` environment → publish to GitHub Packages → `published` ledger event.
+**4. Build** (`build.yml`). Runs on every PR to `if/main` and on pushes to `if/main` that change more than `.if-fork/`, `docs/` or Markdown. Jobs: Python lint and tests, actionlint, the WPF build for x64 and arm64, crossgen, pack, the smoke harness against the packed `.nupkg`, a `perf` job, and an `aggregate` job that fails the run if any gate failed. The `perf` job is a placeholder: no benchmark runs and nothing is measured. `build.yml` never publishes.
 
-**7. Nightly rebase** (`nightly-rebase.yml`, 03:07 UTC). Fetches `upstream/release/10.0` HEAD, rebases `if/staging`, invokes Claude Sonnet (up to 3 retry attempts) on conflicts, opens a PR to `if/main` for human merge.
+**5. Auto-merge** (`automerge.yml`). Runs when `Build` completes for a pipeline PR, every 30 minutes, and by hand. Every run goes through all open pipeline PRs (`tools/automerge-run.sh`), one run at a time, so a run that GitHub drops from the queue loses nothing. A PR is merged with a merge commit when the newest `Build` on its head passed and all of these hold:
+- The PR is from this repository, targets `if/main`, comes from `if/staging` or `claude/cherry-pick-pr-<N>`, carries the `automated` label and was opened by this App's bot login.
+- `tools/automerge-verify.sh`, run from `if/main`'s own checkout, passes:
+  - Every commit is the bot's (signed with the key in `docs/bot-gpg-pubkey.asc`), or upstream's in the sync PR.
+  - A cherry-pick PR is one commit whose `Upstream-PR-Head` is approved in the ledger, and it changes only files under `src/` and `eng/`.
+  - No file is on `file_denylist`, and no fork-owned file (`.github/`, `.if-fork/`, `tools/`, `tests/`, `test/`, `docs/`, `perf/`, `packaging/InitialForce.*`, agent configuration) changes. For the sync PR this includes changes upstream itself brings.
+  - Claude resolved no conflict: no `Conflict-Resolved-By` trailer, and for the sync PR no file differs from git's own merge.
+  - The PR contains the current `if/main` tip (ledger-only commits aside).
+- `if/main` has not moved between that check and the merge call. GitHub has no merge call that checks the base commit, so a push in the moment between the last fetch and the merge is not caught.
 
-**8. Graduation** (`upstream-stable-adoption.yml`). When `dotnet/wpf` publishes a new stable tag, fast-forwards `if/mirror/release/10.0` and re-triggers the nightly rebase. Cherry-picked patches that are now included in the new upstream tag are automatically detected as `skip` on next ingestion.
+When `if/main` has moved on, it asks `pr-ingestion` or `nightly-rebase` to rebuild the branch instead of merging, once per PR head. A refusal is explained in one comment per PR head; a person merges those PRs. `IF_AUTOMERGE_FROZEN=true` blocks the merge. A PR that only changes `docs/**` or Markdown gets no Build run, so it needs a manual merge. On a failed build it comments on the PR once per head commit; the next passing build merges it. This replaces GitHub auto-merge, which merges at once when a branch has no required checks.
+
+**6. Upstream sync** (`nightly-rebase.yml`). If upstream `release/10.0` is already in `if/main` the job does nothing. If it is already in the open sync PR, the job does nothing either, unless `if/main` has moved on (beyond ledger commits) and the PR holds no Claude resolution: then it rebuilds `if/staging`. If that upstream SHA is already reported blocked (open issue or `rebase_failed` ledger event), it does nothing until upstream moves or someone runs it with `force_rebase`. Otherwise it resets `if/staging` to the `if/main` commit it recorded at the start and runs `git merge --no-ff` of the upstream SHA. The conflict and `finalize` jobs use that same commit.
+- Where upstream edits a file the fork deleted under `.github/`, the deletion is kept. Conflicts on denylisted files escalate. Other conflicts go to Claude Sonnet (`resolve-rebase-conflict.md`, 40 turns) in a separate job with no credentials and no shell. A trusted `finalize` job repeats the merge, takes only the conflicted files back, checks them with `if/main`'s tools, and signs the merge commit with the trailer `Conflict-Resolved-By: claude`. That sync PR gets the label `needs-human-merge`, and a person merges it.
+- The merge may only touch files upstream changed. The job force-pushes `if/staging` and opens or updates the single PR `if/staging -> if/main`, labelled `automated`. That PR then goes through Build and auto-merge like any other.
+- A blocked sync keeps one open issue, "Nightly upstream sync blocked", and records one `rebase_failed` ledger event per upstream SHA. The next successful sync closes the issue.
+
+**7. Upstream stable adoption** (`upstream-release-poll.yml`, `upstream-stable-adoption.yml`). The poller ignores SDK-band tags such as `v10.0.104`, which point at old commits. It skips a tag while an adoption run for it is in flight, and gives up on a tag after three failed runs. Adoption fast-forwards `if/mirror/release/10.0` to the tag and dispatches `nightly-rebase` with `force`, so the sync PR is rebuilt at once. Cherry-picked patches that upstream now contains are found by the ingestion pre-flight check.
+
+**8. Release** (`auto-release.yml`, `release.yml`). `auto-release.yml` creates at most one bot-signed tag a day, for the newest `if/main` commit with a passing build. It skips when that commit is already tagged, or when `src/` is unchanged since the last published release. Before it plans a new tag, it looks at the newest release tag: if that tag is at most 7 days old, has no GitHub Release, and no Release run for it succeeded or is still running, it dispatches `release.yml` for that tag again, up to 3 Release runs per tag, and makes no new tag that day. `release.yml` runs only from `if/main`. `tools/verify-release-tag.sh` checks the tag name, its signature against `docs/bot-gpg-pubkey.asc` from `if/main` (exactly one key, whose fingerprint must equal the `GH_BOT_GPG_FINGERPRINT` secret), and that the commit is on `if/main`. No repository variable is needed for this. The release-notes agent gets the commit list in its prompt and has no tools; if it fails, the GitHub Release uses generated notes. It then runs the same `build.yml` gates on the tagged commit with the tag's version (for example `if-10.0.8-perf.20261008` becomes `10.0.8-if.20261008.1`), runs the perf gate on the pack (placeholder benchmarks, see [Pipeline status](#pipeline-status)), and publishes `InitialForce.WPF` and `InitialForce.WPF.RuntimeOverride` to nuget.org, GitHub Packages and a GitHub Release. Tags must be signed by the bot key and reachable from `if/main`. It records `published` in the ledger. No `.snupkg` is produced, because nuget.org rejects the Windows PDBs the WPF build makes. The PDBs ship inside the `.nupkg`.
+
+**9. Failure reporting** (`claude-on-failure.yml`). When a watched workflow fails on a non-PR run and no issue is open for it, Claude Sonnet writes a short analysis. It reads only the log, a list of recent commits and the config, has no shell, and writes one file. The workflow then opens one issue, "CI failure: <workflow>", and records `failure_analyzed`. Later failures add a comment to that issue. The next successful run closes it.
+
+**10. Weekly differential** (`weekly-differential.yml`). Builds two trees with the fork's tooling: `if/main`, and `if/main` with `src/` replaced by its upstream base. It runs the smoke harness on both and compares them with `tools/diff-smoke-results.py`. A drift or regression keeps one open issue; a clean week closes it.
 
 ### End-to-end flow
 
 ```mermaid
 flowchart TD
-    A([PR discovered\nHaiku @ 04:17 UTC]) -->|repository_dispatch: pr-discovered| B
+    D([pr-discovery 04:17]) -->|pr-discovered: pr_number, head_sha| R
 
-    subgraph Review["Review — pr-review.yml"]
-        B[gate: autonomy-check] --> C[review-1\nOpus temp=0.0]
-        B --> D[review-2\nOpus temp=0.7]
-        C --> E[merge-verdicts.py]
-        D --> E
+    subgraph Review["pr-review.yml"]
+        R[2x Fable review] --> MV[merge-verdicts.py]
     end
 
-    E -->|approved| F
-    E -->|rejected| Z1([Ledger: rejected\nNo further action])
-    E -->|escalated| Z2([Issue: review-disagreement\nHuman decides])
+    MV -->|approved| I
+    MV -->|rejected| Z1([ledger: rejected])
+    MV -->|escalated| Z2([issue: review-disagreement])
 
-    subgraph Ingest["Ingestion — pr-ingestion.yml"]
-        F[gate: autonomy-check] --> G[pre-flight\ncherry-pick-pre-flight.sh]
-        G -->|apply| H[SHA-smuggling check\nledger vs payload]
-        G -->|skip| Z3([Already graduated\nNo-op])
-        H --> I[cherry-pick\nSonnet max 15 turns]
-        I --> J[denylist-check\ncheck-denylist.py]
-        J --> K[build-and-test\ntriggers build.yml]
-        K --> L[perf-gate\ncheck-regression.py]
-        L --> M[open-pr to if/staging\nauto-merge if not frozen]
+    subgraph Ingest["pr-ingestion.yml"]
+        I[pre-flight + SHA check] --> CP[cherry-pick onto if/main\nClaude only for conflicts]
+        CP --> DL[file denylist]
+        DL --> PR1[PR claude/cherry-pick-pr-N -> if/main]
     end
 
-    M -->|if/release/10.0 tag pushed| T
+    N([nightly-rebase 03:07]) --> S[merge upstream release/10.0\ninto if/staging]
+    S --> PR2[PR if/staging -> if/main]
+    P([release poller 02:41]) -->|upstream-stable-released| A[adopt tag:\nFF if/mirror/release/10.0]
+    A -->|nightly-rebase dispatch| N
 
-    subgraph Release["release.yml"]
-        T[gate: autonomy-check] --> U[verify-tag\nGPG + reachability]
-        U --> V[dotnet pack\nboth nupkgs]
-        V --> W[smoke-on-pack\nperf-on-pack]
-        V --> X[release-notes\nSonnet from ledger diff]
-        W & X --> Y[publish\nHUMAN GATE]
-        Y --> Y2[record ledger: published]
-    end
+    PR1 --> B[Build on PR]
+    PR2 --> B
+    B -->|passed| M[automerge.yml\nmerge commit]
+    B -->|failed| C([comment on PR])
+    M -->|checks pass| MAIN[(if/main)]
+    M -->|Claude resolved a conflict,\nor fork-owned files| H([person merges\nneeds-human-merge])
+    H --> MAIN
 
-    AA([upstream tag released]) -->|repository_dispatch: upstream-stable-released| BB
-
-    subgraph Graduation["upstream-stable-adoption.yml"]
-        BB[gate: autonomy-check] --> CC[verify-tag\nancestor check]
-        CC --> DD[promote-mirror\nFF if/mirror/release/10.0]
-        DD --> EE[trigger nightly-rebase\nreplay cherry-picks]
-        EE --> FF[notify operator]
-    end
-
-    EE -.->|replays| A
+    MAIN --> AR([auto-release 09:23\nif src/ changed])
+    AR -->|signed tag| REL[release.yml\nsame gates + publish to nuget.org]
 ```
-
-**Build status.** The `build-wpf` job runs the real arcade build (`build.cmd -c Release -plat <arch> -pack`), produces the four patched WPF runtime DLLs, stages them into both `InitialForce.WPF` and `InitialForce.WPF.RuntimeOverride` packaging trees, runs `dotnet pack` against both, and (on release builds) publishes the resulting `.nupkg` files to [nuget.org](https://www.nuget.org/packages?q=InitialForce.WPF) under the reserved `InitialForce.*` prefix. Smoke and perf harnesses execute against the packed DLLs.
 
 ### Ledger and audit trail
 
-Every pipeline action that changes patch state calls `tools/ledger-event.py`, which constructs a JSONL entry containing the event type, PR number, actor, timestamp, and a `prev_hash` of the previous entry. The entry is appended and committed with a GPG signature. Any retroactive modification of a ledger entry invalidates all subsequent hashes. `tools/ledger-validate.py` verifies the full chain on every `build.yml` run.
+Every pipeline action that changes patch state calls `tools/ledger-event.py`. It appends a JSONL entry with the event type, PR number, head SHA, actor, timestamp and the hash of the previous entry, and commits it with the bot's GPG signature. Batch mode (`--events-file`) writes all events of one run in one commit. Ledger commits carry `[skip ci]` and do not start a build. Changing an old entry breaks every later hash; `tools/ledger-validate.py` checks the chain on every build.
 
-Valid event types: `discovered`, `review_1`, `review_2`, `merged_verdict`, `cherry_picked`, `graduated`, `rejected`, `escalated`, `published`, `rebase_failed`, `pre_flight_failed`, `review_single_path_warning`, `autonomy_paused`, `autonomy_resumed`, `failure_analyzed`.
+Valid event types are listed in `tools/ledger_schema.py`.
 
 ---
 
+## Pipeline status {#pipeline-status}
+
+_As of 2026-10-09._
+
+From 2026-04-29 to 2026-10-07 the pipeline ran every day but moved nothing. Discovery re-recorded known PRs (469 ledger commits in 30 days), no review ran, the nightly job failed every night, and `build.yml` published a NuGet version on every push to `if/main` (24 public versions).
+
+The October 2026 repair (branch `fix/autonomy-pipeline`) changed each stage as described in [The autonomous pipeline](#pipeline). It is checked by the test suite, `ruff` and `actionlint`. It has not yet run on GitHub. The first runs to watch are the nightly sync PR, the first ingestion PR merging itself, and the first `auto-release.yml` tag.
+
+Known gaps:
+
+- **The perf gates measure nothing yet.** The `perf` job in `build.yml` runs no benchmark. The release perf gate runs `test/InitialForce.WpfSmoke/Perf/PerfHarness.cs`, whose benchmarks are placeholder loops, against `perf/baseline.json`, which holds seed numbers that were never measured. A WPF performance regression is not caught by either gate.
+- **Secrets are repository secrets.** All seven (`ANTHROPIC_API_KEY`, `GH_APP_ID`, `GH_APP_PRIVATE_KEY`, `GH_BOT_GPG_FINGERPRINT`, `GH_BOT_GPG_KEY`, `GH_BOT_GPG_KEY_ID`, `NUGET_ORG_API_KEY`) are set on the repository, not on an environment. The `environment:` lines in the workflows do not limit them today: any workflow on any branch of this repository can read every secret. The owner will move them into environments limited to `if/main`:
+
+  | Environment | Secrets | Branch policy |
+  |---|---|---|
+  | `wpf-nuget-publish` | `NUGET_ORG_API_KEY` | `if/main` only |
+  | `bot-credentials` | `GH_APP_ID`, `GH_APP_PRIVATE_KEY`, `GH_BOT_GPG_FINGERPRINT`, `GH_BOT_GPG_KEY`, `GH_BOT_GPG_KEY_ID` | `if/main` only |
+  | `claude` | `ANTHROPIC_API_KEY` | `if/main` only |
+
+  Before that move, every job that uses one of these secrets must name the environment, or it gets an empty value. Today `automerge.yml` (merge), `auto-release.yml` (tag), `upstream-stable-adoption.yml` and every Claude job have no `environment:` line.
+- **Pull requests where Claude resolved a conflict need a person.** See stages 3, 5 and 6.
+- **Claude steps may refuse to start when a bot started the run.** `anthropics/claude-code-action` checks that the run's actor is a person unless the actor is listed in its `allowed_bots` input. Reviews dispatched by discovery, ingestion runs dispatched by the bot App, and failure analysis of runs the bot started are such runs. Until this is set, automatic reviews fail. No workflow sets `allowed_bots` yet; the owner decides which App login to list.
+
+Repository settings the pipeline needs:
+
+| Setting | Value |
+|---|---|
+| Labels `automated`, `needs-human-merge` | `automated` exists; every pipeline PR and issue carries it. The pipeline creates `needs-human-merge` the first time it needs it. |
+| Issues | Enabled |
+| `IF_AUTONOMY_ENABLED` | `true` |
+| `IF_AUTOMERGE_FROZEN` | `false` once the chain is proven; `true` keeps PRs open for a person to merge. It is `true` today. |
+| Environment `wpf-nuget-publish` | No required reviewers, so a release publishes without a person. Today it still requires `oysteinkrog`, so every release waits for approval. |
+| Environment `branch-promotion` | Requires a reviewer. Used only by the emergency single-reviewer path in `pr-review.yml` (`IF_REVIEW_DOUBLE_REQUIRED=false`), where that approval is the point. |
+| Bot GitHub App | Bypasses the `if/main` ruleset. Needs `contents`, `pull-requests` and `issues` write (not verified against the App's current settings). Needs `workflows` write only if upstream ever changes a workflow file (pushing `if/mirror/release/10.0` would carry it). |
+
 ## Current state of the patch ledger {#patch-ledger}
 
-**As of 2026-04-29, zero patches have been processed through the automated 2× review gate.** The ledger contains 223 entries, all in the `discovered` state — candidates queued for review.
+**The counts in this section are from 2026-04-29**, when zero patches had been processed through the automated 2× review gate. The ledger then held 223 entries, all in the `discovered` state. They have not been recounted since.
 
-The 38 PRs already on `if/main` (see [Consumer-facing changes](#consumer-facing-changes)) were applied via a human-supervised bulk cherry-pick, **not** the autonomous pipeline. The pipeline is wired end-to-end and used in dry-run on every PR review, but the global `IF_AUTONOMY_ENABLED` switch remains `false` until per-PR review beads drain through the operator triage queue and at least one full nightly cycle runs green.
+The 38 PRs already on `if/main` (see [Consumer-facing changes](#consumer-facing-changes)) were applied via a human-supervised bulk cherry-pick, **not** the autonomous pipeline.
 
 ### Event-type summary
 
@@ -345,25 +417,7 @@ The fork is not affiliated with or endorsed by Microsoft or the .NET Foundation.
 
 ## Phase-0 operator gates {#operator-gates}
 
-The following actions require human (operator) intervention before the autonomous pipeline can run. See [`docs/BOOTSTRAP_STATUS.md`](docs/BOOTSTRAP_STATUS.md) for full details and the hand-off recipe.
-
-| Bead | Type | Action required |
-|---|---|---|
-| wpf-3sm | GitHub admin | Create `InitialForce/wpf` repo; push staging tree as initial commit |
-| wpf-13l | GitHub admin | Create `initial-force-wpf-bot` GitHub App and install on the repo |
-| wpf-238 | GitHub admin | Branch protection on `if/main`, `if/release/*`, `claude/*` |
-| wpf-2lc | GitHub admin | Create environments `bot-credentials`, `wpf-nuget-publish`, `branch-promotion` with reviewer gates |
-| wpf-ts4 | GitHub admin | Set repo variables to safe starting state: `IF_AUTONOMY_ENABLED=false`, `IF_AUTOMERGE_FROZEN=true`, `IF_REVIEW_DOUBLE_REQUIRED=true` |
-| wpf-3ar | GitHub admin | Create `if/release/10.0` from upstream `v10.0.X` tag |
-| wpf-1gn | nuget.org | Reserve `InitialForce.*` package prefix |
-| wpf-1pt | Windows CI | Confirm first clean upstream `release/10.0` build green on `windows-latest` |
-| wpf-2hh | Operational | Bulk-process 223 candidates through 2× Opus review (~446 Claude invocations) |
-| wpf-j79 | Operator | Triage all `review-disagreement` issues to zero |
-| wpf-3vk | Operational | Auto-apply approved patches via `pr-ingestion.yml` |
-| wpf-2xo | Operator | First `release.yml` run + manual approve at `wpf-nuget-publish` |
-| wpf-1o9 | Manual QA | Manual UI smoke against patched DLLs |
-| wpf-29a | Manual QA | Validate operator runbook end-to-end |
-| wpf-2wi | Operational | Enable cron triggers for autonomous weekly cadence |
+The Phase-0 bootstrap is done. The settings the running pipeline depends on are listed under [Pipeline status](#pipeline-status). The original hand-off list is in [`docs/BOOTSTRAP_STATUS.md`](docs/BOOTSTRAP_STATUS.md).
 
 ---
 
@@ -381,5 +435,8 @@ The following actions require human (operator) intervention before the autonomou
 | Decision log | [`docs/DECISION_LOG.md`](docs/DECISION_LOG.md) |
 | PR discovery workflow | [`.github/workflows/pr-discovery.yml`](.github/workflows/pr-discovery.yml) |
 | PR review workflow | [`.github/workflows/pr-review.yml`](.github/workflows/pr-review.yml) |
+| PR ingestion workflow | [`.github/workflows/pr-ingestion.yml`](.github/workflows/pr-ingestion.yml) |
+| Upstream sync workflow | [`.github/workflows/nightly-rebase.yml`](.github/workflows/nightly-rebase.yml) |
+| Auto-merge workflow | [`.github/workflows/automerge.yml`](.github/workflows/automerge.yml) |
 | Build workflow | [`.github/workflows/build.yml`](.github/workflows/build.yml) |
-| Release workflow | [`.github/workflows/release.yml`](.github/workflows/release.yml) |
+| Release workflows | [`.github/workflows/auto-release.yml`](.github/workflows/auto-release.yml), [`.github/workflows/release.yml`](.github/workflows/release.yml) |

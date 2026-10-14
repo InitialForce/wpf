@@ -17,6 +17,7 @@
     "conflict_resolution",
     "stable_adoption",
     "ledger",
+    "discovery",
     "claude_models",
     "claude_limits",
     "bot_identity",
@@ -258,6 +259,21 @@
           "type": "string",
           "description": "Path to the graduation manifest JSON file"
         }
+      }
+    },
+    "discovery": {
+      "type": "object",
+      "description": "Daily upstream PR discovery policy (tools/discover-prs.py)",
+      "required": ["base_branches", "include_labels", "max_reviews_per_run"],
+      "additionalProperties": false,
+      "properties": {
+        "base_branches": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "include_labels": {"type": "array", "items": {"type": "string"}},
+        "exclude_authors": {"type": "array", "items": {"type": "string"}},
+        "merged_lookback_days": {"type": "integer", "minimum": 1},
+        "open_query_limit": {"type": "integer", "minimum": 1},
+        "merged_query_limit": {"type": "integer", "minimum": 1},
+        "max_reviews_per_run": {"type": "integer", "minimum": 0}
       }
     },
     "claude_models": {

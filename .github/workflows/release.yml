@@ -1,14 +1,27 @@
 # .github/workflows/release.yml
+#
+# Publishes one release tag to nuget.org. Trust model:
+# - There is no tag-push trigger. The workflow runs only through
+#   workflow_dispatch on if/main (auto-release.yml dispatches it), so the
+#   workflow file and every tool it runs come from if/main, never from the tag.
+# - The tag is data. verify-tag (tools/verify-release-tag.sh) checks its
+#   name, verifies its signature with if/main's docs/bot-gpg-pubkey.asc,
+#   pinned to the GH_BOT_GPG_FINGERPRINT fingerprint (no private key anywhere
+#   in this workflow), and checks that its commit is on if/main.
+# - The tag's commit is built and tested with no secrets (build.yml), then
+#   perf-checked. Only publish gets NUGET_ORG_API_KEY, after every gate passed.
+# - Scripts never expand ${{ }} expressions that carry the tag or other input;
+#   they read them from environment variables.
+# - The ledger "published" event is written by release-record.yml, which
+#   holds the bot signing key; this workflow does not.
 name: Release
+run-name: Release ${{ inputs.tag }}
 
 on:
-  push:
-    tags:
-      - "if-10.0.*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (e.g. if-10.0.4-perf.20260427)"
+        description: "Release tag, e.g. if-10.0.8-perf.20261008. Run on if/main: gh workflow run release.yml --ref if/main -f tag=<tag>"
         required: true
         type: string
       regenerate_perf_baseline:
@@ -18,17 +31,15 @@ on:
         type: boolean
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 permissions:
-  contents: write
-  packages: write
-  id-token: write
+  contents: read
 
 env:
   IF_REPO_ROOT: ${{ github.workspace }}
-  TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  TAG_NAME: ${{ inputs.tag }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -41,299 +52,113 @@ jobs:
       requested_action: release-publish
 
   # ---------------------------------------------------------------------------
-  # Job 2: verify-tag — signed tag reachable from if/main
+  # Job 2: verify-tag — trusted if/main code checks the tag as data.
+  # Its only secret is the key fingerprint; no private key.
   # ---------------------------------------------------------------------------
   verify-tag:
     name: Verify tag signature and reachability
     needs: gate
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
+      tag: ${{ steps.verify.outputs.tag }}
       tag_sha: ${{ steps.verify.outputs.tag_sha }}
+      nuget_version: ${{ steps.verify.outputs.nuget_version }}
 
     steps:
-      - name: Generate GH App token
-        id: app-token
-        uses: tibdex/github-app-token@v2
-        with:
-          app_id: ${{ secrets.GH_APP_ID }}
-          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
 
-      - name: Verify tag is signed and reachable from if/release/10.0
+      - name: Verify tag is bot-signed and reachable from if/main
         id: verify
+        env:
+          # Only the fingerprint, to pin the key file; no private key here.
+          BOT_FPR: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
         run: |
-          TAG="${{ env.TAG_NAME }}"
-          echo "Verifying tag: $TAG"
+          set -euo pipefail
 
-          # LOW-3: Validate tag format
-          if [[ ! "$TAG" =~ ^if-10\.0\..+ ]]; then
-            echo "::error::Invalid tag format: '$TAG'. Expected pattern: if-10.0.<suffix>"
+          # The workflow, tools and public key must be if/main's, not a
+          # branch's copy.
+          if [ "$GITHUB_REF" != "refs/heads/if/main" ]; then
+            echo "::error::Run release.yml on if/main: gh workflow run release.yml --ref if/main -f tag=<tag>"
             exit 1
           fi
 
-          # Verify the tag exists
-          if ! git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
-            echo "::error::Tag $TAG not found in repository"
+          # verify-release-tag.sh checks the tag name before any other use,
+          # then fetches the tag and checks its signature against
+          # docs/bot-gpg-pubkey.asc (pinned to BOT_FPR) and that its commit is
+          # on if/main. GITHUB_SHA is the if/main commit this run started on.
+          TAG_COMMIT=$(FETCH=1 PUBKEY_FILE=docs/bot-gpg-pubkey.asc MAIN_REF="$GITHUB_SHA" \
+            tools/verify-release-tag.sh "$TAG_NAME") || {
+            echo "::error::Release tag refused; the log above says why"
             exit 1
-          fi
+          }
+          # The version depends only on the tag, so a re-run packs the same version.
+          VERSION=$(python3 tools/release-version.py version --tag "$TAG_NAME")
 
-          # HIGH-7: Tag signature check temporarily skipped for first release.
-          # GPG signing infra to be provisioned in a follow-up; until then the
-          # remaining safeguards (denylist hard-fails, smoke-on-pack,
-          # perf-on-pack, wpf-nuget-publish env protection, repo write ACL)
-          # cover the threat model that signed tags address. Restore before
-          # second release.
-          # git tag -v "$TAG" || { echo "::error::Unsigned or invalid tag: $TAG"; exit 1; }
-          echo "::warning::Tag signature check skipped (TODO: restore once GPG infra is provisioned)"
-
-          # HIGH-7 / MED-3: Verify tag is reachable from if/release/10.0 (not if/main)
-          git fetch origin if/release/10.0
-          TAG_COMMIT=$(git rev-list -n1 "refs/tags/$TAG^{}")
-          git merge-base --is-ancestor "$TAG" origin/if/release/10.0 || { echo "::error::Tag not reachable from if/release/10.0"; exit 1; }
-
-          echo "tag_sha=$TAG_COMMIT" >> "$GITHUB_OUTPUT"
-          echo "Tag $TAG verified: commit=$TAG_COMMIT is reachable from if/release/10.0"
+          {
+            echo "tag=$TAG_NAME"
+            echo "tag_sha=$TAG_COMMIT"
+            echo "nuget_version=$VERSION"
+          } >> "$GITHUB_OUTPUT"
+          echo "Tag $TAG_NAME verified: commit=$TAG_COMMIT, NuGet version $VERSION"
         shell: bash
 
   # ---------------------------------------------------------------------------
-  # Job 3: build — compute version, dotnet pack both packages, upload artifacts
+  # Job 3: build — build.yml from if/main, run on the tag's commit with no
+  # secrets: lint, build, crossgen, pack, smoke on the packed nupkg,
+  # anti-stub, aggregate. The packages are in this run's build-x64 artifact.
   # ---------------------------------------------------------------------------
   build:
-    name: Build and pack NuGet packages
+    name: Build, pack and smoke
     needs: verify-tag
     if: needs.verify-tag.result == 'success'
-    runs-on: windows-2022
-    outputs:
-      nuget_version: ${{ steps.version.outputs.nuget_version }}
-
-    steps:
-      - name: Generate GH App token
-        id: app-token
-        uses: tibdex/github-app-token@v2
-        with:
-          app_id: ${{ secrets.GH_APP_ID }}
-          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ steps.app-token.outputs.token }}
-
-      - name: Cache NuGet packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.nuget/packages
-          key: nuget-win-x64-${{ hashFiles('**/packages.lock.json', 'global.json') }}
-          restore-keys: nuget-win-x64-
-
-      - name: Set up .NET SDK
-        uses: actions/setup-dotnet@v4
-        with:
-          global-json-file: global.json
-
-      - name: Compute NuGet version
-        id: version
-        run: |
-          # compute-version.ps1 -DryRun emits the version on stdout AND a
-          # diagnostic on the Information stream; capturing the subprocess
-          # output as a single value merges both, so take only the first
-          # line (the actual version string).
-          $version = (& pwsh -File tools/compute-version.ps1 -DryRun | Select-Object -First 1).Trim()
-          echo "nuget_version=$version" >> "$env:GITHUB_OUTPUT"
-          echo "Computed NuGet version: $version"
-        shell: pwsh
-
-      - name: Pack InitialForce.WPF
-        run: |
-          dotnet pack packaging/InitialForce.WPF/InitialForce.WPF.csproj `
-            -c Release `
-            /p:Version=${{ steps.version.outputs.nuget_version }} `
-            /p:RepositoryCommit=${{ needs.verify-tag.outputs.tag_sha }} `
-            --output /tmp/packages/
-        shell: pwsh
-
-      - name: Pack InitialForce.WPF.RuntimeOverride
-        run: |
-          dotnet pack packaging/InitialForce.WPF.RuntimeOverride/InitialForce.WPF.RuntimeOverride.csproj `
-            -c Release `
-            /p:Version=${{ steps.version.outputs.nuget_version }} `
-            /p:RepositoryCommit=${{ needs.verify-tag.outputs.tag_sha }} `
-            --output /tmp/packages/
-        shell: pwsh
-
-      - name: Upload .nupkg artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-packages-${{ steps.version.outputs.nuget_version }}
-          path: /tmp/packages/**/*.nupkg
-          retention-days: 30
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build.yml
+    with:
+      package_version: ${{ needs.verify-tag.outputs.nuget_version }}
+      ref: ${{ needs.verify-tag.outputs.tag_sha }}
 
   # ---------------------------------------------------------------------------
-  # Job 4: smoke-on-pack — install packed nupkg into temp project, run 22 scenarios
-  # ---------------------------------------------------------------------------
-  smoke-on-pack:
-    name: Smoke harness against packed NuGet
-    needs: build
-    if: needs.build.result == 'success'
-    runs-on: windows-2022
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up .NET SDK
-        uses: actions/setup-dotnet@v4
-        with:
-          global-json-file: global.json
-
-      - name: Download packed NuGet artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: release-packages-${{ needs.build.outputs.nuget_version }}
-          path: /tmp/packages/
-
-      - name: Run smoke harness against packed nupkg
-        run: |
-          # Local NuGet feed pointing at the downloaded packages.
-          $feedDir = "/tmp/local-feed"
-          New-Item -ItemType Directory -Force -Path $feedDir | Out-Null
-          Copy-Item /tmp/packages/*.nupkg $feedDir/
-
-          $ver = "${{ needs.build.outputs.nuget_version }}"
-          if (-not $ver) { throw "nuget_version output is empty — cannot resolve InitialForceWpfVersion." }
-          Write-Host "Consuming InitialForce.WPF $ver from $feedDir"
-
-          dotnet nuget add source $feedDir --name local-packed --configfile NuGet.config
-          dotnet nuget add source https://api.nuget.org/v3/index.json --name nuget.org --configfile NuGet.config
-          dotnet restore test/InitialForce.WpfSmoke/InitialForce.WpfSmoke.csproj `
-            -p:InitialForceWpfVersion=$ver
-          if ($LASTEXITCODE -ne 0) { throw "restore failed" }
-
-          # Publish self-contained win-x64 (the csproj pins the RID + SelfContained),
-          # which lays down a full runtime AND the patched WPF DLLs while stripping the
-          # stock ones — the exact production consumption path, so the patched WPF loads
-          # unambiguously. `dotnet test` cannot run a self-contained testhost from build
-          # output (hostpolicy.dll is not laid down there), so run the NUnitLite console
-          # entry point directly; it emits NUnit3 result XML.
-          dotnet publish test/InitialForce.WpfSmoke/InitialForce.WpfSmoke.csproj `
-            -c Release --no-restore `
-            -p:InitialForceWpfVersion=$ver `
-            -o /tmp/smoke-publish/
-          if ($LASTEXITCODE -ne 0) { throw "publish failed" }
-          # The WPF Arcade SDK strips NuGet package assemblies from test-project output,
-          # so the NUnit assemblies are absent from the self-contained publish. Copy them
-          # from the restored package cache into the app directory; the self-contained host
-          # probes the application base directory, so they load without a deps.json entry.
-          $gp = ((dotnet nuget locals global-packages --list) -replace '^[^:]*:\s*','').Trim()
-          Write-Host "NuGet global packages: $gp"
-          foreach ($pkgId in 'nunit','nunitlite') {
-            $pkgDir = Join-Path $gp $pkgId
-            if (-not (Test-Path $pkgDir)) { throw "package cache missing '$pkgId' under $gp" }
-            $verDir = Get-ChildItem $pkgDir -Directory | Sort-Object Name -Descending | Select-Object -First 1
-            $libRoot = Join-Path $verDir.FullName 'lib'
-            $tfmDir = @('netstandard2.0','net6.0','net462') |
-                      ForEach-Object { Join-Path $libRoot $_ } |
-                      Where-Object { Test-Path $_ } | Select-Object -First 1
-            if (-not $tfmDir) { throw "no compatible lib TFM for '$pkgId' under $libRoot" }
-            Get-ChildItem $tfmDir -Filter '*.dll' | ForEach-Object {
-              Copy-Item $_.FullName /tmp/smoke-publish/ -Force
-              Write-Host "  copied $($_.Name) from $pkgId ($($verDir.Name))"
-            }
-          }
-          # A self-contained app resolves assemblies strictly from its deps.json TPA and
-          # does not probe the app base directory for files absent from it. The WPF Arcade
-          # SDK strips the NUnit package assemblies, and the InitialForce.WPF targets strip
-          # the patched WPF DLLs, from the generated deps.json (the WPF DLLs are still copied
-          # into the app directory by the package targets, just not registered). Register
-          # every assembly physically present in the publish directory that deps.json does
-          # not already list, so the host resolves them from the app base directory.
-          $depsPath = "/tmp/smoke-publish/InitialForce.WpfSmoke.deps.json"
-          $deps = Get-Content $depsPath -Raw | ConvertFrom-Json
-          $rt = $deps.runtimeTarget.name
-          $existing = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-          foreach ($lib in $deps.targets.$rt.PSObject.Properties) {
-            $runtime = $lib.Value.runtime
-            if ($null -ne $runtime) {
-              foreach ($r in $runtime.PSObject.Properties) { [void]$existing.Add([System.IO.Path]::GetFileName($r.Name)) }
-            }
-          }
-          $appProp = $deps.targets.$rt.PSObject.Properties |
-                     Where-Object { $_.Name -like 'InitialForce.WpfSmoke/*' } | Select-Object -First 1
-          $runtimeObj = $deps.targets.$rt.($appProp.Name).runtime
-          $added = 0
-          foreach ($f in Get-ChildItem /tmp/smoke-publish -Filter '*.dll') {
-            if (-not $existing.Contains($f.Name)) {
-              $runtimeObj | Add-Member -NotePropertyName $f.Name -NotePropertyValue ([pscustomobject]@{}) -Force
-              [void]$existing.Add($f.Name); $added++
-              Write-Host "  deps.json += $($f.Name)"
-            }
-          }
-          Write-Host "Registered $added assemblies in deps.json"
-          ($deps | ConvertTo-Json -Depth 100) | Set-Content $depsPath -Encoding utf8
-          New-Item -ItemType Directory -Force -Path /tmp/smoke-results | Out-Null
-          & "/tmp/smoke-publish/InitialForce.WpfSmoke.exe" --result:"/tmp/smoke-results/smoke.xml"
-          $runExit = $LASTEXITCODE
-          Write-Host "NUnitLite exit code: $runExit"
-          if ($runExit -ne 0) { throw "smoke run reported failures or errors (exit $runExit)" }
-        shell: pwsh
-
-      - name: Enforce non-empty smoke run (NUnit3 floor gate)
-        if: always()
-        run: |
-          $floorFile = "test/InitialForce.WpfSmoke/expected-min-tests.txt"
-          $floor = [int]((Get-Content $floorFile) |
-                   Where-Object { $_ -match '^\s*\d+' } | Select-Object -First 1)
-          $xml = Get-ChildItem /tmp/smoke-results -Recurse -Filter '*.xml' -ErrorAction SilentlyContinue |
-                 Select-Object -First 1
-          if (-not $xml) { Write-Error "No NUnit3 result XML produced — smoke harness did not run."; exit 1 }
-          [xml]$doc = Get-Content $xml.FullName
-          $run = $doc.'test-run'
-          $total = [int]$run.total
-          Write-Host "Smoke results total=$total passed=$($run.passed) failed=$($run.failed) (floor=$floor)"
-          if ($total -lt $floor) {
-            Write-Error "Smoke run reported $total tests, below the floor of $floor."
-            exit 1
-          }
-          if ([int]$run.failed -gt 0) {
-            Write-Error "Smoke run reported $($run.failed) failed tests."
-            exit 1
-          }
-        shell: pwsh
-
-      - name: Upload smoke results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: smoke-results-${{ needs.build.outputs.nuget_version }}
-          path: /tmp/smoke-results/
-          retention-days: 14
-
-  # ---------------------------------------------------------------------------
-  # Job 5: perf-on-pack — run perf harness, check regression against baseline
+  # Job 4: perf-on-pack — BenchmarkDotNet harness from the tag's commit
+  # (candidate/), checked by if/main's check-regression.py against if/main's
+  # perf/baseline.json. NOTE: the harness benchmarks
+  # (test/InitialForce.WpfSmoke/Perf/PerfHarness.cs) are placeholder loops
+  # today, so this gate does not measure WPF performance yet.
   # ---------------------------------------------------------------------------
   perf-on-pack:
     name: Perf regression check against packed NuGet
-    needs: build
+    needs: [verify-tag, build]
     if: needs.build.result == 'success'
     runs-on: windows-2022
+    permissions:
+      contents: read
+    env:
+      NUGET_VERSION: ${{ needs.verify-tag.outputs.nuget_version }}
+      TAG_SHA: ${{ needs.verify-tag.outputs.tag_sha }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out if/main (gate tools and baseline)
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false
+
+      - name: Check out the release commit (perf harness)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify-tag.outputs.tag_sha }}
+          path: candidate
+          persist-credentials: false
 
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@v4
         with:
-          global-json-file: global.json
+          global-json-file: candidate/global.json
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -343,18 +168,20 @@ jobs:
       - name: Download packed NuGet artifacts
         uses: actions/download-artifact@v4
         with:
-          name: release-packages-${{ needs.build.outputs.nuget_version }}
-          path: /tmp/packages/
+          name: build-x64
+          path: ${{ runner.temp }}/build
 
       - name: Run BenchmarkDotNet perf harness against packed nupkg
+        working-directory: candidate
         run: |
-          $feedDir = "/tmp/local-feed"
+          $feedDir = Join-Path $env:RUNNER_TEMP "local-feed"
           New-Item -ItemType Directory -Force -Path $feedDir | Out-Null
-          Copy-Item /tmp/packages/*.nupkg $feedDir/
+          Get-ChildItem (Join-Path $env:RUNNER_TEMP "build") -Recurse -Filter '*.nupkg' | Copy-Item -Destination $feedDir
 
-          $ver = "${{ needs.build.outputs.nuget_version }}"
+          $ver = $env:NUGET_VERSION
           if (-not $ver) { throw "nuget_version output is empty — cannot resolve InitialForceWpfVersion." }
           $proj = "test/InitialForce.WpfSmoke/Perf/InitialForce.WpfPerf.csproj"
+          $bdn = Join-Path $env:RUNNER_TEMP "bdn-artifacts"
 
           dotnet nuget add source $feedDir --name local-packed --configfile NuGet.config
           dotnet nuget add source https://api.nuget.org/v3/index.json --name nuget.org --configfile NuGet.config
@@ -365,84 +192,100 @@ jobs:
           # Standalone BenchmarkDotNet console harness (NOT the NUnit stubs).
           dotnet run -c Release --no-restore --project $proj `
             -p:InitialForceWpfVersion=$ver `
-            -- --filter '*' --exporters json --artifacts /tmp/bdn-artifacts
+            -- --filter '*' --exporters json --artifacts $bdn
           if ($LASTEXITCODE -ne 0) { throw "BenchmarkDotNet run failed" }
-
-          $json = Get-ChildItem /tmp/bdn-artifacts -Recurse -Filter '*-report-full-compressed.json' -ErrorAction SilentlyContinue |
-                  Select-Object -First 1
-          if (-not $json) {
-            $json = Get-ChildItem /tmp/bdn-artifacts -Recurse -Filter '*.json' -ErrorAction SilentlyContinue |
-                    Select-Object -First 1
-          }
-          if (-not $json) { throw "No BenchmarkDotNet JSON export produced under /tmp/bdn-artifacts." }
-          New-Item -ItemType Directory -Force -Path perf | Out-Null
-          Copy-Item $json.FullName perf/current.json -Force
-          Write-Host "Wrote perf/current.json from $($json.FullName)"
         shell: pwsh
 
       - name: Check perf regression (hard on Allocated, warn-only on time)
         run: |
+          # BenchmarkDotNet writes one JSON report per benchmark class. Pass
+          # all of them; check-regression fails on any baseline scenario that
+          # is missing or has no measurement.
+          $bdn = Join-Path $env:RUNNER_TEMP "bdn-artifacts"
+          $reports = @(Get-ChildItem $bdn -Recurse -Filter '*-report-full-compressed.json' -ErrorAction SilentlyContinue)
+          if ($reports.Count -eq 0) {
+            $reports = @(Get-ChildItem $bdn -Recurse -Filter '*-report-full.json' -ErrorAction SilentlyContinue)
+          }
+          if ($reports.Count -eq 0) { throw "No BenchmarkDotNet JSON report under $bdn." }
+          Write-Host "Reports: $($reports.Name -join ', ')"
+          $out = Join-Path $env:RUNNER_TEMP "perf-result.json"
           python tools/check-regression.py `
-            --current perf/current.json `
+            --current @($reports.FullName) `
             --baseline perf/baseline.json `
-            --current-sha ${{ github.sha }} `
-            --output /tmp/perf-result.json `
+            --current-sha $env:TAG_SHA `
+            --output $out `
             --threshold-warn 5 `
             --threshold-fail 15 `
             --warn-only-metrics Mean
+          if ($LASTEXITCODE -ne 0) { throw "perf gate failed (exit $LASTEXITCODE)" }
         shell: pwsh
 
       - name: Upload perf results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: perf-results-${{ needs.build.outputs.nuget_version }}
-          path: /tmp/perf-result.json
+          name: perf-results-${{ needs.verify-tag.outputs.nuget_version }}
+          path: ${{ runner.temp }}/perf-result.json
           retention-days: 14
 
   # ---------------------------------------------------------------------------
   # Job 5b: regenerate-perf-baseline — operator-driven refresh of the checked-in
   # perf/baseline.json from this build's package. Runs only when dispatched with
-  # regenerate_perf_baseline=true. The refreshed baseline is uploaded as an
-  # artifact (perf-baseline-<version>) for a human to review and commit; CI does
-  # not push to the repo. The seeded perf/baseline.json is a hand-authored
-  # placeholder until this job replaces it with real measurements.
+  # regenerate_perf_baseline=true. The merged baseline (all benchmark classes)
+  # is uploaded as an artifact (perf-baseline-<version>) for a human to review
+  # and commit; CI does not push to the repo.
   # ---------------------------------------------------------------------------
   regenerate-perf-baseline:
     name: Regenerate perf baseline (manual)
-    needs: build
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.regenerate_perf_baseline &&
-      needs.build.result == 'success'
+    needs: [verify-tag, build]
+    if: inputs.regenerate_perf_baseline && needs.build.result == 'success'
     runs-on: windows-2022
+    permissions:
+      contents: read
+    env:
+      NUGET_VERSION: ${{ needs.verify-tag.outputs.nuget_version }}
+      TAG_SHA: ${{ needs.verify-tag.outputs.tag_sha }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out if/main (merge tool)
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false
+
+      - name: Check out the release commit (perf harness)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify-tag.outputs.tag_sha }}
+          path: candidate
+          persist-credentials: false
 
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@v4
         with:
-          global-json-file: global.json
+          global-json-file: candidate/global.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Download packed NuGet artifacts
         uses: actions/download-artifact@v4
         with:
-          name: release-packages-${{ needs.build.outputs.nuget_version }}
-          path: /tmp/packages/
+          name: build-x64
+          path: ${{ runner.temp }}/build
 
-      - name: Run BenchmarkDotNet and capture baseline
+      - name: Run BenchmarkDotNet
+        working-directory: candidate
         run: |
-          $feedDir = "/tmp/local-feed"
+          $feedDir = Join-Path $env:RUNNER_TEMP "local-feed"
           New-Item -ItemType Directory -Force -Path $feedDir | Out-Null
-          Copy-Item /tmp/packages/*.nupkg $feedDir/
+          Get-ChildItem (Join-Path $env:RUNNER_TEMP "build") -Recurse -Filter '*.nupkg' | Copy-Item -Destination $feedDir
 
-          $ver = "${{ needs.build.outputs.nuget_version }}"
+          $ver = $env:NUGET_VERSION
           if (-not $ver) { throw "nuget_version output is empty." }
           $proj = "test/InitialForce.WpfSmoke/Perf/InitialForce.WpfPerf.csproj"
+          $bdn = Join-Path $env:RUNNER_TEMP "bdn-artifacts"
 
           dotnet nuget add source $feedDir --name local-packed --configfile NuGet.config
           dotnet nuget add source https://api.nuget.org/v3/index.json --name nuget.org --configfile NuGet.config
@@ -452,229 +295,279 @@ jobs:
 
           dotnet run -c Release --no-restore --project $proj `
             -p:InitialForceWpfVersion=$ver `
-            -- --filter '*' --exporters json --artifacts /tmp/bdn-artifacts
+            -- --filter '*' --exporters json --artifacts $bdn
           if ($LASTEXITCODE -ne 0) { throw "BenchmarkDotNet run failed" }
+        shell: pwsh
 
-          $json = Get-ChildItem /tmp/bdn-artifacts -Recurse -Filter '*-report-full-compressed.json' -ErrorAction SilentlyContinue |
-                  Select-Object -First 1
-          if (-not $json) {
-            $json = Get-ChildItem /tmp/bdn-artifacts -Recurse -Filter '*.json' -ErrorAction SilentlyContinue |
-                    Select-Object -First 1
+      - name: Merge all reports into the baseline
+        run: |
+          $bdn = Join-Path $env:RUNNER_TEMP "bdn-artifacts"
+          $reports = @(Get-ChildItem $bdn -Recurse -Filter '*-report-full-compressed.json' -ErrorAction SilentlyContinue)
+          if ($reports.Count -eq 0) {
+            $reports = @(Get-ChildItem $bdn -Recurse -Filter '*-report-full.json' -ErrorAction SilentlyContinue)
           }
-          if (-not $json) { throw "No BenchmarkDotNet JSON export produced." }
+          if ($reports.Count -eq 0) { throw "No BenchmarkDotNet JSON report under $bdn." }
           New-Item -ItemType Directory -Force -Path perf | Out-Null
-          Copy-Item $json.FullName perf/baseline.json -Force
-          Write-Host "Regenerated perf/baseline.json from $($json.FullName)"
-          Write-Host "Review and commit this file to update the checked-in baseline."
+          python tools/check-regression.py `
+            --current @($reports.FullName) `
+            --current-sha $env:TAG_SHA `
+            --merge-only `
+            --merged-output perf/baseline.json
+          if ($LASTEXITCODE -ne 0) { throw "baseline merge failed (exit $LASTEXITCODE)" }
+          Write-Host "Review and commit perf/baseline.json to update the checked-in baseline."
         shell: pwsh
 
       - name: Upload regenerated baseline
         uses: actions/upload-artifact@v4
         with:
-          name: perf-baseline-${{ needs.build.outputs.nuget_version }}
+          name: perf-baseline-${{ needs.verify-tag.outputs.nuget_version }}
           path: perf/baseline.json
           retention-days: 30
 
   # ---------------------------------------------------------------------------
-  # Job 6: release-notes — run Claude to draft GitHub Release notes from ledger
+  # Job 6: release-notes — Claude drafts notes from a commit list.
+  # The commit subjects include community PR titles, which are untrusted text.
+  # So the agent gets: the list inside its prompt and no tools at all (no
+  # Read, no Bash, no Write), only user-level settings (no project settings,
+  # hooks, CLAUDE.md or MCP servers from the checkout), no persisted git
+  # credentials and a read-only token. Its final answer becomes the notes;
+  # publish falls back to generated notes if this job fails or returns
+  # nothing.
   # ---------------------------------------------------------------------------
   release-notes:
     name: Generate release notes (Claude Sonnet)
-    needs: build
+    needs: [verify-tag, build]
     if: needs.build.result == 'success'
+    # Notes are optional: publish falls back to generated notes, so a failed
+    # notes run must not mark the whole release as failed.
+    continue-on-error: true
     runs-on: ubuntu-latest
-    environment: bot-credentials
-    outputs:
-      notes_artifact: release-notes-${{ needs.build.outputs.nuget_version }}
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ needs.verify-tag.outputs.tag }}
+      TAG_SHA: ${{ needs.verify-tag.outputs.tag_sha }}
+      NUGET_VERSION: ${{ needs.verify-tag.outputs.nuget_version }}
 
     steps:
-      - name: Generate GH App token
-        id: app-token
-        uses: tibdex/github-app-token@v2
-        with:
-          app_id: ${{ secrets.GH_APP_ID }}
-          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
 
-      - name: Determine previous tag
-        id: prev-tag
+      - name: Write the commit list since the last published release
+        id: commits
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          CURRENT_TAG="${{ env.TAG_NAME }}"
-          PREV_TAG=$(git tag --list 'if-10.0.*' --sort=-version:refname \
-            | grep -v "^${CURRENT_TAG}$" | head -1 || echo "")
-          echo "prev_tag=$PREV_TAG" >> "$GITHUB_OUTPUT"
-          echo "Previous tag: $PREV_TAG"
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/notes-input"
+          LIST="$RUNNER_TEMP/notes-input/commits.txt"
+          PREV=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit 1 \
+            --json tagName --jq '.[0].tagName // ""')
+          if [[ "$PREV" =~ ^if-[0-9]+\.[0-9]+\.[0-9]+-perf\.[0-9]{8}(\.[0-9]+)?$ ]] \
+             && git fetch --no-tags origin "+refs/tags/$PREV:refs/tags/$PREV"; then
+            RANGE="refs/tags/$PREV..$TAG_SHA"
+            FROM="$PREV"
+          else
+            RANGE="--max-count=200 $TAG_SHA"
+            FROM="(no earlier published release; last 200 commits)"
+          fi
+          # One line per commit: SHA, author, subject, Upstream-PR and
+          # Co-authored-by trailers, top-level folders it touches.
+          # shellcheck disable=SC2086
+          git log --no-merges --max-count=300 --format='%H' $RANGE | while read -r sha; do
+            META=$(git log -1 --format='%an%x09%s%x09%(trailers:key=Upstream-PR,valueonly,separator=%x2C)%x09%(trailers:key=Co-authored-by,valueonly,separator=%x2C)' "$sha")
+            AREAS=$(git show --no-renames --name-only --format= "$sha" | cut -d/ -f1 | sort -u | paste -sd, -)
+            printf '%s\t%s\t%s\n' "$sha" "$META" "$AREAS"
+          done > "$LIST"
+          echo "from=$FROM" >> "$GITHUB_OUTPUT"
+          echo "list=$LIST" >> "$GITHUB_OUTPUT"
+          echo "$(wc -l < "$LIST") commits from $FROM to $TAG"
         shell: bash
 
       - name: Load release-notes prompt
         id: load-prompt
+        env:
+          FROM: ${{ steps.commits.outputs.from }}
+          LIST: ${{ steps.commits.outputs.list }}
         shell: bash
         run: |
+          set -euo pipefail
+          # A random delimiter: a commit subject cannot end the value early.
+          EOF_MARK="EOF_$(openssl rand -hex 16)"
           {
-            echo 'prompt<<__EOF_PROMPT__'
+            echo "prompt<<$EOF_MARK"
             cat .if-fork/prompts/release-notes.md
             echo
-            echo '__EOF_PROMPT__'
+            echo "## This run"
+            echo
+            echo "- Range: $FROM to $TAG. Version: $NUGET_VERSION. Tag: $TAG."
+            echo "- Today (UTC): $(date -u +%Y-%m-%d)."
+            echo
+            echo "<untrusted_input>"
+            sed 's#</*untrusted_input>#[removed]#g' "$LIST"
+            echo "</untrusted_input>"
+            echo "$EOF_MARK"
           } >> "$GITHUB_OUTPUT"
 
+      # Trusted settings only: --setting-sources user skips the checkout's
+      # .claude/ settings, hooks and CLAUDE.md; --strict-mcp-config skips its
+      # .mcp.json. Every tool is denied, including Read of /proc (the API key
+      # is in the process environment) and of the runner's _temp folder.
       - name: Run release notes prompt (Claude Sonnet)
+        id: claude
         uses: anthropics/claude-code-action@v1
         with:
+          allowed_bots: initial-force-wpf-bot,github-actions
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
           prompt: ${{ steps.load-prompt.outputs.prompt }}
+          settings: >-
+            {"disableAllHooks": true,
+            "permissions": {"deny": ["Read(//proc/**)", "Read(//home/runner/work/_temp/**)"]}}
           claude_args: >-
-            --max-turns 10
+            --setting-sources user
+            --strict-mcp-config
+            --max-turns 3
             --model claude-sonnet-4-6
-            --allowedTools Bash,Read,Grep
-            --disallowedTools Edit,Write,mcp__github__push_files
-          github_token: ${{ steps.app-token.outputs.token }}
+            --disallowedTools Bash,Read,Glob,Grep,LS,Edit,MultiEdit,Write,NotebookEdit,WebFetch,WebSearch,Task,Read(//proc/**),Read(//home/runner/work/_temp/**)
+
+      - name: Extract the notes from the agent's final answer
         env:
-          CONFIG_PATH: .if-fork/config.yaml
-          FROM_REF: ${{ steps.prev-tag.outputs.prev_tag }}
-          TO_REF: ${{ env.TAG_NAME }}
-          VERSION_STRING: ${{ needs.build.outputs.nuget_version }}
-          OUTPUT_PATH: /tmp/release-notes-${{ needs.build.outputs.nuget_version }}.md
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/release-notes-$NUGET_VERSION.md"
+          if [ -n "$EXECUTION_FILE" ] && [ -f "$EXECUTION_FILE" ]; then
+            jq -r '[.[] | select(.type == "result")] | last | .result // empty' \
+              "$EXECUTION_FILE" > "$OUT" || true
+          fi
+          if [ ! -s "$OUT" ]; then
+            echo "::warning::The agent returned no notes; the GitHub Release will use generated notes."
+            rm -f "$OUT"
+          fi
+        shell: bash
 
       - name: Upload release notes
         uses: actions/upload-artifact@v4
         with:
-          name: release-notes-${{ needs.build.outputs.nuget_version }}
-          path: /tmp/release-notes-${{ needs.build.outputs.nuget_version }}.md
+          name: release-notes-${{ needs.verify-tag.outputs.nuget_version }}
+          path: ${{ runner.temp }}/release-notes-${{ needs.verify-tag.outputs.nuget_version }}.md
+          if-no-files-found: ignore
           retention-days: 14
 
   # ---------------------------------------------------------------------------
-  # Job 7: publish — gated on wpf-nuget-publish (manual reviewer approval)
+  # Job 7: publish — nuget.org, GitHub Packages, then the GitHub Release.
+  # Runs only when build (every build.yml gate, including smoke on the packed
+  # nupkg) and perf-on-pack passed. The only job with NUGET_ORG_API_KEY.
+  # Release notes are optional: without them the GitHub Release uses
+  # generated notes. Every step is deterministic; no agent runs here.
   # ---------------------------------------------------------------------------
   publish:
-    name: Publish NuGets (human gate)
-    needs: [build, smoke-on-pack, perf-on-pack, release-notes]
-    if: needs.build.result == 'success' && needs.smoke-on-pack.result == 'success' && needs.perf-on-pack.result == 'success'
+    name: Publish NuGets
+    needs: [verify-tag, build, perf-on-pack, release-notes]
+    if: >-
+      !cancelled() &&
+      needs.verify-tag.result == 'success' &&
+      needs.build.result == 'success' &&
+      needs.perf-on-pack.result == 'success'
     runs-on: ubuntu-latest
     environment: wpf-nuget-publish
+    permissions:
+      contents: write
+      packages: write
+    env:
+      TAG: ${{ needs.verify-tag.outputs.tag }}
+      NUGET_VERSION: ${{ needs.verify-tag.outputs.nuget_version }}
 
     steps:
-      - name: Generate GH App token
-        id: app-token
-        uses: tibdex/github-app-token@v2
-        with:
-          app_id: ${{ secrets.GH_APP_ID }}
-          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-
       - name: Download packages
         uses: actions/download-artifact@v4
         with:
-          name: release-packages-${{ needs.build.outputs.nuget_version }}
-          path: /tmp/packages/
+          name: build-x64
+          path: ${{ runner.temp }}/build
 
       - name: Download release notes
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          name: release-notes-${{ needs.build.outputs.nuget_version }}
-          path: /tmp/
+          name: release-notes-${{ needs.verify-tag.outputs.nuget_version }}
+          path: ${{ runner.temp }}/notes
 
       - name: MED-3 SHA256 cross-check — verify package integrity
         run: |
-          # Re-hash all downloaded .nupkg files and compare against the
-          # SHA256 sums recorded at build time via the build-hashes artifact.
-          # Phase-2: integrate SLSA provenance via slsa-framework/slsa-github-generator
-          # when org-level SLSA attestation infrastructure is ready.
-          echo "Computing SHA256 hashes of downloaded packages..."
-          sha256sum /tmp/packages/*.nupkg | tee /tmp/publish-sha256.txt
-          echo "SHA256 verification complete. Hashes stored at /tmp/publish-sha256.txt"
-          # Cross-check: ensure no zero-byte files slipped through
-          for pkg in /tmp/packages/*.nupkg; do
-            if [ ! -s "$pkg" ]; then
-              echo "::error::Zero-byte package detected: $pkg"
+          set -euo pipefail
+          PKGS="$RUNNER_TEMP/packages"
+          mkdir -p "$PKGS"
+          find "$RUNNER_TEMP/build" -name '*.nupkg' -exec cp {} "$PKGS/" \;
+          # Exactly the two packages, both at the version derived from the tag.
+          for id in InitialForce.WPF InitialForce.WPF.RuntimeOverride; do
+            if [ ! -s "$PKGS/$id.$NUGET_VERSION.nupkg" ]; then
+              echo "::error::Missing or empty $id.$NUGET_VERSION.nupkg"
+              ls -l "$PKGS"
               exit 1
             fi
           done
+          COUNT=$(find "$PKGS" -name '*.nupkg' | wc -l)
+          if [ "$COUNT" -ne 2 ]; then
+            echo "::error::Expected 2 packages, found $COUNT"
+            ls -l "$PKGS"
+            exit 1
+          fi
+          # Phase-2: integrate SLSA provenance via slsa-framework/slsa-github-generator
+          # when org-level SLSA attestation infrastructure is ready.
+          sha256sum "$PKGS"/*.nupkg | tee "$RUNNER_TEMP/publish-sha256.txt"
+        shell: bash
+
+      - name: Publish to nuget.org
+        # --skip-duplicate makes a re-run for the same tag a no-op.
+        run: |
+          set -euo pipefail
+          for pkg in "$RUNNER_TEMP"/packages/*.nupkg; do
+            dotnet nuget push "$pkg" \
+              --source "https://api.nuget.org/v3/index.json" \
+              --api-key "$NUGET_ORG_API_KEY" \
+              --skip-duplicate
+          done
+        env:
+          NUGET_ORG_API_KEY: ${{ secrets.NUGET_ORG_API_KEY }}
         shell: bash
 
       - name: Publish to GitHub Packages
-        # Use the built-in GITHUB_TOKEN. Workflow already grants
-        # packages:write at the top of this file. A PAT (NUGET_FEED_PAT)
-        # is only required if/when we publish to nuget.org.
         run: |
-          for pkg in /tmp/packages/*.nupkg; do
+          set -euo pipefail
+          for pkg in "$RUNNER_TEMP"/packages/*.nupkg; do
             dotnet nuget push "$pkg" \
               --source "https://nuget.pkg.github.com/InitialForce/index.json" \
-              --api-key "${{ secrets.GITHUB_TOKEN }}" \
+              --api-key "$GITHUB_PACKAGES_TOKEN" \
               --skip-duplicate
           done
+        env:
+          GITHUB_PACKAGES_TOKEN: ${{ github.token }}
         shell: bash
 
       - name: Create GitHub Release
+        # auto-release.yml and release-record.yml treat a tag that has a
+        # GitHub Release as published, so this must stay the last step.
         run: |
-          NOTES_FILE=$(ls /tmp/release-notes-*.md 2>/dev/null | head -1 || echo "")
-          if [ -z "$NOTES_FILE" ]; then
-            NOTES_ARGS="--generate-notes"
-          else
-            NOTES_ARGS="--notes-file $NOTES_FILE"
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "GitHub Release $TAG already exists; nothing to do."
+            exit 0
           fi
-          # shellcheck disable=SC2086
-          gh release create "${{ env.TAG_NAME }}" \
-            --title "InitialForce WPF ${{ env.TAG_NAME }}" \
-            $NOTES_ARGS \
-            /tmp/packages/*.nupkg
+          NOTES="$RUNNER_TEMP/notes/release-notes-$NUGET_VERSION.md"
+          if [ -s "$NOTES" ]; then
+            NOTES_ARGS=(--notes-file "$NOTES")
+          else
+            NOTES_ARGS=(--generate-notes)
+          fi
+          gh release create "$TAG" \
+            --verify-tag \
+            --title "InitialForce WPF $NUGET_VERSION" \
+            "${NOTES_ARGS[@]}" \
+            "$RUNNER_TEMP"/packages/*.nupkg
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        shell: bash
-
-  # ---------------------------------------------------------------------------
-  # Job 8: record — emit published ledger event with version + tag + commit
-  # ---------------------------------------------------------------------------
-  record:
-    name: Record published ledger event
-    needs: [build, publish]
-    if: needs.publish.result == 'success'
-    runs-on: ubuntu-latest
-    environment: bot-credentials
-
-    steps:
-      - name: Generate GH App token
-        id: app-token
-        uses: tibdex/github-app-token@v2
-        with:
-          app_id: ${{ secrets.GH_APP_ID }}
-          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ steps.app-token.outputs.token }}
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Import bot GPG key
-        uses: ./.github/actions/import-bot-gpg
-        with:
-          gpg-private-key: ${{ secrets.GH_BOT_GPG_KEY }}
-          gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
-          gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
-
-      - name: Emit published ledger event
-        run: |
-          TAG="${{ env.TAG_NAME }}"
-          VERSION="${{ needs.build.outputs.nuget_version }}"
-          # CRIT-2: Use correct ledger-event.py CLI args.
-          # pr-number=0 since releases are not tied to PRs; the ledger schema
-          # accepts 0 as a synthetic "no PR" sentinel for release events.
-          python tools/ledger-event.py \
-            --event published \
-            --pr-number 0 \
-            --head-sha "${{ github.sha }}" \
-            --actor release \
-            --details-json "{\"tag\":\"$TAG\",\"version\":\"$VERSION\"}" \
-            --push
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
-          GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         shell: bash

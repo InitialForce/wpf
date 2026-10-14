@@ -836,3 +836,140 @@ def test_single_line_rebase_conflict_genesis_recovery(tmp_path: Path) -> None:
     assert len(lines) == 1
     obj = json.loads(lines[0])
     assert obj["prev_hash"] == "", "Recovery from empty remote must produce genesis entry"
+
+
+# ---------------------------------------------------------------------------
+# 31 — --events-file: many events, one commit, one push, [skip ci]
+# ---------------------------------------------------------------------------
+
+def _write_events(path: Path, count: int) -> None:
+    path.write_text(
+        "".join(
+            json.dumps({
+                "event": "discovered",
+                "pr_number": 100 + i,
+                "head_sha": f"sha{i}",
+                "details": {"title": f"PR {i}"},
+            }) + "\n"
+            for i in range(count)
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_events_file_appends_all_lines_in_one_commit(tmp_path: Path) -> None:
+    ledger = tmp_path / "patch-ledger.jsonl"
+    events = tmp_path / "events.jsonl"
+    _write_events(events, 3)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if "symbolic-ref" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "if/main\n", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        ret = ledger_event.main([
+            "--events-file", str(events), "--actor", "pr-discovery",
+            "--ledger-path", str(ledger), "--push",
+            "--message", "ledger: discovery batch",
+        ])
+
+    assert ret == 0
+    lines = [json.loads(ln) for ln in ledger.read_text().splitlines()]
+    assert [ln["pr_number"] for ln in lines] == [100, 101, 102]
+    assert all(ln["actor"] == "pr-discovery" for ln in lines)
+    assert lines[1]["prev_hash"] == lines[0]["line_hash"]
+    assert lines[2]["prev_hash"] == lines[1]["line_hash"]
+
+    commits = [c for c in calls if "commit" in c]
+    pushes = [c for c in calls if "push" in c]
+    assert len(commits) == 1 and len(pushes) == 1
+    message = commits[0][commits[0].index("-m") + 1]
+    subject = message.splitlines()[0]
+    assert subject == "ledger: discovery batch [skip ci]"
+    assert message.count("Ledger-Line-Hash:") == 3
+
+
+def test_single_event_commit_subject_has_skip_ci(tmp_path: Path) -> None:
+    ledger = tmp_path / "patch-ledger.jsonl"
+    messages: list[str] = []
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "commit" in cmd:
+            messages.append(cmd[cmd.index("-m") + 1])
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        ledger_event.main(_make_argv(ledger=str(ledger)) + ["--no-push"])
+
+    assert messages[0].splitlines()[0].endswith("[skip ci]")
+
+
+def test_events_file_conflict_rebuilds_whole_batch(tmp_path: Path) -> None:
+    """On a rebase conflict every line of the batch is rebuilt on the remote tip."""
+    ledger = tmp_path / "patch-ledger.jsonl"
+    events = tmp_path / "events.jsonl"
+    _write_events(events, 2)
+    remote_line = ledger_event.build_line(
+        event="review_1", pr_number=1, head_sha="r", actor="pr-review",
+        details={}, prev_hash="", timestamp="2026-01-01T00:00:00Z",
+    )
+    pushes = [0]
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "symbolic-ref" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "if/main\n", "")
+        if "push" in cmd:
+            pushes[0] += 1
+            if pushes[0] == 1:
+                return subprocess.CompletedProcess(cmd, 1, "", "[rejected] non-fast-forward")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if "rebase" in cmd and "--abort" not in cmd:
+            return subprocess.CompletedProcess(cmd, 1, "", "CONFLICT (content)")
+        if "reset" in cmd and "--hard" in cmd:
+            ledger.write_text(remote_line + "\n", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        with patch("time.sleep"):
+            ret = ledger_event.main([
+                "--events-file", str(events), "--actor", "pr-discovery",
+                "--ledger-path", str(ledger), "--push",
+            ])
+
+    assert ret == 0
+    lines = [json.loads(ln) for ln in ledger.read_text().splitlines()]
+    assert [ln["pr_number"] for ln in lines] == [1, 100, 101]
+    assert lines[1]["prev_hash"] == lines[0]["line_hash"]
+    assert lines[2]["prev_hash"] == lines[1]["line_hash"]
+
+
+def test_events_file_rejects_invalid_event(tmp_path: Path) -> None:
+    events = tmp_path / "events.jsonl"
+    events.write_text(json.dumps({
+        "event": "bogus", "pr_number": 1, "head_sha": "x", "actor": "a", "details": {},
+    }) + "\n")
+    with pytest.raises(SystemExit) as exc:
+        ledger_event.main(["--events-file", str(events), "--dry-run"])
+    assert exc.value.code == 2
+
+
+def test_events_file_empty_is_noop(tmp_path: Path) -> None:
+    ledger = tmp_path / "patch-ledger.jsonl"
+    events = tmp_path / "events.jsonl"
+    events.write_text("")
+    with patch("subprocess.run") as run:
+        ret = ledger_event.main([
+            "--events-file", str(events), "--actor", "a", "--ledger-path", str(ledger),
+        ])
+    assert ret == 0
+    assert not run.called
+    assert not ledger.exists()
+
+
+def test_single_event_flags_required_without_events_file() -> None:
+    with pytest.raises(SystemExit) as exc:
+        ledger_event.parse_args(["--event", "discovered"])
+    assert exc.value.code == 2

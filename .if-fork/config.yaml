@@ -17,7 +17,7 @@ fork:
   mirror_branch: if/mirror/release/10.0
 
 # Author allowlist — fast-path prior, NOT auto-merge.
-# Every patch still goes through 2× Opus review regardless of author.
+# Every patch still goes through 2× review regardless of author.
 author_allowlist:
   - h3xds1nz
   - miloush
@@ -29,6 +29,23 @@ author_allowlist:
   - ThomasGoulet73
   - akshatsinha0
   - dotnet-maestro    # automated dep updates only
+
+# Daily discovery (pr-discovery.yml runs tools/discover-prs.py; no model call).
+# A PR is a candidate when it targets one of base_branches, is not a draft, is
+# not from a bot or an excluded author, and its author is in author_allowlist
+# or it carries one of include_labels.
+discovery:
+  base_branches: [main]
+  include_labels: ["Community Contribution"]
+  exclude_authors: [dotnet-bot, dotnet-maestro]
+  # Merged-upstream PRs older than this are ignored (the bootstrap seed covers
+  # older ones).
+  merged_lookback_days: 90
+  open_query_limit: 1000
+  merged_query_limit: 500
+  # Reviews dispatched per discovery run. Each review is two model calls, so
+  # this caps daily review cost while the backlog drains.
+  max_reviews_per_run: 10
 
 # Upstream commits/PRs that must NEVER be cherry-picked back into the fork.
 # Each entry refuses both the listed upstream commit SHA and any further commit
@@ -67,8 +84,27 @@ file_denylist:
   - azure-pipelines.yml
   - azure-pipelines1.yml
   - .github/**
-  - .if-fork/config.yaml
-  - .if-fork/prompts/**
+  # agent configuration: Claude Code would load these from the candidate tree
+  - .claude/**
+  - "**/.claude/**"
+  - .mcp.json
+  - CLAUDE.md
+  - CLAUDE.local.md
+  - AGENTS.md
+  # fork-owned: upstream dotnet/wpf has none of these. They hold the
+  # pipeline's own code, policy, ledger, tests and packaging, which privileged
+  # jobs run or trust, so an upstream change must never touch them.
+  - .if-fork/**
+  - tools/**
+  - tests/**
+  - test/**
+  - docs/**
+  - perf/**
+  - data/**
+  - packaging/InitialForce.*/**
+  - FORK.md
+  - NOTICE.md
+  - pyproject.toml
   # high-risk WPF source
   - src/Microsoft.DotNet.Wpf/src/PresentationFramework/System/Windows/Controls/Primitives/ScrollBar.cs
   - src/Microsoft.DotNet.Wpf/src/PresentationFramework/System/Windows/Controls/Primitives/Track.cs
@@ -134,8 +170,9 @@ ledger:
 
 claude_models:
   triage: claude-haiku-4-5
-  review_1: claude-opus-4-7
-  review_2: claude-opus-4-7
+  # pr-review.yml reads review_1 and review_2 from here (owner decision: Fable).
+  review_1: claude-fable-5-1
+  review_2: claude-fable-5-1
   cherry_pick: claude-sonnet-4-6
   conflict_resolve: claude-sonnet-4-6
   release_notes: claude-sonnet-4-6
@@ -143,7 +180,9 @@ claude_models:
 
 claude_limits:
   max_turns_triage: 8
-  max_turns_review: 12
+  # A review reads config, PR metadata, file list, diff, up to 5 source files
+  # and writes one file: about 15 turns at minimum. 12 was too low.
+  max_turns_review: 40
   max_turns_cherry_pick: 15
   max_turns_conflict: 20
   daily_token_cap_usd: 25

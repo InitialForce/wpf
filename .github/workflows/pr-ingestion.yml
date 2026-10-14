@@ -1,4 +1,36 @@
 # .github/workflows/pr-ingestion.yml
+#
+# Applies one approved upstream dotnet/wpf PR to the fork and opens a PR to
+# if/main. Triggered by pr-review.yml (tools/dispatch-approved.py sends
+# repository_dispatch "pr-ingestion-requested" with pr_number and head_sha) or
+# by hand.
+#
+# Trust model:
+#   - Every job validates pr_number (^[0-9]+$) and head_sha (^[0-9a-f]{40}$)
+#     first, and payload values reach shell only through env.
+#   - Checker code and policy (check-denylist.py, check-commit-denylist.py,
+#     config.yaml) always come from a separate checkout of if/main
+#     ("trusted/"), never from the candidate tree.
+#   - Claude only runs in resolve-conflicts, a job with contents:read, no App
+#     token, no GPG key and no persisted credentials. Claude loads only the
+#     action's own user settings (no project settings, hooks or MCP servers
+#     from the candidate tree), has no shell, reads the work tree and edits
+#     only the conflicted files. tools/prepare-resolver.sh refuses to start
+#     it when the tree holds agent configuration. It hands back only the
+#     conflicted files, as an artifact. The finalize job recreates the
+#     conflict itself, takes only those paths from the artifact, checks them,
+#     and only then signs and pushes.
+#   - Nothing is pushed before the whole branch diff passes file_denylist.
+#   - cherry-pick records the if/main commit it starts from (main_sha).
+#     resolve-conflicts and finalize branch from exactly that commit, so a
+#     change that lands on if/main meanwhile cannot be overwritten by a
+#     resolution made on an older tree. automerge.yml rebuilds the PR when
+#     if/main has moved.
+#
+# Flow: gate -> pre-flight (already in the fork?) -> approval check (the
+# exact pair must be approved in the ledger) -> cherry-pick (deterministic) ->
+# [resolve-conflicts -> finalize] -> open or reuse the PR to if/main.
+# build.yml runs on that PR; automerge.yml merges it when it passes.
 name: PR Ingestion (Cherry-Pick)
 
 on:
@@ -30,10 +62,10 @@ env:
   PR_NUMBER: ${{ inputs.pr_number || github.event.client_payload.pr_number }}
   PINNED_HEAD_SHA: ${{ inputs.head_sha || github.event.client_payload.head_sha }}
 
-# ---------------------------------------------------------------------------
-# Job 1: gate — autonomy-check (reusable workflow)
-# ---------------------------------------------------------------------------
 jobs:
+  # -------------------------------------------------------------------------
+  # Job 1: gate — autonomy-check (reusable workflow)
+  # -------------------------------------------------------------------------
   gate:
     name: Autonomy gate
     uses: ./.github/workflows/autonomy-check.yml
@@ -41,7 +73,7 @@ jobs:
       requested_action: cherry-pick
 
   # -------------------------------------------------------------------------
-  # Job 2: pre-flight — graduation check before we apply anything
+  # Job 2: pre-flight — is the change already in the fork?
   # -------------------------------------------------------------------------
   pre-flight:
     name: Pre-flight graduation check
@@ -53,6 +85,11 @@ jobs:
       action: ${{ steps.check.outputs.action }}
 
     steps:
+      - name: Validate payload
+        run: |
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] && [[ "$PINNED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::Invalid pr_number or head_sha"; exit 1; }
+
       - name: Generate GH App token
         id: app-token
         uses: tibdex/github-app-token@v2
@@ -62,14 +99,12 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
+          ref: if/main
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Add upstream remote
         run: git remote add upstream https://github.com/dotnet/wpf.git || true
-
-      - name: Fetch upstream
-        run: git fetch upstream release/10.0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -86,56 +121,57 @@ jobs:
       - name: Run cherry-pick-pre-flight.sh
         id: check
         run: |
+          # The script exits 2 on partial graduation; capture it instead of
+          # letting bash -e end the step before the action is recorded.
+          set +e
           RESULT=$(bash tools/cherry-pick-pre-flight.sh \
-            --pr-number "${{ env.PR_NUMBER }}" \
-            --head-sha "${{ env.PINNED_HEAD_SHA }}" \
+            --pr-number "$PR_NUMBER" \
+            --head-sha "$PINNED_HEAD_SHA" \
             --upstream-ref upstream \
             --ledger-path .if-fork/patch-ledger.jsonl)
+          RC=$?
+          set -e
+          echo "$RESULT"
+          if [ "$RC" -ne 0 ] && [ "$RC" -ne 2 ]; then
+            echo "::error::Pre-flight failed (exit $RC)."
+            exit 1
+          fi
           ACTION=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['action'])")
           echo "action=$ACTION" >> "$GITHUB_OUTPUT"
           echo "Pre-flight result: $ACTION"
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
-          GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
 
-      - name: Handle graduated — end workflow (no work needed)
+      - name: Handle graduated (nothing to do)
         if: steps.check.outputs.action == 'skip'
         run: |
-          echo "::notice::PR #${{ env.PR_NUMBER }} is already graduated — nothing to do."
+          echo "::notice::Upstream PR #$PR_NUMBER is already in the fork. Nothing to do."
 
-      - name: Handle partial graduation — open issue and fail
+      - name: Handle partial graduation — stop for a human
         if: steps.check.outputs.action == 'escalate'
         run: |
-          python tools/ledger-event.py \
-            --event pre_flight_failed \
-            --pr-number "${{ env.PR_NUMBER }}" \
-            --head-sha "${{ env.PINNED_HEAD_SHA }}" \
-            --actor "${{ github.actor }}" \
-            --details-json '{"reason": "partial_graduation_detected", "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
-            --push
-          gh issue create \
-            --title "Partial graduation detected: upstream PR #${{ env.PR_NUMBER }}" \
-            --body "Pre-flight detected partial graduation for upstream PR #${{ env.PR_NUMBER }} (pinned SHA: ${{ env.PINNED_HEAD_SHA }}). Manual review required.\n\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            --label "escalation,cherry-pick"
-          echo "::error::Partial graduation detected — workflow stopped. Issue opened."
+          # The pre-flight script already recorded an 'escalated' ledger event.
+          echo "::error::Upstream PR #$PR_NUMBER is partly in the fork already. A human must decide what to apply."
           exit 1
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
-          GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
 
   # -------------------------------------------------------------------------
-  # Job 3: sha-smuggling-check — verify HEAD SHA matches ledger
+  # Job 3: approval check — the exact (pr_number, head_sha) must be approved
+  # (also the SHA-smuggling check: a dispatched head that was not the
+  # reviewed and approved head is refused)
   # -------------------------------------------------------------------------
   sha-smuggling-check:
-    name: SHA-smuggling check
+    name: Approval and SHA check
     needs: [gate, pre-flight]
     if: needs.gate.outputs.proceed == 'true' && needs.pre-flight.outputs.action == 'apply'
     runs-on: ubuntu-latest
     environment: bot-credentials
 
     steps:
+      - name: Validate payload
+        run: |
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] && [[ "$PINNED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::Invalid pr_number or head_sha"; exit 1; }
+
       - name: Generate GH App token
         id: app-token
         uses: tibdex/github-app-token@v2
@@ -145,13 +181,9 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
+          ref: if/main
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
-
-      - name: Add upstream remote and fetch
-        run: |
-          git remote add upstream https://github.com/dotnet/wpf.git || true
-          git fetch upstream release/10.0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -165,78 +197,29 @@ jobs:
           gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
           gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
 
-      - name: Verify upstream HEAD SHA matches ledger
-        id: verify-sha
+      - name: Require an approved verdict for this exact head in the ledger
         run: |
-          # Read the most recent review_1 or review_2 entry for this PR from the ledger.
-          # The ledger is a JSONL file at .if-fork/patch-ledger.jsonl.
-          # If there is no review entry, we FAIL — we must not proceed without one.
-          LEDGER_SHA=$(python3 - <<'PYEOF'
-          import json, sys
-
-          pr = int("${{ env.PR_NUMBER }}")
-          ledger_path = ".if-fork/patch-ledger.jsonl"
-
-          review_sha = None
-          try:
-              with open(ledger_path) as fh:
-                  for line in fh:
-                      line = line.strip()
-                      if not line:
-                          continue
-                      entry = json.loads(line)
-                      if entry.get("pr_number") == pr and entry.get("event") in ("review_1", "review_2"):
-                          review_sha = entry.get("head_sha")
-          except FileNotFoundError:
-              print("ERROR: ledger file not found", file=sys.stderr)
-              sys.exit(1)
-
-          if review_sha is None:
-              print("ERROR: no review_1/review_2 entry found in ledger for PR", pr, file=sys.stderr)
-              sys.exit(2)
-
-          print(review_sha)
-          PYEOF
-          )
-
-          PYEXIT=$?
-          if [ $PYEXIT -ne 0 ]; then
-            echo "::error::Ledger lookup failed (exit $PYEXIT) — no review entry found for PR #${{ env.PR_NUMBER }}. Refusing to proceed."
+          set +e
+          RESULT=$(python3 tools/check-approval.py --ledger .if-fork/patch-ledger.jsonl \
+            --pr-number "$PR_NUMBER" --head-sha "$PINNED_HEAD_SHA")
+          RC=$?
+          set -e
+          echo "$RESULT"
+          if [ "$RC" -ne 0 ]; then
+            echo "::error::Upstream PR #$PR_NUMBER at $PINNED_HEAD_SHA is not approved in the ledger. Refusing to apply."
             python tools/ledger-event.py \
               --event escalated \
-              --pr-number "${{ env.PR_NUMBER }}" \
-              --head-sha "${{ env.PINNED_HEAD_SHA }}" \
-              --actor "${{ github.actor }}" \
-              --details-json '{"reason": "sha_smuggling_detected", "cause": "no_review_entry_in_ledger"}' \
+              --pr-number "$PR_NUMBER" \
+              --head-sha "$PINNED_HEAD_SHA" \
+              --actor pr-ingestion \
+              --details-json '{"reason": "sha_smuggling_detected", "cause": "no_approved_verdict_for_head"}' \
               --push
             exit 1
           fi
-
-          echo "Ledger SHA: $LEDGER_SHA"
-          echo "Pinned SHA (input): ${{ env.PINNED_HEAD_SHA }}"
-
-          if [ "${{ env.PINNED_HEAD_SHA }}" != "$LEDGER_SHA" ]; then
-            echo "::error::SHA mismatch — SHA-smuggling attack detected!"
-            echo "  Ledger:  $LEDGER_SHA"
-            echo "  Pinned:  ${{ env.PINNED_HEAD_SHA }}"
-            python tools/ledger-event.py \
-              --event escalated \
-              --pr-number "${{ env.PR_NUMBER }}" \
-              --head-sha "${{ env.PINNED_HEAD_SHA }}" \
-              --actor "${{ github.actor }}" \
-              --details-json "{\"reason\": \"sha_smuggling_detected\", \"ledger_sha\": \"$LEDGER_SHA\", \"pinned_sha\": \"${{ env.PINNED_HEAD_SHA }}\"}" \
-              --push
-            exit 1
-          fi
-
-          echo "::notice::SHA verification passed — pinned SHA matches ledger."
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
-          GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
 
   # -------------------------------------------------------------------------
-  # Job 4: cherry-pick — Claude Sonnet applies the patch
+  # Job 4: cherry-pick — deterministic apply on a branch from if/main.
+  # No model runs here. A clean result is checked and pushed here.
   # -------------------------------------------------------------------------
   cherry-pick:
     name: Cherry-pick PR #${{ github.event.client_payload.pr_number || inputs.pr_number }}
@@ -244,10 +227,24 @@ jobs:
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     environment: bot-credentials
+    defaults:
+      run:
+        working-directory: work
     outputs:
       branch: ${{ steps.set-branch.outputs.branch }}
+      main_sha: ${{ steps.base.outputs.sha }}
+      title: ${{ steps.apply.outputs.title }}
+      result: ${{ steps.apply.outputs.result }}
+      conflicts_allowed: ${{ steps.conflict-denylist.outputs.allowed }}
+      pushed: ${{ steps.finish.outputs.pushed }}
 
     steps:
+      - name: Validate payload
+        working-directory: .
+        run: |
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] && [[ "$PINNED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::Invalid pr_number or head_sha"; exit 1; }
+
       - name: Generate GH App token
         id: app-token
         uses: tibdex/github-app-token@v2
@@ -255,38 +252,193 @@ jobs:
           app_id: ${{ secrets.GH_APP_ID }}
           private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
 
-      - uses: actions/checkout@v4
+      - name: Check out if/main (trusted tools and policy)
+        uses: actions/checkout@v4
         with:
+          ref: if/main
+          path: trusted
+          persist-credentials: false
+
+      - name: Check out if/main (work tree)
+        uses: actions/checkout@v4
+        with:
+          ref: if/main
+          path: work
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
-      - name: Add upstream remote and fetch
-        run: |
-          git remote add upstream https://github.com/dotnet/wpf.git || true
-          git fetch upstream release/10.0
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/dotnet/wpf.git || true
+
+      - name: Pin the if/main commit for this run
+        id: base
+        run: echo "sha=$(git rev-parse origin/if/main)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install pyyaml
 
       - name: Set cherry-pick branch name
         id: set-branch
-        run: |
-          BRANCH="claude/cherry-pick-pr-${{ env.PR_NUMBER }}"
-          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
-          echo "CHERRY_PICK_BRANCH=$BRANCH" >> "$GITHUB_ENV"
-
-      - name: Create cherry-pick branch
-        run: |
-          git checkout -b "${{ steps.set-branch.outputs.branch }}" if/staging || \
-            git checkout "${{ steps.set-branch.outputs.branch }}"
+        run: echo "branch=claude/cherry-pick-pr-$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
       - name: Import bot GPG key
-        uses: ./.github/actions/import-bot-gpg
+        uses: ./trusted/.github/actions/import-bot-gpg
         with:
           gpg-private-key: ${{ secrets.GH_BOT_GPG_KEY }}
           gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
           gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
 
-      - name: Load cherry-pick prompt
+      - name: Apply upstream change
+        id: apply
+        run: |
+          bash "$TRUSTED/tools/apply-upstream-pr.sh"
+          {
+            echo "result=$(cat "$OUT/result")"
+            echo "title=$(cat "$OUT/title" 2>/dev/null)"
+            echo "reason=$(cat "$OUT/reason" 2>/dev/null)"
+          } >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.set-branch.outputs.branch }}
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+          OUT: ${{ runner.temp }}/apply
+          TRUSTED: ${{ github.workspace }}/trusted
+
+      - name: Refuse conflicts on denylisted files
+        id: conflict-denylist
+        if: steps.apply.outputs.result == 'conflict'
+        run: |
+          if python3 "$TRUSTED/tools/check-denylist.py" --config "$TRUSTED/.if-fork/config.yaml" \
+               --changed-files "$RUNNER_TEMP/apply/conflicts.txt"; then
+            echo "allowed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "allowed=false" >> "$GITHUB_OUTPUT"
+          fi
+          git cherry-pick --abort
+        env:
+          TRUSTED: ${{ github.workspace }}/trusted
+
+      - name: Check the whole diff, add trailers and push
+        id: finish
+        if: steps.apply.outputs.result == 'applied'
+        run: |
+          bash "$TRUSTED/tools/finish-ingestion-branch.sh"
+          echo "pushed=$(cat "$OUT/pushed" 2>/dev/null || echo false)" >> "$GITHUB_OUTPUT"
+          if [ -f "$OUT/reason" ]; then echo "reason=$(cat "$OUT/reason")" >> "$GITHUB_OUTPUT"; fi
+        env:
+          BRANCH: ${{ steps.set-branch.outputs.branch }}
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+          OUT: ${{ runner.temp }}/finish
+          TRUSTED: ${{ github.workspace }}/trusted
+
+      - name: Record already-applied change
+        if: steps.apply.outputs.result == 'empty'
+        run: |
+          git checkout -q -B if/main origin/if/main
+          python "$TRUSTED/tools/ledger-event.py" \
+            --event graduated_upstream \
+            --pr-number "$PR_NUMBER" \
+            --head-sha "$PINNED_HEAD_SHA" \
+            --actor pr-ingestion \
+            --details-json '{"detection_method":"empty_cherry_pick"}' \
+            --push
+        env:
+          TRUSTED: ${{ github.workspace }}/trusted
+
+      - name: Escalate when the change could not be applied
+        if: >-
+          steps.apply.outputs.result == 'refused' ||
+          steps.conflict-denylist.outputs.allowed == 'false' ||
+          steps.finish.outputs.reason != ''
+        run: |
+          REASON="${APPLY_REASON:-$FINISH_REASON}"
+          [ -z "$REASON" ] && REASON=conflict_in_denylist
+          bash "$TRUSTED/tools/ingestion-escalate.sh" "$REASON"
+        env:
+          APPLY_REASON: ${{ steps.apply.outputs.reason }}
+          FINISH_REASON: ${{ steps.finish.outputs.reason }}
+          TRUSTED: ${{ github.workspace }}/trusted
+
+  # -------------------------------------------------------------------------
+  # Job 5: resolve-conflicts — Claude, with no credentials beyond a
+  # read-only token. Returns only the conflicted files as an artifact.
+  # -------------------------------------------------------------------------
+  resolve-conflicts:
+    name: Resolve conflicts (no credentials)
+    needs: [gate, cherry-pick]
+    if: >-
+      needs.gate.outputs.proceed == 'true' &&
+      needs.cherry-pick.outputs.result == 'conflict' &&
+      needs.cherry-pick.outputs.conflicts_allowed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      BASE_SHA: ${{ needs.cherry-pick.outputs.main_sha }}
+
+    steps:
+      - name: Validate payload
+        run: |
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] && [[ "$PINNED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            && [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::Invalid pr_number, head_sha or if/main SHA"; exit 1; }
+
+      - name: Check out the pinned if/main commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install pyyaml
+
+      - name: Recreate the conflicted cherry-pick
+        run: |
+          # Copy the scripts out first: the cherry-pick and the agent change the tree.
+          cp tools/apply-upstream-pr.sh tools/conflict-handoff.sh tools/prepare-resolver.sh "$RUNNER_TEMP/"
+          git config user.name "Claude (Initial Force WPF Bot)"
+          git config user.email "wpf-bot@initialforce.com"
+          git remote add upstream https://github.com/dotnet/wpf.git
+          bash "$RUNNER_TEMP/apply-upstream-pr.sh"
+          test "$(cat "$OUT/result")" = conflict
+          echo "SOURCE_SHA=$(cat "$OUT/source")" >> "$GITHUB_ENV"
+          {
+            echo 'CONFLICT_FILES<<__EOF_FILES__'
+            cat "$OUT/conflicts.txt"
+            echo '__EOF_FILES__'
+          } >> "$GITHUB_ENV"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: claude/cherry-pick-pr-${{ env.PR_NUMBER }}
+          OUT: ${{ runner.temp }}/apply
+          TRUSTED: ${{ github.workspace }}
+
+      - name: Prepare the agent's input and tool rules
+        id: prepare
+        run: |
+          set +e
+          ALLOWED=$(bash "$RUNNER_TEMP/prepare-resolver.sh" "$RUNNER_TEMP/apply/conflicts.txt" .resolver-input)
+          RC=$?
+          set -e
+          case "$RC" in
+            0) { echo "run=true"; echo "allowed=$ALLOWED"; } >> "$GITHUB_OUTPUT" ;;
+            3) echo "run=false" >> "$GITHUB_OUTPUT" ;;
+            *) exit "$RC" ;;
+          esac
+
+      - name: Load cherry-pick conflict prompt
         id: load-prompt-pick
-        shell: bash
         run: |
           {
             echo 'prompt<<__EOF_PROMPT__'
@@ -295,69 +447,75 @@ jobs:
             echo '__EOF_PROMPT__'
           } >> "$GITHUB_OUTPUT"
 
-      - name: Run cherry-pick (Claude Sonnet)
+      # Trusted settings only: --setting-sources user skips the tree's
+      # .claude/ and CLAUDE.md, --strict-mcp-config skips its .mcp.json, and
+      # disableAllHooks turns hooks off. The deny rules keep the process
+      # environment (/proc) and the runner's command files (_temp) out of
+      # reach; a double slash is an absolute path in a permission rule.
+      - name: Resolve conflicts (Claude Sonnet)
         id: pick
+        if: steps.prepare.outputs.run == 'true'
+        continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
+          allowed_bots: initial-force-wpf-bot
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: ${{ steps.load-prompt-pick.outputs.prompt }}
+          settings: '{"disableAllHooks": true}'
           claude_args: >-
-            --max-turns 15
+            --max-turns 30
             --model claude-sonnet-4-6
-            --allowedTools Bash,Read,Edit,Grep,mcp__github__pull_request_read,mcp__github__get_file_contents,mcp__github__issue_write
-            --disallowedTools mcp__github__push_files
-          github_token: ${{ steps.app-token.outputs.token }}
+            --setting-sources user
+            --strict-mcp-config
+            --allowedTools "${{ steps.prepare.outputs.allowed }}"
+            --disallowedTools "Bash,WebFetch,WebSearch,NotebookEdit,Task,Read(//proc/**),Read(/proc/**),Read(//home/runner/work/_temp/**),Read(/home/runner/work/_temp/**),Edit(//home/runner/work/_temp/**),mcp__github__push_files,mcp__github__create_pull_request"
+          github_token: ${{ github.token }}
         env:
-          PR_NUMBER: ${{ env.PR_NUMBER }}
-          PINNED_HEAD_SHA: ${{ env.PINNED_HEAD_SHA }}
-          CHERRY_PICK_BRANCH: ${{ steps.set-branch.outputs.branch }}
+          CONFIG_PATH: .if-fork/config.yaml
+          RESOLVER_INPUT: .resolver-input
+          ESCALATION_ISSUE_PATH: ${{ github.workspace }}/.escalation.md
 
-      - name: Load cherry-pick-conflict-resolution prompt
-        id: load-prompt-conflict
-        if: steps.pick.outcome == 'failure'
-        shell: bash
+      - name: Collect the resolved conflict files
+        if: always()
         run: |
-          {
-            echo 'prompt<<__EOF_PROMPT__'
-            cat .if-fork/prompts/cherry-pick-conflict-resolution.md
-            echo
-            echo '__EOF_PROMPT__'
-          } >> "$GITHUB_OUTPUT"
+          mkdir -p "$RUNNER_TEMP/resolution"
+          bash "$RUNNER_TEMP/conflict-handoff.sh" collect "$RUNNER_TEMP/apply/conflicts.txt" "$RUNNER_TEMP/resolution" .resolver-delete.txt
+          if [ -f .escalation.md ]; then cp .escalation.md "$RUNNER_TEMP/resolution/escalation.md"; fi
 
-      - name: Run conflict-resolution if cherry-pick failed
-        if: steps.pick.outcome == 'failure'
-        uses: anthropics/claude-code-action@v1
+      - name: Upload resolution
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: ${{ steps.load-prompt-conflict.outputs.prompt }}
-          claude_args: >-
-            --max-turns 10
-            --model claude-sonnet-4-6
-            --allowedTools Bash,Read,Edit,Grep,mcp__github__issue_write
-            --disallowedTools mcp__github__push_files
-          github_token: ${{ steps.app-token.outputs.token }}
-        env:
-          PR_NUMBER: ${{ env.PR_NUMBER }}
-          CHERRY_PICK_BRANCH: ${{ steps.set-branch.outputs.branch }}
-
-      - name: Push cherry-pick branch
-        run: |
-          git push origin "${{ steps.set-branch.outputs.branch }}" --force-with-lease
-        env:
-          GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
-          GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
+          name: cherry-pick-resolution
+          path: ${{ runner.temp }}/resolution/
+          retention-days: 7
 
   # -------------------------------------------------------------------------
-  # Job 5: denylist-check — check changed files against file_denylist
+  # Job 6: finalize — trusted. Recreate the conflict, take only the
+  # conflicted paths from the artifact, check, sign and push.
   # -------------------------------------------------------------------------
-  denylist-check:
-    name: Denylist check
-    needs: [gate, cherry-pick]
-    if: needs.gate.outputs.proceed == 'true'
+  finalize:
+    name: Check resolution and push
+    needs: [gate, cherry-pick, resolve-conflicts]
+    if: needs.gate.outputs.proceed == 'true' && needs.resolve-conflicts.result == 'success'
     runs-on: ubuntu-latest
     environment: bot-credentials
+    defaults:
+      run:
+        working-directory: work
+    env:
+      BASE_SHA: ${{ needs.cherry-pick.outputs.main_sha }}
+    outputs:
+      pushed: ${{ steps.finish.outputs.pushed }}
 
     steps:
+      - name: Validate payload
+        working-directory: .
+        run: |
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] && [[ "$PINNED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            && [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::Invalid pr_number, head_sha or if/main SHA"; exit 1; }
+
       - name: Generate GH App token
         id: app-token
         uses: tibdex/github-app-token@v2
@@ -365,160 +523,109 @@ jobs:
           app_id: ${{ secrets.GH_APP_ID }}
           private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
 
-      - uses: actions/checkout@v4
+      - name: Check out if/main (trusted tools and policy)
+        uses: actions/checkout@v4
         with:
-          ref: ${{ needs.cherry-pick.outputs.branch }}
+          ref: if/main
+          path: trusted
+          persist-credentials: false
+
+      - name: Check out the pinned if/main commit (work tree)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE_SHA }}
+          path: work
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
-      - name: Fetch staging base
-        run: git fetch origin if/staging
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/dotnet/wpf.git || true
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: pip install pyyaml
 
-      - name: Run denylist check
-        id: denylist
-        run: |
-          CHANGED_FILES=$(git diff --name-only origin/if/staging...HEAD)
-          echo "Changed files:"
-          echo "$CHANGED_FILES"
-          python3 tools/check-denylist.py \
-            --config .if-fork/config.yaml \
-            --files <(echo "$CHANGED_FILES")
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-
-  # -------------------------------------------------------------------------
-  # Job 6: build-and-test — trigger build.yml on cherry-pick branch
-  # -------------------------------------------------------------------------
-  build-and-test:
-    name: Build and test
-    # cherry-pick must be in direct needs[] because we read its outputs.branch
-    # below; GitHub Actions does NOT propagate outputs transitively.
-    needs: [gate, cherry-pick, denylist-check]
-    if: needs.gate.outputs.proceed == 'true'
-    runs-on: ubuntu-latest
-    environment: bot-credentials
-
-    steps:
-      - name: Generate GH App token
-        id: app-token
-        uses: tibdex/github-app-token@v2
+      - name: Import bot GPG key
+        uses: ./trusted/.github/actions/import-bot-gpg
         with:
-          app_id: ${{ secrets.GH_APP_ID }}
-          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          gpg-private-key: ${{ secrets.GH_BOT_GPG_KEY }}
+          gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
+          gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
 
-      - name: Trigger build.yml and capture run ID
+      - name: Download resolution
+        uses: actions/download-artifact@v4
+        with:
+          name: cherry-pick-resolution
+          path: ${{ runner.temp }}/resolution
+
+      - name: Recreate the conflict and apply the resolution
+        id: overlay
         run: |
-          BRANCH="${{ needs.cherry-pick.outputs.branch }}"
-          DISPATCH_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          gh workflow run build.yml \
-            --ref "$BRANCH" \
-            --repo "${{ github.repository }}"
-          # Wait briefly for run to appear (gh workflow run is async HTTP 204)
-          RUN_ID=""
-          for i in {1..10}; do
-            RUN_ID=$(gh run list \
-              --workflow=build.yml \
-              --branch="$BRANCH" \
-              --event=workflow_dispatch \
-              --limit=5 \
-              --created=">=$DISPATCH_TS" \
-              --json databaseId,createdAt \
-              --jq '.[0].databaseId // empty' \
-              --repo "${{ github.repository }}" 2>/dev/null || true)
-            [ -n "$RUN_ID" ] && break
-            sleep 5
-          done
-          if [ -z "$RUN_ID" ]; then
-            echo "::error::Could not capture build run ID after 10 attempts — cannot track build."
-            exit 1
+          bash "$TRUSTED/tools/apply-upstream-pr.sh"
+          if [ "$(cat "$OUT/result")" != conflict ]; then
+            echo "reason=reapply_mismatch" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          echo "::notice::Build workflow triggered (run ID: $RUN_ID) for branch $BRANCH"
-          gh run watch "$RUN_ID" --exit-status --repo "${{ github.repository }}"
+          if [ -s "$RUNNER_TEMP/resolution/escalation.md" ]; then
+            cat "$RUNNER_TEMP/resolution/escalation.md"
+            echo "reason=cherry_pick_conflict" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if ! bash "$TRUSTED/tools/conflict-handoff.sh" apply "$OUT/conflicts.txt" "$RUNNER_TEMP/resolution"; then
+            echo "reason=cherry_pick_conflict" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          GIT_EDITOR=true git cherry-pick --continue
+          echo "ok=true" >> "$GITHUB_OUTPUT"
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ needs.cherry-pick.outputs.branch }}
+          OUT: ${{ runner.temp }}/apply
+          TRUSTED: ${{ github.workspace }}/trusted
+
+      - name: Check the whole diff, add trailers and push
+        id: finish
+        if: steps.overlay.outputs.ok == 'true'
+        run: |
+          bash "$TRUSTED/tools/finish-ingestion-branch.sh"
+          echo "pushed=$(cat "$OUT/pushed" 2>/dev/null || echo false)" >> "$GITHUB_OUTPUT"
+          if [ -f "$OUT/reason" ]; then echo "reason=$(cat "$OUT/reason")" >> "$GITHUB_OUTPUT"; fi
+        env:
+          BRANCH: ${{ needs.cherry-pick.outputs.branch }}
+          OUT: ${{ runner.temp }}/finish
+          TRUSTED: ${{ github.workspace }}/trusted
+          # Adds the Conflict-Resolved-By trailer: automerge refuses it.
+          CONFLICT_RESOLVED: "true"
+
+      - name: Escalate when the resolution was not accepted
+        if: steps.overlay.outputs.reason != '' || steps.finish.outputs.reason != ''
+        run: bash "$TRUSTED/tools/ingestion-escalate.sh" "${OVERLAY_REASON:-$FINISH_REASON}"
+        env:
+          OVERLAY_REASON: ${{ steps.overlay.outputs.reason }}
+          FINISH_REASON: ${{ steps.finish.outputs.reason }}
+          TRUSTED: ${{ github.workspace }}/trusted
 
   # -------------------------------------------------------------------------
-  # Job 7: perf-gate — check for performance regressions
-  # -------------------------------------------------------------------------
-  perf-gate:
-    name: Performance regression gate
-    needs: [gate, build-and-test, cherry-pick]
-    if: needs.gate.outputs.proceed == 'true'
-    runs-on: ubuntu-latest
-    environment: bot-credentials
-
-    steps:
-      - name: Generate GH App token
-        id: app-token
-        uses: tibdex/github-app-token@v2
-        with:
-          app_id: ${{ secrets.GH_APP_ID }}
-          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.cherry-pick.outputs.branch }}
-          fetch-depth: 0
-          token: ${{ steps.app-token.outputs.token }}
-
-      - name: Download perf artifacts from build run
-        run: |
-          gh run download \
-            --repo "${{ github.repository }}" \
-            --pattern "perf-results-*" \
-            --dir /tmp/perf-results/ || echo "No perf artifacts found."
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Run perf regression check
-        id: perf
-        run: |
-          python3 tools/check-regression.py \
-            --current /tmp/perf-results/current.json \
-            --baseline perf/baseline.json \
-            --current-sha ${{ github.sha }} \
-            --output /tmp/perf-gate-result.json \
-            --threshold-warn 5 \
-            --threshold-fail 15
-        continue-on-error: true
-
-      - name: Open perf-regression issue if gate failed
-        if: steps.perf.outcome == 'failure'
-        run: |
-          gh issue create \
-            --title "Perf regression detected: upstream PR #${{ env.PR_NUMBER }}" \
-            --body "Performance regression gate failed for upstream PR #${{ env.PR_NUMBER }} on branch \`${{ needs.cherry-pick.outputs.branch }}\`.\n\nSee run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            --label "perf-regression,cherry-pick"
-          exit 1
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-
-  # -------------------------------------------------------------------------
-  # Job 8: open-pr — open internal PR, emit ledger event, set auto-merge timer
+  # Job 7: open-pr — open (or reuse) the PR to if/main, emit ledger event
   # -------------------------------------------------------------------------
   open-pr:
-    name: Open internal PR and set auto-merge timer
-    needs: [gate, perf-gate, cherry-pick]
-    if: needs.gate.outputs.proceed == 'true'
+    name: Open internal PR
+    needs: [gate, cherry-pick, finalize]
+    if: >-
+      always() && needs.gate.outputs.proceed == 'true' &&
+      (needs.cherry-pick.outputs.pushed == 'true' || needs.finalize.outputs.pushed == 'true')
     runs-on: ubuntu-latest
     environment: bot-credentials
     outputs:
       internal_pr_number: ${{ steps.open-pr.outputs.pr_number }}
 
     steps:
+      - name: Validate payload
+        run: |
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] && [[ "$PINNED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::Invalid pr_number or head_sha"; exit 1; }
+
       - name: Generate GH App token
         id: app-token
         uses: tibdex/github-app-token@v2
@@ -528,6 +635,7 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
+          ref: if/main
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Set up Python
@@ -545,41 +653,55 @@ jobs:
       - name: Open internal PR
         id: open-pr
         run: |
-          BRANCH="claude/cherry-pick-pr-${{ env.PR_NUMBER }}"
-          PR_URL=$(gh pr create \
-            --title "cherry-pick: upstream #${{ env.PR_NUMBER }}" \
-            --body "Automated cherry-pick of upstream dotnet/wpf#${{ env.PR_NUMBER }}.\n\nPinned SHA: \`${{ env.PINNED_HEAD_SHA }}\`\n\nAll gates passed (denylist, build, smoke, perf). Awaiting merge.\n\nWorkflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            --base if/staging \
-            --head "$BRANCH" \
-            --label "automated,cherry-pick" \
-            --repo "${{ github.repository }}")
-          PR_NUM=$(echo "$PR_URL" | grep -oP '\d+$')
+          set -euo pipefail
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          if [ "$CONFLICT_RESOLVED" = true ]; then
+            MERGE_NOTE="**A person must merge this PR.** The cherry-pick conflicted with the fork, and Claude wrote the resolution (commit trailer \`Conflict-Resolved-By: claude\`). Nobody has reviewed that resolution: the two reviews covered the upstream diff only. \`automerge.yml\` will not merge this PR. Review the resolved files against the upstream PR, then merge it by hand when \`Build\` passes."
+          else
+            MERGE_NOTE="The \`Build\` workflow runs on this PR. When it passes, \`automerge.yml\` merges this PR (unless \`IF_AUTOMERGE_FROZEN=true\`)."
+          fi
+          cat > "$RUNNER_TEMP/pr-body.md" <<EOF
+          Automated cherry-pick of https://github.com/dotnet/wpf/pull/$PR_NUMBER.
+
+          Reviewed and approved upstream head: \`$PINNED_HEAD_SHA\`. Passed: pre-flight, approval check against the ledger, commit and file denylists (if/main's copies).
+
+          $MERGE_NOTE
+
+          Run: $RUN_URL
+          EOF
+          PR_NUM=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --head "$BRANCH" \
+                     --base if/main --json number --jq '.[0].number // empty')
+          if [ -n "$PR_NUM" ]; then
+            gh pr edit "$PR_NUM" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/pr-body.md"
+            gh pr comment "$PR_NUM" --repo "$GITHUB_REPOSITORY" \
+              --body "Branch re-applied from upstream head \`$PINNED_HEAD_SHA\`. Run: $RUN_URL"
+          else
+            PR_URL=$(gh pr create --repo "$GITHUB_REPOSITORY" \
+              --base if/main --head "$BRANCH" \
+              --title "cherry-pick: $UPSTREAM_TITLE (upstream #$PR_NUMBER)" \
+              --body-file "$RUNNER_TEMP/pr-body.md")
+            PR_NUM="${PR_URL##*/}"
+          fi
+          gh pr edit "$PR_NUM" --repo "$GITHUB_REPOSITORY" --add-label automated \
+            || echo "::warning::Could not add label 'automated' to PR #$PR_NUM; automerge.yml will skip it."
+          bash tools/human-merge-label.sh "$PR_NUM" "$CONFLICT_RESOLVED"
           echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
-          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
-          echo "::notice::Opened internal PR #$PR_NUM: $PR_URL"
+          echo "::notice::Internal PR #$PR_NUM"
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: ${{ needs.cherry-pick.outputs.branch }}
+          UPSTREAM_TITLE: ${{ needs.cherry-pick.outputs.title }}
+          CONFLICT_RESOLVED: ${{ needs.finalize.outputs.pushed == 'true' }}
 
       - name: Emit cherry_picked ledger event
         run: |
           python tools/ledger-event.py \
             --event cherry_picked \
-            --pr-number "${{ env.PR_NUMBER }}" \
-            --head-sha "${{ env.PINNED_HEAD_SHA }}" \
-            --actor "${{ github.actor }}" \
-            --details-json "{\"internal_pr\": \"${{ steps.open-pr.outputs.pr_number }}\", \"branch\": \"claude/cherry-pick-pr-${{ env.PR_NUMBER }}\"}" \
+            --pr-number "$PR_NUMBER" \
+            --head-sha "$PINNED_HEAD_SHA" \
+            --actor pr-ingestion \
+            --details-json "{\"internal_pr\": \"$INTERNAL_PR\", \"branch\": \"$BRANCH\"}" \
             --push
         env:
-          GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
-          GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-
-      - name: Enable auto-merge (24h timer) if not frozen
-        if: vars.IF_AUTOMERGE_FROZEN != 'true'
-        run: |
-          gh pr merge "${{ steps.open-pr.outputs.pr_number }}" \
-            --auto --squash \
-            --repo "${{ github.repository }}"
-          echo "::notice::Auto-merge enabled for PR #${{ steps.open-pr.outputs.pr_number }} (24h timer)"
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          INTERNAL_PR: ${{ steps.open-pr.outputs.pr_number }}
+          BRANCH: ${{ needs.cherry-pick.outputs.branch }}

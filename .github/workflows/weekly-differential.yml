@@ -1,4 +1,14 @@
 # .github/workflows/weekly-differential.yml
+#
+# Weekly check that the fork's patches do not change smoke-test behaviour.
+# Builds two trees with the same fork tooling and packaging:
+#   upstream  if/main with src/ replaced by the upstream release/10.0 commit
+#             if/main is based on (the merge base), so only the patches differ
+#   fork      if/main as is
+# Each tree is packed as InitialForce.WPF and the smoke harness runs against
+# it. tools/diff-smoke-results.py compares the two NUnit result files.
+# A regression or drift keeps one open issue (comment on repeats, closed on a
+# clean week). Workflow failures are reported by claude-on-failure.yml.
 name: Weekly Differential
 
 on:
@@ -7,7 +17,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: weekly-diff-${{ github.event.schedule }}
+  group: weekly-diff
   cancel-in-progress: false
 
 permissions:
@@ -28,295 +38,211 @@ jobs:
       requested_action: discovery-scan
 
   # ---------------------------------------------------------------------------
-  # Job 2: build-upstream-clean
-  # Checks out upstream release/10.0 (no fork patches), runs smoke harness,
-  # uploads smoke-upstream.xml artifact.
+  # Job 2: build-smoke — build, pack and smoke-test both trees
   # ---------------------------------------------------------------------------
-  build-upstream-clean:
-    name: Build upstream-clean (release/10.0)
+  build-smoke:
+    name: Build and smoke (${{ matrix.variant }})
     needs: gate
-    if: needs.gate.result == 'success'
-    runs-on: windows-latest
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Add upstream remote
-        run: git remote add upstream https://github.com/dotnet/wpf.git || true
-        shell: bash
-
-      - name: Fetch upstream release/10.0
-        run: git fetch upstream release/10.0
-        shell: bash
-
-      - name: Checkout upstream clean (no fork patches)
-        run: git checkout upstream/release/10.0
-        shell: bash
-
-      - name: Cache NuGet packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.nuget/packages
-          key: nuget-win-x64-upstream-${{ hashFiles('**/packages.lock.json', 'global.json') }}
-          restore-keys: nuget-win-x64-upstream-
-
-      - name: Set up .NET SDK
-        uses: actions/setup-dotnet@v4
-        with:
-          global-json-file: global.json
-
-      - name: Build upstream Release x64
-        run: |
-          eng\common\CIBuild.cmd -configuration Release ^
-            /p:Platform=x64 ^
-            /p:OfficialBuildId=0 ^
-            /p:EnableMicrobuild=false ^
-            /p:SignType=None
-        shell: cmd
-
-      - name: Run smoke harness (upstream)
-        # Placeholder: smoke test project invocation. Command is spec-correct;
-        # will fail if test/InitialForce.WpfSmoke/ does not yet exist.
-        run: |
-          dotnet test test/InitialForce.WpfSmoke/ \
-            -c Release \
-            --logger "trx;LogFileName=smoke-upstream.xml" \
-            --results-directory /tmp/smoke-upstream
-        shell: bash
-
-      - name: Upload smoke-upstream artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: smoke-upstream
-          path: /tmp/smoke-upstream/smoke-upstream.xml
-          retention-days: 14
-
-  # ---------------------------------------------------------------------------
-  # Job 3: build-fork
-  # Checks out if/main, runs same smoke harness, uploads smoke-fork.xml artifact.
-  # ---------------------------------------------------------------------------
-  build-fork:
-    name: Build fork (if/main)
-    needs: gate
-    if: needs.gate.result == 'success'
-    runs-on: windows-latest
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [upstream, fork]
 
     steps:
       - uses: actions/checkout@v4
         with:
           ref: if/main
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Replace src/ with the upstream base (upstream variant only)
+        if: matrix.variant == 'upstream'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/dotnet/wpf.git
+          git fetch --no-tags upstream release/10.0
+          BASE=$(git merge-base HEAD upstream/release/10.0)
+          echo "::notice::Upstream base for if/main: $BASE"
+          git rm -r -q src
+          git checkout "$BASE" -- src
 
       - name: Cache NuGet packages
         uses: actions/cache@v4
         with:
           path: ~/.nuget/packages
-          key: nuget-win-x64-fork-${{ hashFiles('**/packages.lock.json', 'global.json') }}
-          restore-keys: nuget-win-x64-fork-
+          key: nuget-win-x64-${{ hashFiles('global.json', 'eng/Versions.props') }}
+          restore-keys: nuget-win-x64-
 
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@v4
         with:
           global-json-file: global.json
 
-      - name: Build fork Release x64
-        run: |
-          eng\common\CIBuild.cmd -configuration Release ^
-            /p:Platform=x64 ^
-            /p:OfficialBuildId=0 ^
-            /p:EnableMicrobuild=false ^
-            /p:SignType=None
+      # Same invocation as build.yml. The old '/p:OfficialBuildId=0' made
+      # arcade fail with '"0".Substring(2, 2)' in Version.BeforeCommonTargets.
+      - name: Build WPF (Release x64)
+        run: .\build.cmd -c Release -plat x64 -pack
         shell: cmd
+        timeout-minutes: 75
 
-      - name: Run smoke harness (fork)
+      - name: Stage DLLs and pack InitialForce.WPF
+        id: pack
+        shell: pwsh
         run: |
-          dotnet test test/InitialForce.WpfSmoke/ \
-            -c Release \
-            --logger "trx;LogFileName=smoke-fork.xml" \
-            --results-directory /tmp/smoke-fork
-        shell: bash
+          $dest = "packaging\InitialForce.WPF\runtimes\win-x64\lib\net10.0"
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+          foreach ($n in "PresentationCore", "PresentationFramework", "WindowsBase", "System.Xaml") {
+            $hit = Get-ChildItem -Recurse "artifacts\bin\$n\x64\Release" -Filter "$n.dll" |
+                   Where-Object { $_.FullName -notmatch "\\ref\\|\\obj\\" } | Select-Object -First 1
+            if (-not $hit) { throw "Could not locate $n.dll" }
+            Copy-Item $hit.FullName -Destination $dest
+          }
+          $version = "10.0.0-diff.$env:GITHUB_RUN_NUMBER.$env:VARIANT"
+          dotnet pack packaging\InitialForce.WPF\InitialForce.WPF.csproj -c Release `
+            -p:PackageVersion=$version --output artifacts\diff-packages
+          if ($LASTEXITCODE -ne 0) { throw "pack failed" }
+          "version=$version" | Out-File -Append $env:GITHUB_OUTPUT
+        env:
+          VARIANT: ${{ matrix.variant }}
 
-      - name: Upload smoke-fork artifact
+      - name: Run smoke harness
+        shell: pwsh
+        run: |
+          $ver = $env:PACKED_VERSION
+          $feed = (Resolve-Path artifacts\diff-packages).Path
+          dotnet nuget add source $feed --name local-packed --configfile NuGet.config
+          dotnet nuget add source https://api.nuget.org/v3/index.json --name nuget.org --configfile NuGet.config
+          dotnet publish test/InitialForce.WpfSmoke/InitialForce.WpfSmoke.csproj -c Release `
+            -p:InitialForceWpfVersion=$ver -o smoke-publish/
+          if ($LASTEXITCODE -ne 0) { throw "publish failed" }
+          # Same backstops as build.yml: the Arcade SDK strips NUnit assemblies
+          # and the package targets leave the patched DLLs out of deps.json.
+          $gp = ((dotnet nuget locals global-packages --list) -replace '^[^:]*:\s*','').Trim()
+          foreach ($pkgId in 'nunit','nunitlite') {
+            $verDir = Get-ChildItem (Join-Path $gp $pkgId) -Directory | Sort-Object Name -Descending | Select-Object -First 1
+            $tfmDir = @('netstandard2.0','net6.0','net462') | ForEach-Object { Join-Path $verDir.FullName "lib\$_" } |
+                      Where-Object { Test-Path $_ } | Select-Object -First 1
+            Get-ChildItem $tfmDir -Filter '*.dll' | ForEach-Object { Copy-Item $_.FullName smoke-publish/ -Force }
+          }
+          $depsPath = "smoke-publish/InitialForce.WpfSmoke.deps.json"
+          $deps = Get-Content $depsPath -Raw | ConvertFrom-Json
+          $rt = $deps.runtimeTarget.name
+          $existing = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+          foreach ($lib in $deps.targets.$rt.PSObject.Properties) {
+            if ($null -ne $lib.Value.runtime) {
+              foreach ($r in $lib.Value.runtime.PSObject.Properties) { [void]$existing.Add([System.IO.Path]::GetFileName($r.Name)) }
+            }
+          }
+          $appProp = $deps.targets.$rt.PSObject.Properties | Where-Object { $_.Name -like 'InitialForce.WpfSmoke/*' } | Select-Object -First 1
+          $runtimeObj = $deps.targets.$rt.($appProp.Name).runtime
+          foreach ($f in Get-ChildItem smoke-publish -Filter '*.dll') {
+            if (-not $existing.Contains($f.Name)) {
+              $runtimeObj | Add-Member -NotePropertyName $f.Name -NotePropertyValue ([pscustomobject]@{}) -Force
+            }
+          }
+          ($deps | ConvertTo-Json -Depth 100) | Set-Content $depsPath -Encoding utf8
+          New-Item -ItemType Directory -Force -Path smoke-results | Out-Null
+          & "smoke-publish/InitialForce.WpfSmoke.exe" --result:"smoke-results/smoke-$env:VARIANT.xml"
+          # Test failures are data for the comparison, not a job failure.
+          Write-Host "NUnitLite exit code: $LASTEXITCODE"
+          if (-not (Test-Path "smoke-results/smoke-$env:VARIANT.xml")) { throw "smoke harness produced no result file" }
+          exit 0
+        env:
+          VARIANT: ${{ matrix.variant }}
+          PACKED_VERSION: ${{ steps.pack.outputs.version }}
+
+      - name: Upload smoke results
         uses: actions/upload-artifact@v4
         with:
-          name: smoke-fork
-          path: /tmp/smoke-fork/smoke-fork.xml
+          name: smoke-${{ matrix.variant }}
+          path: smoke-results/smoke-${{ matrix.variant }}.xml
           retention-days: 14
 
   # ---------------------------------------------------------------------------
-  # Job 4: compare
-  # Downloads artifacts, runs diff-smoke-results.py.
-  # Exit 2 (regression) -> opens blocking issue (P1).
-  # Exit 1 (drift) -> opens lower-priority issue (P3).
+  # Job 3: compare — diff the two result files; keep one issue up to date
   # ---------------------------------------------------------------------------
   compare:
     name: Diff upstream vs fork smoke results
-    needs: [build-upstream-clean, build-fork]
+    needs: [gate, build-smoke]
+    if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Download smoke-upstream artifact
+      - name: Download smoke results
         uses: actions/download-artifact@v4
         with:
-          name: smoke-upstream
-          path: /tmp/smoke-results/upstream/
-
-      - name: Download smoke-fork artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: smoke-fork
-          path: /tmp/smoke-results/fork/
+          pattern: smoke-*
+          merge-multiple: true
+          path: smoke-results/
 
       - name: Run diff-smoke-results.py
         id: diff
         run: |
           set +e
           python tools/diff-smoke-results.py \
-            --upstream /tmp/smoke-results/upstream/smoke-upstream.xml \
-            --fork /tmp/smoke-results/fork/smoke-fork.xml \
-            --output /tmp/diff-report.json
-          DIFF_EXIT=$?
-          echo "diff_exit=${DIFF_EXIT}" >> "$GITHUB_OUTPUT"
-          set -e
+            --upstream smoke-results/smoke-upstream.xml \
+            --fork smoke-results/smoke-fork.xml \
+            --output diff-report.json
+          echo "diff_exit=$?" >> "$GITHUB_OUTPUT"
+          cat diff-report.json
           exit 0
-        shell: bash
 
-      - name: Write regression issue body
-        if: steps.diff.outputs.diff_exit == '2'
-        run: |
-          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          BODY=$(cat /tmp/diff-report.json 2>/dev/null || echo '{}')
-          printf '%s\n' \
-            "## Weekly Differential: Regression Detected" \
-            "" \
-            "Run: ${RUN_URL}" \
-            "" \
-            '```json' \
-            "${BODY}" \
-            '```' \
-            > /tmp/regression-body.md
-        shell: bash
-
-      - name: Open regression issue (exit 2)
-        if: steps.diff.outputs.diff_exit == '2'
-        run: |
-          gh issue create \
-            --title "[Weekly Differential] REGRESSION detected -- $(date -u +%Y-%m-%d)" \
-            --body-file /tmp/regression-body.md \
-            --label "differential,regression,P1"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-
-      - name: Write drift issue body
-        if: steps.diff.outputs.diff_exit == '1'
-        run: |
-          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          BODY=$(cat /tmp/diff-report.json 2>/dev/null || echo '{}')
-          printf '%s\n' \
-            "## Weekly Differential: Drift Detected" \
-            "" \
-            "Run: ${RUN_URL}" \
-            "" \
-            '```json' \
-            "${BODY}" \
-            '```' \
-            > /tmp/drift-body.md
-        shell: bash
-
-      - name: Open drift issue (exit 1)
-        if: steps.diff.outputs.diff_exit == '1'
-        run: |
-          gh issue create \
-            --title "[Weekly Differential] Drift detected -- $(date -u +%Y-%m-%d)" \
-            --body-file /tmp/drift-body.md \
-            --label "differential,drift,P3"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-
-      - name: Upload diff report artifact
+      - name: Upload diff report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: diff-report
-          path: /tmp/diff-report.json
+          path: diff-report.json
+          if-no-files-found: ignore
           retention-days: 30
 
-  # ---------------------------------------------------------------------------
-  # Job 5: report
-  # Posts operator-followup summary issue with diff results.
-  # Runs regardless of compare outcome (always()).
-  # ---------------------------------------------------------------------------
-  report:
-    name: Post operator-followup summary
-    needs: compare
-    if: always() && needs.compare.result != 'skipped'
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Download diff report
-        uses: actions/download-artifact@v4
-        with:
-          name: diff-report
-          path: /tmp/
-        continue-on-error: true
-
-      - name: Write operator-followup issue body
+      - name: Update the differential issue
         run: |
-          DIFF_JSON=$(cat /tmp/diff-report.json 2>/dev/null || echo '{"verdict":"unknown","error":"diff-report artifact unavailable"}')
-          VERDICT=$(echo "${DIFF_JSON}" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('verdict','unknown'))" 2>/dev/null || echo "unknown")
-          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-          printf '%s\n' \
-            "## Weekly Differential -- Operator Followup" \
-            "" \
-            "**Date:** ${NOW}" \
-            "**Run:** ${RUN_URL}" \
-            "**Verdict:** \`${VERDICT}\`" \
-            "" \
-            "### Diff Results" \
-            "" \
-            '```json' \
-            "${DIFF_JSON}" \
-            '```' \
-            "" \
-            "### Action required" \
-            "" \
-            "| Verdict | Action |" \
-            "|---------|--------|" \
-            "| \`match\` | No action required. |" \
-            "| \`drift\` | Review new/missing scenarios; update baseline if intentional. |" \
-            "| \`regression\` | Investigate regressions before applying next upstream patch. |" \
-            > /tmp/followup-body.md
-        shell: bash
-
-      - name: Post operator-followup issue
-        run: |
-          DIFF_JSON=$(cat /tmp/diff-report.json 2>/dev/null || echo '{"verdict":"unknown"}')
-          VERDICT=$(echo "${DIFF_JSON}" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('verdict','unknown'))" 2>/dev/null || echo "unknown")
-          gh issue create \
-            --title "[Weekly Differential] Operator followup -- $(date -u +%Y-%m-%d) -- verdict: ${VERDICT}" \
-            --body-file /tmp/followup-body.md \
-            --label "differential,operator-followup,weekly-report"
+          set -euo pipefail
+          MARKER="<!-- weekly-differential -->"
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          ISSUE=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label automated \
+                    --limit 100 --json number,body \
+                  | jq -r --arg m "$MARKER" '[.[] | select(.body | contains($m))][0].number // empty')
+          case "$DIFF_EXIT" in
+            0)
+              if [ -n "$ISSUE" ]; then
+                gh issue close "$ISSUE" --repo "$GITHUB_REPOSITORY" \
+                  --comment "Smoke results match upstream again: $RUN_URL"
+              fi
+              echo "::notice::Fork and upstream smoke results match."
+              exit 0
+              ;;
+            1) VERDICT="drift (scenario set differs, no pass-to-fail change)" ;;
+            *) VERDICT="regression (a scenario passes on upstream and fails on the fork)" ;;
+          esac
+          {
+            echo "$MARKER"
+            echo "**Weekly differential:** $VERDICT"
+            echo
+            echo "Run: $RUN_URL"
+            echo
+            echo '```json'
+            cat diff-report.json 2>/dev/null || echo '{}'
+            echo '```'
+          } > body.md
+          if [ -n "$ISSUE" ]; then
+            gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file body.md
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "Weekly differential: fork smoke results differ from upstream" \
+              --body-file body.md --label automated
+          fi
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
+          GH_TOKEN: ${{ github.token }}
+          DIFF_EXIT: ${{ steps.diff.outputs.diff_exit }}

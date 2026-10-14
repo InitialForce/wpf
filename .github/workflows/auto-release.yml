@@ -1,0 +1,240 @@
+# .github/workflows/auto-release.yml
+#
+# Daily automatic release. Tags the newest if/main commit whose Build run
+# passed, but only when src/ (the WPF code that goes into the packages)
+# changed since the last published release, and at most once per UTC day.
+#
+# The tag is signed by the bot key, checked with tools/verify-release-tag.sh
+# (the same check release.yml runs) and pushed. This workflow then dispatches
+# release.yml on if/main with the tag name as input (release.yml has no
+# tag-push trigger, so a tag can never bring its own workflow). release.yml
+# verifies the tag against docs/bot-gpg-pubkey.asc, runs every gate again
+# (build.yml with the release version, smoke on the packed nupkg,
+# perf-on-pack) and only then publishes to nuget.org. This workflow never publishes anything itself.
+#
+# Before it plans a new tag, it re-dispatches release.yml for the newest
+# release tag when that tag has no GitHub Release and no successful or running
+# Release run (a lost dispatch or a failed run), at most 3 runs per tag.
+#
+# Decision rules live in tools/release-version.py (`reconcile` and `plan`),
+# with tests.
+name: Auto Release
+
+on:
+  schedule:
+    # After the nightly pipeline: nightly-rebase 03:07, pr-discovery 04:17,
+    # then review, ingestion and auto-merge of the day's PRs.
+    - cron: "23 9 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Tag even if src/ is unchanged, the commit is already tagged, or a release already ran today; skips re-dispatching an unpublished tag"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  gate:
+    name: Autonomy gate (release-publish)
+    uses: ./.github/workflows/autonomy-check.yml
+    with:
+      requested_action: release-publish
+
+  tag:
+    name: Tag a release if src/ changed
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      # Checked out with the App token, which pushes the release tag
+      # (GITHUB_TOKEN here is read-only for contents). This job runs only
+      # if/main code; nothing from the tag or a PR executes here.
+      - uses: actions/checkout@v4
+        with:
+          ref: if/main
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Find the newest green if/main commit
+        id: green
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SHA=$(gh run list --repo "$GITHUB_REPOSITORY" \
+            --workflow build.yml --branch if/main --event push --status success \
+            --limit 1 --json headSha --jq '.[0].headSha // ""')
+          if [[ -n "$SHA" && ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Unexpected headSha from the Build run list"
+            exit 1
+          fi
+          if [ -z "$SHA" ]; then
+            echo "::notice::No successful Build run on if/main; nothing to release."
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git merge-base --is-ancestor "$SHA" HEAD; then
+            echo "::warning::Last green commit $SHA is not on if/main any more; nothing to release."
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Newest green if/main commit: $SHA"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+        shell: bash
+
+      # A tag counts as published once release.yml created its GitHub
+      # Release, which is its last publish step.
+      - name: List published release tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 \
+            --json tagName --jq '.[].tagName' > "$RUNNER_TEMP/published-tags.txt"
+        shell: bash
+
+      # Before tagging anything new: the newest release tag may have no
+      # GitHub Release because its dispatch was lost (the tag push worked,
+      # the dispatch did not) or its Release run failed. Re-dispatch it, at
+      # most --max-attempts runs in all. force skips this.
+      - name: Reconcile an unpublished release tag
+        id: reconcile
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.force) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run list --repo "$GITHUB_REPOSITORY" --workflow release.yml \
+            --event workflow_dispatch --limit 200 \
+            --json displayTitle,status,conclusion > "$RUNNER_TEMP/release-runs.json"
+          python3 tools/release-version.py reconcile \
+            --published-tags-file "$RUNNER_TEMP/published-tags.txt" \
+            --runs-file "$RUNNER_TEMP/release-runs.json" | tee -a "$GITHUB_OUTPUT"
+        shell: bash
+
+      - name: Check the tag to re-dispatch
+        id: redispatch
+        if: steps.reconcile.outputs.action == 'dispatch'
+        env:
+          TAG: ${{ steps.reconcile.outputs.tag }}
+          BOT_FPR: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          # Only a bot-signed tag on if/main is re-dispatched; release.yml
+          # would refuse anything else.
+          if PUBKEY_FILE=docs/bot-gpg-pubkey.asc MAIN_REF=HEAD \
+               tools/verify-release-tag.sh "$TAG" >/dev/null; then
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Not re-dispatching $TAG: it fails the release tag check (see log)"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          fi
+        shell: bash
+
+      - name: Decide whether to release
+        id: plan
+        if: >-
+          steps.green.outputs.sha != '' &&
+          steps.reconcile.outputs.action != 'wait' &&
+          steps.redispatch.outputs.tag == ''
+        env:
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
+          SHA: ${{ steps.green.outputs.sha }}
+        run: |
+          set -euo pipefail
+          ARGS=(plan --target "$SHA"
+                --published-tags-file "$RUNNER_TEMP/published-tags.txt")
+          if [ "$FORCE" = "true" ]; then ARGS+=(--force); fi
+          python3 tools/release-version.py "${ARGS[@]}" | tee -a "$GITHUB_OUTPUT"
+        shell: bash
+
+      - name: Import bot GPG key
+        if: steps.plan.outputs.release == 'true'
+        uses: ./.github/actions/import-bot-gpg
+        with:
+          gpg-private-key: ${{ secrets.GH_BOT_GPG_KEY }}
+          gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
+          gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
+
+      - name: Create and push signed release tag
+        if: steps.plan.outputs.release == 'true'
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+          SHA: ${{ steps.green.outputs.sha }}
+          REASON: ${{ steps.plan.outputs.reason }}
+          BOT_FPR: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          VERSION=$(python3 tools/release-version.py version --tag "$TAG")
+          git tag -s "$TAG" "$SHA" -m "InitialForce WPF $VERSION" -m "$REASON"
+          # Run release.yml's own tag check before pushing, so a tag it would
+          # refuse (for example when docs/bot-gpg-pubkey.asc is not the
+          # signing key) is never pushed.
+          PUBKEY_FILE=docs/bot-gpg-pubkey.asc MAIN_REF=HEAD \
+            tools/verify-release-tag.sh "$TAG" >/dev/null || {
+            git tag -d "$TAG"
+            echo "::error::release.yml would refuse $TAG; docs/bot-gpg-pubkey.asc must be the key with fingerprint GH_BOT_GPG_FINGERPRINT"
+            exit 1
+          }
+          git push origin "refs/tags/$TAG"
+          echo "Pushed $TAG ($VERSION) at $SHA."
+        shell: bash
+
+      - name: Dispatch release.yml on if/main for the tag
+        if: steps.redispatch.outputs.tag != '' || steps.plan.outputs.release == 'true'
+        env:
+          # GITHUB_TOKEN may start workflow_dispatch runs (GitHub's documented
+          # exception to "GITHUB_TOKEN events start no workflows").
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.redispatch.outputs.tag || steps.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # If all three tries fail, the next run's reconcile step retries.
+          for attempt in 1 2 3; do
+            if gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref if/main -f tag="$TAG"; then
+              echo "Dispatched release.yml for $TAG."
+              exit 0
+            fi
+            echo "::warning::Dispatch attempt $attempt for $TAG failed"
+            sleep $((attempt * 20))
+          done
+          echo "::error::Could not dispatch release.yml for $TAG; the next Auto Release run retries it"
+          exit 1
+        shell: bash
+
+      - name: Summary
+        if: always()
+        env:
+          SHA: ${{ steps.green.outputs.sha }}
+          RELEASE: ${{ steps.plan.outputs.release }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          REASON: ${{ steps.plan.outputs.reason }}
+          RECONCILE: ${{ steps.reconcile.outputs.reason }}
+          REDISPATCH: ${{ steps.redispatch.outputs.tag }}
+        run: |
+          {
+            echo "## Auto release"
+            echo "- Unpublished tag check: ${RECONCILE:-skipped}"
+            if [ -n "${REDISPATCH:-}" ]; then echo "- Re-dispatched: $REDISPATCH"; fi
+            echo "- Newest green if/main commit: ${SHA:-none}"
+            echo "- Release: ${RELEASE:-false}"
+            if [ -n "${TAG:-}" ]; then echo "- Tag: $TAG"; fi
+            echo "- Reason: ${REASON:-no green commit}"
+          } >> "$GITHUB_STEP_SUMMARY"
+        shell: bash

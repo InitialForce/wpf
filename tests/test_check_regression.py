@@ -22,6 +22,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 # Paths relative to repo root
 REPO_ROOT = Path(__file__).parent.parent
 SCRIPT = REPO_ROOT / "tools" / "check-regression.py"
@@ -432,3 +434,220 @@ class TestOutputFile:
         run_script("--output", str(out), current=CURRENT_PASS, current_sha="mysha456")
         data = json.loads(out.read_text())
         assert data["current_sha"] == "mysha456"
+
+
+# ---------------------------------------------------------------------------
+# Several reports (one per benchmark class), missing and failed scenarios
+# ---------------------------------------------------------------------------
+
+def _split_current_by_class(tmp_path: Path, source: str = CURRENT_PASS) -> list[str]:
+    """Split a fixture into one report per benchmark class, like BenchmarkDotNet."""
+    current = json.loads(Path(source).read_text())
+    paths = []
+    for i, bench in enumerate(current["Benchmarks"]):
+        report = {k: v for k, v in current.items() if k != "Benchmarks"}
+        report["Benchmarks"] = [bench]
+        path = tmp_path / f"report-{i}.json"
+        path.write_text(json.dumps(report))
+        paths.append(str(path))
+    return paths
+
+
+def _run_multi(*extra: str, current: list[str], baseline: str | None = BASELINE) -> tuple[
+    int, dict[str, Any]
+]:
+    cmd = [sys.executable, str(SCRIPT), "--current", *current, "--current-sha", "sha1"]
+    if baseline:
+        cmd += ["--baseline", baseline]
+    result = subprocess.run([*cmd, *extra], capture_output=True, text=True)
+    try:
+        data: dict[str, Any] = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        data = {}
+    return result.returncode, data
+
+
+class TestMultipleReports:
+    def test_all_reports_are_merged(self, tmp_path: Path) -> None:
+        paths = _split_current_by_class(tmp_path)
+        assert len(paths) == 3
+        code, data = _run_multi(current=paths)
+        assert code == 0
+        assert data["status"] == "pass"
+        names = {s["name"] for s in data["scenarios"]}
+        assert len(names) == 3
+
+    def test_regression_in_second_report_is_caught(self, tmp_path: Path) -> None:
+        """Only the first report used to be checked; a regression in another
+        class's report went unnoticed."""
+        paths = _split_current_by_class(tmp_path, CURRENT_FAIL)
+        code, data = _run_multi(current=paths)
+        assert code == 2
+        assert data["status"] == "fail"
+
+    def test_duplicate_benchmark_across_reports_is_an_error(self, tmp_path: Path) -> None:
+        code, _ = _run_multi(current=[CURRENT_PASS, CURRENT_PASS])
+        assert code == 1
+
+
+class TestMissingAndFailedScenarios:
+    def test_missing_baseline_scenario_fails(self, tmp_path: Path) -> None:
+        """A run with only one class's report must not pass the whole gate."""
+        paths = _split_current_by_class(tmp_path)
+        code, data = _run_multi(current=paths[:1])
+        assert code == 2
+        assert data["status"] == "fail"
+        missing = [s for s in data["scenarios"] if s.get("reason") == "missing_in_current"]
+        assert len(missing) == 2
+
+    def test_failed_benchmark_without_statistics_fails(self, tmp_path: Path) -> None:
+        current = json.loads(Path(CURRENT_PASS).read_text())
+        current["Benchmarks"][1]["Statistics"] = None
+        failed_name = current["Benchmarks"][1]["FullName"]
+        cur = tmp_path / "current.json"
+        cur.write_text(json.dumps(current))
+        code, data = _run_multi(current=[str(cur)])
+        assert code == 2
+        failed = [s for s in data["scenarios"] if s["name"] == failed_name]
+        assert failed and failed[0]["reason"] == "no_measurement"
+        assert failed[0]["verdict"] == "fail"
+
+    def test_failed_new_benchmark_fails(self, tmp_path: Path) -> None:
+        current = json.loads(Path(CURRENT_PASS).read_text())
+        current["Benchmarks"].append({"FullName": "X.NewBench.Broken", "Statistics": None})
+        cur = tmp_path / "current.json"
+        cur.write_text(json.dumps(current))
+        code, data = _run_multi(current=[str(cur)])
+        assert code == 2
+        assert any(s.get("reason") == "no_measurement" for s in data["scenarios"])
+
+
+class TestMergeOnly:
+    def test_merge_only_writes_all_benchmarks(self, tmp_path: Path) -> None:
+        paths = _split_current_by_class(tmp_path)
+        out = tmp_path / "baseline.json"
+        code, _ = _run_multi(
+            "--merge-only", "--merged-output", str(out), current=paths, baseline=None
+        )
+        assert code == 0
+        merged = json.loads(out.read_text())
+        assert len(merged["Benchmarks"]) == 3
+        assert "HostEnvironmentInfo" in merged
+
+    def test_merge_only_fails_on_unmeasured(self, tmp_path: Path) -> None:
+        current = json.loads(Path(CURRENT_PASS).read_text())
+        current["Benchmarks"][0]["Statistics"] = {}
+        cur = tmp_path / "current.json"
+        cur.write_text(json.dumps(current))
+        code, _ = _run_multi(
+            "--merge-only", "--merged-output", str(tmp_path / "b.json"),
+            current=[str(cur)], baseline=None,
+        )
+        assert code == 2
+
+    def test_merge_only_fails_on_empty(self, tmp_path: Path) -> None:
+        cur = tmp_path / "current.json"
+        cur.write_text(json.dumps({"Benchmarks": []}))
+        code, _ = _run_multi(
+            "--merge-only", "--merged-output", str(tmp_path / "b.json"),
+            current=[str(cur)], baseline=None,
+        )
+        assert code == 2
+
+    def test_baseline_required_without_merge_only(self) -> None:
+        code, _ = _run_multi(current=[CURRENT_PASS], baseline=None)
+        assert code == 1
+
+
+class TestAllocationMeasurementRequired:
+    """Regression: a missing Memory.BytesAllocatedPerOperation was read as 0,
+    so the hard Allocated gate reported a 100% improvement (or skipped the
+    check against a zero baseline) and passed."""
+
+    @staticmethod
+    def _write(tmp_path: Path, name: str, doc: dict[str, Any]) -> str:
+        path = tmp_path / name
+        path.write_text(json.dumps(doc))
+        return str(path)
+
+    def _current_with(self, tmp_path: Path, memory: Any, drop: bool = False) -> tuple[str, str]:
+        current = json.loads(Path(CURRENT_PASS).read_text())
+        bench = current["Benchmarks"][0]
+        if drop:
+            bench.pop("Memory", None)
+        elif memory is not None or "Memory" in bench:
+            bench["Memory"] = memory
+        return self._write(tmp_path, "current.json", current), bench["FullName"]
+
+    @pytest.mark.parametrize(
+        "memory",
+        [
+            None,
+            {},
+            {"BytesAllocatedPerOperation": None},
+            {"BytesAllocatedPerOperation": "100"},
+            {"BytesAllocatedPerOperation": True},
+            {"BytesAllocatedPerOperation": -1},
+        ],
+        ids=["null-memory", "empty-memory", "null", "string", "bool", "negative"],
+    )
+    def test_invalid_allocation_fails(self, tmp_path: Path, memory: Any) -> None:
+        cur, name = self._current_with(tmp_path, memory)
+        code, data = _run_multi(current=[cur])
+        assert code == 2
+        failed = [s for s in data["scenarios"] if s["name"] == name]
+        assert failed and failed[0]["reason"] == "no_measurement"
+
+    def test_missing_memory_block_fails(self, tmp_path: Path) -> None:
+        cur, name = self._current_with(tmp_path, None, drop=True)
+        code, data = _run_multi(current=[cur])
+        assert code == 2
+        assert any(s["name"] == name and s["verdict"] == "fail" for s in data["scenarios"])
+
+    @pytest.mark.parametrize("value", ["NaN", "Infinity"])
+    def test_non_finite_values_fail(self, tmp_path: Path, value: str) -> None:
+        current = json.loads(Path(CURRENT_PASS).read_text())
+        current["Benchmarks"][0]["Memory"] = {"BytesAllocatedPerOperation": 0}
+        text = json.dumps(current).replace(
+            '"BytesAllocatedPerOperation": 0', f'"BytesAllocatedPerOperation": {value}', 1
+        )
+        cur = tmp_path / "current.json"
+        cur.write_text(text)
+        code, _ = _run_multi(current=[str(cur)])
+        assert code == 2
+        current["Benchmarks"][0]["Memory"] = {"BytesAllocatedPerOperation": 0}
+        current["Benchmarks"][0]["Statistics"]["Mean"] = 1.0
+        text = json.dumps(current).replace('"Mean": 1.0', f'"Mean": {value}', 1)
+        cur.write_text(text)
+        code, _ = _run_multi(current=[str(cur)])
+        assert code == 2
+
+    def test_measured_zero_allocation_is_fine(self, tmp_path: Path) -> None:
+        current = json.loads(Path(CURRENT_PASS).read_text())
+        baseline = json.loads(Path(BASELINE).read_text())
+        for doc in (current, baseline):
+            doc["Benchmarks"][0]["Memory"] = {"BytesAllocatedPerOperation": 0}
+        cur = self._write(tmp_path, "current.json", current)
+        base = self._write(tmp_path, "baseline.json", baseline)
+        code, data = _run_multi(current=[cur], baseline=base)
+        assert code == 0, data
+
+    def test_baseline_without_allocation_is_an_error(self, tmp_path: Path) -> None:
+        baseline = json.loads(Path(BASELINE).read_text())
+        baseline["Benchmarks"][0]["Memory"] = {"BytesAllocatedPerOperation": None}
+        base = self._write(tmp_path, "baseline.json", baseline)
+        code, _ = _run_multi(current=[CURRENT_PASS], baseline=base)
+        assert code == 2
+
+    def test_regeneration_refuses_missing_allocation(self, tmp_path: Path) -> None:
+        cur, _ = self._current_with(tmp_path, {"BytesAllocatedPerOperation": None})
+        out = tmp_path / "baseline.json"
+        code, _ = _run_multi(
+            "--merge-only", "--merged-output", str(out), current=[cur], baseline=None
+        )
+        assert code == 2
+
+    def test_checked_in_baseline_is_valid(self) -> None:
+        code, _ = _run_multi(current=[str(REPO_ROOT / "perf" / "baseline.json")],
+                             baseline=str(REPO_ROOT / "perf" / "baseline.json"))
+        assert code == 0

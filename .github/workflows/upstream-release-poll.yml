@@ -1,0 +1,93 @@
+# .github/workflows/upstream-release-poll.yml
+#
+# Daily check for a new dotnet/wpf stable release on the tracked major
+# version. When the newest v10.0.<N> tag is not yet in
+# if/mirror/release/10.0, it sends repository_dispatch
+# "upstream-stable-released" with the tag, which starts
+# upstream-stable-adoption.yml. It does nothing when the tag is already
+# adopted or an adoption run for it is in flight, and stops retrying a tag
+# after three failed adoption runs (claude-on-failure.yml keeps the issue).
+name: Upstream Release Poller
+
+on:
+  schedule:
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: upstream-release-poll
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  TAG_PREFIX: "v10.0."
+  MIRROR_BRANCH: if/mirror/release/10.0
+
+jobs:
+  gate:
+    name: Autonomy gate
+    uses: ./.github/workflows/autonomy-check.yml
+    with:
+      requested_action: upstream-stable-adoption
+
+  poll:
+    name: Look for a new upstream stable tag
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find newest stable tag and decide
+        id: decide
+        run: |
+          set -euo pipefail
+          read -r TAG TAG_SHA < <(git ls-remote --tags https://github.com/dotnet/wpf.git "refs/tags/${TAG_PREFIX}*" \
+            | python3 tools/upstream-release-poll.py latest-tag --prefix "$TAG_PREFIX") || true
+          if [ -z "${TAG:-}" ]; then
+            echo "::notice::No ${TAG_PREFIX}N tag upstream."
+            echo "action=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Newest upstream stable tag: $TAG ($TAG_SHA)"
+          git fetch --no-tags origin "$MIRROR_BRANCH"
+          git remote add upstream https://github.com/dotnet/wpf.git
+          git fetch --no-tags upstream "$TAG_SHA"
+          ADOPTED=false
+          if git merge-base --is-ancestor "$TAG_SHA" "origin/$MIRROR_BRANCH"; then ADOPTED=true; fi
+          ACTION=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow upstream-stable-adoption.yml \
+                     --limit 50 --json displayTitle,status,conclusion \
+                   | python3 tools/upstream-release-poll.py decide --tag "$TAG" --adopted "$ADOPTED")
+          echo "::notice::$TAG: $ACTION"
+          echo "action=$ACTION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Generate GH App token
+        id: app-token
+        if: steps.decide.outputs.action == 'dispatch'
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      # The App token (not GITHUB_TOKEN) is required: events sent with
+      # GITHUB_TOKEN do not start workflows.
+      - name: Dispatch upstream-stable-released
+        if: steps.decide.outputs.action == 'dispatch'
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/dispatches" \
+            -f event_type=upstream-stable-released \
+            -f "client_payload[tag]=$TAG"
+          echo "::notice::Dispatched upstream-stable-released for $TAG."
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG: ${{ steps.decide.outputs.tag }}

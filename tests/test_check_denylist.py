@@ -335,3 +335,55 @@ def test_cli_missing_config_exits_1() -> None:
         assert result.returncode == 1
     finally:
         files_path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# The real config: agent configuration and fork-owned paths are denied
+# ---------------------------------------------------------------------------
+
+REAL_CONFIG = Path(__file__).parent.parent / ".if-fork" / "config.yaml"
+
+
+def _real_patterns() -> list[str]:
+    return MODULE.load_config(REAL_CONFIG)
+
+
+def test_real_config_denies_agent_configuration() -> None:
+    files = [
+        ".claude/settings.json",
+        "src/Microsoft.DotNet.Wpf/.claude/settings.local.json",
+        ".mcp.json",
+        "CLAUDE.md",
+        "src/Microsoft.DotNet.Wpf/src/CLAUDE.md",
+        "CLAUDE.local.md",
+        "AGENTS.md",
+    ]
+    denied = {v["file"] for v in MODULE.check_files(files, _real_patterns())}
+    assert denied == set(files)
+
+
+def test_real_config_denies_fork_owned_paths() -> None:
+    files = [
+        ".if-fork/patch-ledger.jsonl",
+        ".if-fork/config.yaml",
+        "tools/ledger-event.py",
+        "tests/conftest.py",
+        "test/InitialForce.WpfSmoke/Perf/PerfHarness.cs",
+        "docs/bot-gpg-pubkey.asc",
+        "perf/baseline.json",
+        "packaging/InitialForce.WPF/InitialForce.WPF.csproj",
+        "FORK.md",
+        "pyproject.toml",
+    ]
+    denied = {v["file"] for v in MODULE.check_files(files, _real_patterns())}
+    assert denied == set(files)
+
+
+def test_real_config_allows_ordinary_upstream_paths() -> None:
+    files = [
+        "src/Microsoft.DotNet.Wpf/src/PresentationCore/System/Windows/UIElement.cs",
+        "eng/Build.props",
+        "packaging/Directory.Build.props",
+        "Documentation/README.md",
+    ]
+    assert MODULE.check_files(files, _real_patterns()) == []

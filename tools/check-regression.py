@@ -5,6 +5,17 @@ check-regression.py
 Reads BenchmarkDotNet JSON results for the current run and a baseline run,
 then checks each scenario for performance regressions.
 
+BenchmarkDotNet writes one JSON report per benchmark class, so --current takes
+one or more files and merges them. Every baseline scenario must be present in
+the merged current results with a measurement; a missing or failed scenario is
+a 'fail' (reason missing_in_current or no_measurement). A measurement needs a
+finite Statistics.Mean and a finite, non-negative
+Memory.BytesAllocatedPerOperation; a measured zero allocation is fine, a
+missing or null one is not. A baseline entry without both is an error.
+--merge-only writes the merged reports to --merged-output (used to regenerate
+perf/baseline.json) and fails the same way when a benchmark has no
+measurement.
+
 Thresholds (applied to both Mean latency and Allocated bytes):
   > warn_threshold  (default 5%)  -> status: warning, exit 0
   > fail_threshold  (default 15%) -> status: fail,    exit 2
@@ -12,7 +23,7 @@ Thresholds (applied to both Mean latency and Allocated bytes):
 
 Usage:
   python tools/check-regression.py \\
-      --current  perf/current.json \\
+      --current  report-1.json [report-2.json ...] \\
       --baseline perf/baseline.json \\
       --current-sha <git-sha> \\
       [--output /tmp/result.json] \\
@@ -46,6 +57,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -103,11 +115,88 @@ def load_bdn_json(path: str) -> dict[str, Any]:
     return data
 
 
+def merge_bdn_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
+    """Merge several BenchmarkDotNet JSON reports into one document.
+
+    The first report's top-level fields are kept; the Benchmarks lists are
+    concatenated. A FullName that appears in two reports is an error.
+    """
+    if not reports:
+        raise ValueError("no BenchmarkDotNet reports given")
+    merged: dict[str, Any] = {k: v for k, v in reports[0].items() if k != "Benchmarks"}
+    benchmarks: list[Any] = []
+    seen: set[str] = set()
+    for report in reports:
+        entries = report.get("Benchmarks", [])
+        if not isinstance(entries, list):
+            raise ValueError("'Benchmarks' field is not a list")
+        for bench in entries:
+            name = bench.get("FullName") if isinstance(bench, dict) else None
+            if isinstance(name, str) and name:
+                if name in seen:
+                    raise ValueError(f"benchmark {name!r} appears in more than one report")
+                seen.add(name)
+            benchmarks.append(bench)
+    merged["Benchmarks"] = benchmarks
+    return merged
+
+
+def _finite_number(value: Any) -> bool:
+    """True for a finite int or float. JSON booleans, NaN and Infinity are not
+    measurements."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def measurement_problem(bench: dict[str, Any]) -> str | None:
+    """Say why a benchmark entry has no usable measurement, or return None.
+
+    Both metrics are required: Statistics.Mean and
+    Memory.BytesAllocatedPerOperation, each a finite number (allocation also
+    not negative). A measured zero allocation is fine; a missing, null or
+    non-numeric one is not, because the Allocated gate would otherwise read
+    it as 0 and pass. BenchmarkDotNet keeps a failed benchmark in the report
+    without statistics.
+    """
+    stats = bench.get("Statistics")
+    mean = stats.get("Mean") if isinstance(stats, dict) else None
+    if not _finite_number(mean):
+        return "no Statistics.Mean"
+    memory = bench.get("Memory")
+    allocated: Any = (
+        memory.get("BytesAllocatedPerOperation") if isinstance(memory, dict) else None
+    )
+    if not _finite_number(allocated) or allocated < 0:
+        return "no Memory.BytesAllocatedPerOperation"
+    return None
+
+
+def unmeasured_benchmarks(data: dict[str, Any]) -> dict[str, str]:
+    """Map the FullName of every benchmark without a usable measurement to
+    the reason (see measurement_problem)."""
+    problems: dict[str, str] = {}
+    for bench in data.get("Benchmarks", []):
+        if not isinstance(bench, dict):
+            continue
+        name = bench.get("FullName")
+        if not isinstance(name, str) or not name:
+            continue
+        problem = measurement_problem(bench)
+        if problem:
+            problems[name] = problem
+    return problems
+
+
 def extract_benchmarks(data: dict[str, Any]) -> dict[str, dict[str, float]]:
     """
     Extract per-benchmark Mean and Allocated metrics from a BDN JSON.
 
     Returns a dict mapping FullName -> {"Mean": <ns>, "Allocated": <bytes>}.
+    Benchmarks without both measurements are left out; see
+    unmeasured_benchmarks().
     """
     result: dict[str, dict[str, float]] = {}
     benchmarks = data.get("Benchmarks", [])
@@ -121,21 +210,11 @@ def extract_benchmarks(data: dict[str, Any]) -> dict[str, dict[str, float]]:
         if not isinstance(full_name, str) or not full_name:
             continue
 
-        # Mean latency (nanoseconds) from Statistics.Mean
-        stats = bench.get("Statistics", {})
-        if not isinstance(stats, dict):
+        if measurement_problem(bench):
             continue
-        mean_val = stats.get("Mean")
-        if not isinstance(mean_val, (int, float)):
-            continue
-
-        # Allocation from Memory.BytesAllocatedPerOperation
-        memory = bench.get("Memory", {})
-        allocated: float = 0.0
-        if isinstance(memory, dict):
-            alloc_val = memory.get("BytesAllocatedPerOperation")
-            if isinstance(alloc_val, (int, float)):
-                allocated = float(alloc_val)
+        # Mean latency (nanoseconds) and allocated bytes per operation.
+        mean_val = bench["Statistics"]["Mean"]
+        allocated = float(bench["Memory"]["BytesAllocatedPerOperation"])
 
         result[full_name] = {
             "Mean": float(mean_val),
@@ -184,11 +263,16 @@ def compare_benchmarks(
     strict_new_scenarios: bool = False,
     allow_new_scenarios: set[str] | None = None,
     warn_only_metrics: set[str] | None = None,
+    unmeasured: set[str] | None = None,
 ) -> list[ScenarioResult]:
     """
     Compare current benchmarks against baseline.
 
-    Only scenarios present in the current run are evaluated.
+    When the current run has no measured scenarios at all, the result is empty
+    (aggregate_status() turns that into an empty_comparison fail). Otherwise
+    every baseline scenario missing from the current run is a 'fail': reason
+    no_measurement when it is in *unmeasured* (the benchmark ran but failed),
+    missing_in_current when it is absent.
     Scenarios in current but missing from baseline are no longer silently skipped;
     instead each such scenario produces a 'warning' result with reason='no_baseline'
     (or 'fail' when strict_new_scenarios=True, or 'pass' when the scenario name is
@@ -204,7 +288,41 @@ def compare_benchmarks(
     if warn_only_metrics is None:
         warn_only_metrics = set()
 
+    if unmeasured is None:
+        unmeasured = set()
+
     results: list[ScenarioResult] = []
+    if not current_data:
+        return results
+
+    for full_name in sorted(set(baseline_data) - set(current_data)):
+        reason = "no_measurement" if full_name in unmeasured else "missing_in_current"
+        print(f"  MISSING  {full_name}: {reason}", file=sys.stderr)
+        results.append(
+            ScenarioResult(
+                name=full_name,
+                metric="Mean",
+                baseline=baseline_data[full_name].get("Mean", 0.0),
+                current=0.0,
+                delta_pct=0.0,
+                verdict="fail",
+                reason=reason,
+            )
+        )
+
+    for full_name in sorted(unmeasured - set(baseline_data)):
+        print(f"  FAILED  {full_name}: no measurement", file=sys.stderr)
+        results.append(
+            ScenarioResult(
+                name=full_name,
+                metric="Mean",
+                baseline=0.0,
+                current=0.0,
+                delta_pct=0.0,
+                verdict="fail",
+                reason="no_measurement",
+            )
+        )
 
     for full_name, current_metrics in current_data.items():
         if full_name not in baseline_data:
@@ -301,14 +419,29 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--current",
         required=True,
+        nargs="+",
         metavar="PATH",
-        help="Path to the current BenchmarkDotNet JSON results file.",
+        help="Current BenchmarkDotNet JSON report(s); one per benchmark class, merged.",
     )
     parser.add_argument(
         "--baseline",
-        required=True,
         metavar="PATH",
-        help="Path to the baseline BenchmarkDotNet JSON results file.",
+        default=None,
+        help="Path to the baseline BenchmarkDotNet JSON results file (required "
+        "unless --merge-only).",
+    )
+    parser.add_argument(
+        "--merge-only",
+        action="store_true",
+        default=False,
+        help="Only merge --current into --merged-output (baseline regeneration). "
+        "Fails when there are no benchmarks or any benchmark has no measurement.",
+    )
+    parser.add_argument(
+        "--merged-output",
+        metavar="PATH",
+        default=None,
+        help="Write the merged current reports to this path.",
     )
     parser.add_argument(
         "--current-sha",
@@ -394,18 +527,54 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    # Load files
+    if not args.merge_only and not args.baseline:
+        print("ERROR: --baseline is required unless --merge-only", file=sys.stderr)
+        return 1
+    if args.merge_only and not args.merged_output:
+        print("ERROR: --merge-only needs --merged-output", file=sys.stderr)
+        return 1
+
+    # Load and merge the current reports (one per benchmark class)
     try:
-        current_raw = load_bdn_json(args.current)
+        current_raw = merge_bdn_reports([load_bdn_json(p) for p in args.current])
     except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
         print(f"ERROR loading --current file: {exc}", file=sys.stderr)
         return 1
+    unmeasured_reasons = unmeasured_benchmarks(current_raw)
+    unmeasured = set(unmeasured_reasons)
+
+    if args.merged_output:
+        Path(args.merged_output).write_text(
+            json.dumps(current_raw, indent=2) + "\n", encoding="utf-8"
+        )
+
+    if args.merge_only:
+        if not current_raw["Benchmarks"]:
+            print("ERROR: the reports contain no benchmarks", file=sys.stderr)
+            return 2
+        if unmeasured:
+            for name in sorted(unmeasured):
+                print(f"  FAILED  {name}: {unmeasured_reasons[name]}", file=sys.stderr)
+            return 2
+        print(
+            f"Merged {len(current_raw['Benchmarks'])} benchmarks from "
+            f"{len(args.current)} report(s) into {args.merged_output}",
+            file=sys.stderr,
+        )
+        return 0
 
     try:
         baseline_raw = load_bdn_json(args.baseline)
     except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
         print(f"ERROR loading --baseline file: {exc}", file=sys.stderr)
         return 1
+
+    # A baseline entry without both measurements cannot gate anything.
+    bad_baseline = unmeasured_benchmarks(baseline_raw)
+    if bad_baseline:
+        for name, problem in sorted(bad_baseline.items()):
+            print(f"ERROR: baseline {name}: {problem}", file=sys.stderr)
+        return 2
 
     # Extract metrics
     try:
@@ -424,6 +593,7 @@ def main(argv: list[str] | None = None) -> int:
         strict_new_scenarios=strict_new_scenarios,
         allow_new_scenarios=allow_new_scenarios,
         warn_only_metrics=warn_only_metrics,
+        unmeasured=unmeasured,
     )
 
     status = aggregate_status(results)
@@ -457,12 +627,13 @@ def main(argv: list[str] | None = None) -> int:
     if status == "fail":
         for r in results:
             if r.verdict == "fail":
-                print(
-                    f"  FAIL  {r.name} [{r.metric}]: "
-                    f"+{r.delta_pct:.1f}% "
-                    f"(baseline={r.baseline:.0f} current={r.current:.0f})",
-                    file=sys.stderr,
+                detail = (
+                    r.reason
+                    if r.reason in ("missing_in_current", "no_measurement")
+                    else f"+{r.delta_pct:.1f}% "
+                    f"(baseline={r.baseline:.0f} current={r.current:.0f})"
                 )
+                print(f"  FAIL  {r.name} [{r.metric}]: {detail}", file=sys.stderr)
         return 2
 
     if status == "warning":

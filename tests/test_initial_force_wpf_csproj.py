@@ -160,9 +160,18 @@ class TestCsprojMetadata:
             f"GeneratePackageOnBuild should be 'false' (packed via release.yml); got '{value}'"
         )
 
-    def test_symbol_package_format_snupkg(self):
-        value = self._pg_text("SymbolPackageFormat")
-        assert value == "snupkg", f"SymbolPackageFormat is '{value}'"
+    def test_no_symbol_package(self):
+        """No .snupkg: nuget.org rejects symbol packages with Windows PDBs.
+
+        The upstream WPF build emits Windows PDBs; they ship inside the .nupkg.
+        """
+        value = self._pg_text("IncludeSymbols")
+        assert value is not None and value.lower() == "false", (
+            f"IncludeSymbols must be 'false'; got '{value}'"
+        )
+        assert self._pg_text("SymbolPackageFormat") is None, (
+            "SymbolPackageFormat must not be set when no symbol package is produced"
+        )
 
     def test_description_present(self):
         value = self._pg_text("Description")
@@ -406,14 +415,7 @@ class TestDeferredGatesDocumentation:
         CI command:
           tools/verify-pkg.ps1 InitialForce.WPF.nupkg
         Expected: exactly 4 DLLs + 4 PDBs + 1 targets file at expected paths;
-                  all PDBs are portable PDB format (magic bytes BSJB).
-        """
-
-    @pytest.mark.skip(reason="DEFERRED TO CI: requires Windows runner with dotnet 10 SDK")
-    def test_symbol_package_snupkg_produced(self):
-        """
-        CI command: (same dotnet pack as above)
-        Expected: InitialForce.WPF.10.0.4-if.20260427.1.snupkg produced alongside .nupkg.
+                  PDBs are Windows format (the upstream build does not emit portable PDBs).
         """
 
     @pytest.mark.skip(reason="DEFERRED TO CI: requires manual verification on Windows")

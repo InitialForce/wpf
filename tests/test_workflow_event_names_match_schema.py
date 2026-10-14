@@ -30,6 +30,12 @@ WORKFLOW_DIR: Path = Path(__file__).parent.parent / ".github" / "workflows"
 # Matches:  --event foo_bar  /  --event foo-bar  /  --event FooBar123
 EVENT_RE: re.Pattern[str] = re.compile(r"--event\s+([a-zA-Z_][a-zA-Z0-9_-]*)")
 
+# `gh run list --event <trigger>` uses the same flag for GitHub trigger names.
+_GITHUB_TRIGGER_NAMES: frozenset[str] = frozenset(
+    {"push", "pull_request", "schedule", "workflow_dispatch", "repository_dispatch",
+     "workflow_run"}
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -41,6 +47,9 @@ def _events_in_workflow(path: Path) -> list[tuple[Path, int, str]]:
     findings: list[tuple[Path, int, str]] = []
     for lineno, line in enumerate(path.read_text().splitlines(), start=1):
         for m in EVENT_RE.finditer(line):
+            if m.group(1) in _GITHUB_TRIGGER_NAMES:
+                # `gh run list --event push` filters by trigger; not a ledger event.
+                continue
             findings.append((path, lineno, m.group(1)))
     return findings
 
@@ -98,11 +107,11 @@ _UNUSED_EVENTS_OK: frozenset[str] = frozenset(
         "automerge_frozen",       # operator toggles IF_AUTOMERGE_FROZEN repo variable
         "automerge_thawed",       # operator unfreezes after 4-PR validation passes
         "autonomy_paused",        # operator/kill-switch pause; unpause emits autonomy_resumed
+        "autonomy_resumed",       # operator unpause (nightly-rebase no longer misuses it)
+        "pre_flight_failed",      # superseded: cherry-pick-pre-flight.sh records 'escalated'
         # Future-use: emitted by review/build/perf/smoke gates wired in Phase-0/1
         # (per Bootstrap Status: wpf-2hh, wpf-1pt, wpf-2xo). Workflows currently
         # use placeholder steps and don't yet call ledger-event for these.
-        "approved",               # emitted by pr-review.yml after 2x review verdicts merged
-        "rejected",               # emitted by pr-review.yml on review disagreement
         "build_passed",           # emitted by build.yml per arch (Phase-0 wpf-1pt)
         "build_failed",           # emitted by build.yml per arch on failure
         "smoke_passed",           # emitted by smoke job after 22-scenario harness wired
@@ -115,6 +124,30 @@ _UNUSED_EVENTS_OK: frozenset[str] = frozenset(
 )
 
 
+# Events that workflows record in batches (ledger-event.py --events-file).
+# The workflow YAML never spells them as --event <name>; the tool that builds
+# the batch does. event -> tool that must contain the quoted name.
+_TOOLS_DIR: Path = Path(__file__).parent.parent / "tools"
+_EMITTED_BY_TOOLS: dict[str, str] = {
+    "discovered": "discover-prs.py",       # pr-discovery.yml
+    "review_1": "merge-verdicts.py",       # pr-review.yml merge-verdict job
+    "review_2": "merge-verdicts.py",
+    "merged_verdict": "merge-verdicts.py",
+    "approved": "merge-verdicts.py",
+    "rejected": "merge-verdicts.py",
+    "escalated": "merge-verdicts.py",
+    "review_error": "merge-verdicts.py",
+    "ingestion_requested": "merge-verdicts.py",
+}
+
+
+@pytest.mark.parametrize("event", sorted(_EMITTED_BY_TOOLS))
+def test_tool_emitted_events_are_valid_and_present(event: str) -> None:
+    assert event in VALID_EVENTS
+    source = (_TOOLS_DIR / _EMITTED_BY_TOOLS[event]).read_text()
+    assert f'"{event}"' in source, f"{_EMITTED_BY_TOOLS[event]} no longer emits {event!r}"
+
+
 @pytest.mark.parametrize("expected_event", sorted(VALID_EVENTS))
 def test_every_schema_event_is_used_or_explicitly_unused(expected_event: str) -> None:
     """Every event in VALID_EVENTS should appear in at least one workflow YAML.
@@ -125,7 +158,7 @@ def test_every_schema_event_is_used_or_explicitly_unused(expected_event: str) ->
     if expected_event in _UNUSED_EVENTS_OK:
         pytest.skip(f"event '{expected_event}' explicitly allowed unused")
 
-    used: set[str] = {ev for _, _, ev in all_workflow_events()}
+    used: set[str] = {ev for _, _, ev in all_workflow_events()} | set(_EMITTED_BY_TOOLS)
     assert expected_event in used, (
         f"Event '{expected_event}' is in VALID_EVENTS but is not referenced by any "
         f"workflow YAML under {WORKFLOW_DIR}.  Either add a workflow that emits it, "

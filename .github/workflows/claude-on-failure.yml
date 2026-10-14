@@ -1,4 +1,15 @@
 # .github/workflows/claude-on-failure.yml
+#
+# Keeps exactly one open issue per failing pipeline workflow.
+#   - First failure of a workflow: Claude analyses the log, the workflow opens
+#     one issue (marker <!-- ci-failure:<workflow name> -->) and records a
+#     failure_analyzed ledger event.
+#   - Later failures while that issue is open: a comment with the run link.
+#     No new issue, no Claude run, no ledger commit.
+#   - First success afterwards: a comment and the issue is closed.
+# Pull-request runs are ignored (automerge.yml reports failed PR builds on the
+# PR). This workflow does not watch itself, and its ledger commits carry
+# [skip ci], so it cannot trigger itself.
 name: Claude On Failure
 
 on:
@@ -6,16 +17,21 @@ on:
     workflows:
       - Build
       - PR Discovery
-      - PR Review (2x Independent Opus)
+      - PR Review (2x Independent)
       - PR Ingestion (Cherry-Pick)
       - Nightly Rebase
       - Release
+      - Auto Release
       - Upstream Stable Adoption
+      - Upstream Release Poller
+      - Weekly Differential
+      - Auto-merge on green
     types: [completed]
 
-# One invocation per failed run — use the workflow_run event id as the concurrency group.
+# Serialise per workflow so two failures of the same workflow cannot both
+# decide that no issue exists yet.
 concurrency:
-  group: claude-on-failure-${{ github.event.workflow_run.id }}
+  group: claude-on-failure-${{ github.event.workflow_run.workflow_id }}
   cancel-in-progress: false
 
 permissions:
@@ -29,68 +45,112 @@ env:
   FAILED_WORKFLOW: ${{ github.event.workflow_run.name }}
   FAILED_RUN_ID: ${{ github.event.workflow_run.id }}
   FAILED_RUN_URL: ${{ github.event.workflow_run.html_url }}
+  CONCLUSION: ${{ github.event.workflow_run.conclusion }}
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Job 1 — gate: autonomy kill-switch check
+  # Job 1 — triage: find the open issue for this workflow; close or comment
+  # ---------------------------------------------------------------------------
+  triage:
+    name: Triage (${{ github.event.workflow_run.name }} ${{ github.event.workflow_run.conclusion }})
+    if: >-
+      github.event.workflow_run.event != 'pull_request' &&
+      (github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    outputs:
+      action: ${{ steps.find.outputs.action }}
+      issue: ${{ steps.find.outputs.issue }}
+
+    steps:
+      - name: Find open issue for this workflow
+        id: find
+        run: |
+          set -euo pipefail
+          MARKER="<!-- ci-failure:${FAILED_WORKFLOW} -->"
+          ISSUE=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label automated \
+                    --limit 100 --json number,body \
+                  | jq -r --arg m "$MARKER" '[.[] | select(.body | contains($m))][0].number // empty')
+          echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
+          if [ "$CONCLUSION" = "success" ]; then
+            ACTION=$([ -n "$ISSUE" ] && echo close || echo none)
+          else
+            ACTION=$([ -n "$ISSUE" ] && echo comment || echo new)
+          fi
+          echo "action=$ACTION" >> "$GITHUB_OUTPUT"
+          echo "::notice::$FAILED_WORKFLOW $CONCLUSION -> $ACTION ${ISSUE:+(issue #$ISSUE)}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Close issue (workflow is green again)
+        if: steps.find.outputs.action == 'close'
+        run: |
+          gh issue close "$ISSUE" --repo "$GITHUB_REPOSITORY" \
+            --comment "$FAILED_WORKFLOW passed again: $FAILED_RUN_URL"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ steps.find.outputs.issue }}
+
+      - name: Comment on existing issue (repeat failure)
+        if: steps.find.outputs.action == 'comment'
+        run: |
+          gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" \
+            --body "Failed again: $FAILED_RUN_URL"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ steps.find.outputs.issue }}
+
+  # ---------------------------------------------------------------------------
+  # Job 2 — gate: autonomy kill-switch check (only for a new failure)
   # ---------------------------------------------------------------------------
   gate:
     name: Autonomy gate (claude-invoke)
-    # Only run at all when the triggering workflow actually failed.
-    if: github.event.workflow_run.conclusion == 'failure'
+    needs: triage
+    if: needs.triage.outputs.action == 'new'
     uses: ./.github/workflows/autonomy-check.yml
     with:
       requested_action: claude-invoke
 
   # ---------------------------------------------------------------------------
-  # Job 2 — analyze: download logs, run Claude failure-analysis prompt
+  # Job 3 — analyze: download logs, run Claude failure-analysis prompt
   # ---------------------------------------------------------------------------
   analyze:
     name: Analyse failure (${{ github.event.workflow_run.name }})
-    needs: gate
+    needs: [triage, gate]
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
-    environment: bot-credentials
-    outputs:
-      verdict: ${{ steps.run-analysis.outputs.verdict }}
-      issue_type: ${{ steps.classify.outputs.issue_type }}
+    # The log can carry text from upstream PRs. Claude gets read-only access
+    # and no stored credentials; the record job writes the issue and ledger.
+    # Claude reads only failure-input/ and the config, and writes only
+    # failure-output/analysis.md.
+    permissions:
+      actions: read
+      contents: read
 
     steps:
-      - name: Generate GH App token
-        id: app-token
-        uses: tibdex/github-app-token@v2
-        with:
-          app_id: ${{ secrets.GH_APP_ID }}
-          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-
       - uses: actions/checkout@v4
         with:
-          token: ${{ steps.app-token.outputs.token }}
-
-      - name: Download failed run artifacts
-        run: |
-          gh run download "${{ env.FAILED_RUN_ID }}" \
-            --repo "${{ github.repository }}" \
-            --dir /tmp/failed-artifacts/ || true
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
 
       - name: Download failed run log
         run: |
-          gh run view "${{ env.FAILED_RUN_ID }}" \
-            --repo "${{ github.repository }}" \
-            --log-failed > /tmp/failed-run.log 2>&1 || true
-          # Also write workflow metadata
-          cat > /tmp/failed-run-meta.json << EOF
+          mkdir -p failure-input failure-output
+          gh run view "$FAILED_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --log-failed > failure-input/failed-run.log 2>&1 || true
+          # A short excerpt so the analysis does not spend its turns paging
+          # through a multi-megabyte build log.
           {
-            "workflow_name": "${{ env.FAILED_WORKFLOW }}",
-            "run_id": "${{ env.FAILED_RUN_ID }}",
-            "run_url": "${{ env.FAILED_RUN_URL }}",
-            "conclusion": "${{ github.event.workflow_run.conclusion }}"
-          }
-          EOF
+            echo "### Error lines (first 150)"
+            grep -nE 'error|Error|ERROR|fatal|FAILED|Exception|##\[error\]' failure-input/failed-run.log | head -150 || true
+            echo
+            echo "### Last 150 lines"
+            tail -150 failure-input/failed-run.log
+          } > failure-input/failed-run-excerpt.log
+          # The agent has no shell, so it gets the recent history as a file.
+          git log -30 --format='%h %ad %an %s' --date=short --name-only \
+            > failure-input/recent-commits.txt
+          wc -l failure-input/*
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
 
       - name: Load failure-analysis prompt
         id: load-prompt
@@ -103,72 +163,53 @@ jobs:
             echo '__EOF_PROMPT__'
           } >> "$GITHUB_OUTPUT"
 
+      # Trusted settings only (no project settings, hooks or MCP servers),
+      # no shell, and the process environment and runner command files
+      # denied; a double slash is an absolute path in a permission rule.
       - name: Run failure analysis (Claude Sonnet)
         id: run-analysis
+        continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
+          allowed_bots: initial-force-wpf-bot,github-actions
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: ${{ steps.load-prompt.outputs.prompt }}
+          settings: '{"disableAllHooks": true}'
           claude_args: >-
-            --max-turns 8
+            --max-turns 25
             --model claude-sonnet-4-6
-            --allowedTools Read,Bash,Grep,mcp__github__issue_write,mcp__github__search_issues
-            --disallowedTools Edit,Write,mcp__github__push_files,mcp__github__create_pull_request
-          github_token: ${{ steps.app-token.outputs.token }}
+            --setting-sources user
+            --strict-mcp-config
+            --allowedTools "Read(./failure-input/**),Read(./.if-fork/config.yaml),Edit(./failure-output/analysis.md)"
+            --disallowedTools "Bash,WebFetch,WebSearch,NotebookEdit,Task,Read(//proc/**),Read(/proc/**),Read(//home/runner/work/_temp/**),Read(/home/runner/work/_temp/**),Edit(//home/runner/work/_temp/**),mcp__github__push_files,mcp__github__create_pull_request,mcp__github__issue_write"
+          github_token: ${{ github.token }}
         env:
           CONFIG_PATH: .if-fork/config.yaml
-          LOG_PATH: /tmp/failed-run.log
-          ARTIFACTS_DIR: /tmp/failed-artifacts/
-          FAILED_WORKFLOW_URL: ${{ env.FAILED_RUN_URL }}
-          ESCALATION_ISSUE_PATH: /tmp/failure-analysis-result.md
+          LOG_PATH: failure-input/failed-run.log
+          LOG_EXCERPT_PATH: failure-input/failed-run-excerpt.log
+          RECENT_COMMITS_PATH: failure-input/recent-commits.txt
           FAILED_WORKFLOW_NAME: ${{ env.FAILED_WORKFLOW }}
-          FAILED_RUN_META: /tmp/failed-run-meta.json
-
-      - name: Classify failure for issue type
-        id: classify
-        run: |
-          WORKFLOW="${{ env.FAILED_WORKFLOW }}"
-          # Default issue type
-          ISSUE_TYPE="operator-followup"
-
-          # Workflow-specific issue types
-          case "$WORKFLOW" in
-            "PR Ingestion (Cherry-Pick)")
-              ISSUE_TYPE="cherry-pick-failure"
-              ;;
-            "Build")
-              # Check if analysis result indicates a perf regression
-              if [ -f /tmp/failure-analysis-result.md ]; then
-                if grep -qi "perf\|regression\|benchmark" /tmp/failure-analysis-result.md; then
-                  ISSUE_TYPE="perf-regression"
-                else
-                  ISSUE_TYPE="operator-followup"
-                fi
-              fi
-              ;;
-            *)
-              ISSUE_TYPE="operator-followup"
-              ;;
-          esac
-
-          echo "issue_type=$ISSUE_TYPE" >> "$GITHUB_OUTPUT"
-          echo "::notice::Failure classified as issue type: $ISSUE_TYPE"
+          FAILED_WORKFLOW_URL: ${{ env.FAILED_RUN_URL }}
+          FAILED_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          ANALYSIS_PATH: failure-output/analysis.md
 
       - name: Upload analysis result artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: failure-analysis-${{ env.FAILED_RUN_ID }}
-          path: /tmp/failure-analysis-result.md
+          path: failure-output/analysis.md
+          if-no-files-found: ignore
           retention-days: 30
 
   # ---------------------------------------------------------------------------
-  # Job 3 — record: open GitHub issue, emit failure_analyzed ledger event
+  # Job 4 — record: open the one issue, emit failure_analyzed ledger event
   # ---------------------------------------------------------------------------
   record:
     name: Record failure and emit ledger event
-    needs: [gate, analyze]
-    if: always() && needs.gate.outputs.proceed == 'true' && needs.analyze.result != 'skipped'
+    needs: [triage, gate, analyze]
+    # Open the issue even when the gate blocked analysis or analysis failed.
+    if: always() && needs.triage.outputs.action == 'new'
     runs-on: ubuntu-latest
     environment: bot-credentials
 
@@ -193,56 +234,35 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: failure-analysis-${{ env.FAILED_RUN_ID }}
-          path: /tmp/
+          path: ${{ runner.temp }}/analysis
         continue-on-error: true
 
       - name: Open failure issue
-        id: open-issue
         run: |
-          ISSUE_TYPE="${{ needs.analyze.outputs.issue_type }}"
-          WORKFLOW="${{ env.FAILED_WORKFLOW }}"
-          RUN_URL="${{ env.FAILED_RUN_URL }}"
-
-          # Compose issue body
-          if [ -f /tmp/failure-analysis-result.md ]; then
-            BODY_FILE=/tmp/failure-analysis-result.md
-          else
-            # Fallback minimal body
-            cat > /tmp/failure-analysis-fallback.md << EOF
-          ## CI Failure: $WORKFLOW
-
-          **Run URL:** $RUN_URL
-          **Issue type:** $ISSUE_TYPE
-
-          Failure analysis did not produce a detailed report. Please investigate the run directly.
-          EOF
-            BODY_FILE=/tmp/failure-analysis-fallback.md
-          fi
-
-          # Map issue type to labels
-          case "$ISSUE_TYPE" in
-            "cherry-pick-failure")
-              LABELS="operator-followup,cherry-pick-failure,ci-failure"
-              ;;
-            "perf-regression")
-              LABELS="operator-followup,perf-regression,ci-failure"
-              ;;
-            *)
-              LABELS="operator-followup,ci-failure"
-              ;;
-          esac
-
-          ISSUE_TITLE="CI failure [$ISSUE_TYPE]: $WORKFLOW — $(date -u +%Y-%m-%d)"
-
-          gh issue create \
-            --repo "${{ github.repository }}" \
-            --title "$ISSUE_TITLE" \
-            --body-file "$BODY_FILE" \
-            --label "$LABELS"
+          set -euo pipefail
+          {
+            echo "<!-- ci-failure:${FAILED_WORKFLOW} -->"
+            echo "**Workflow:** $FAILED_WORKFLOW"
+            echo "**First failed run:** $FAILED_RUN_URL"
+            echo
+            if [ -s "$RUNNER_TEMP/analysis/analysis.md" ]; then
+              cat "$RUNNER_TEMP/analysis/analysis.md"
+            else
+              echo "No automatic analysis is available for this run. Open the run log above."
+            fi
+            echo
+            echo "---"
+            echo "This issue stays open while \`$FAILED_WORKFLOW\` keeps failing; each new failure adds a comment. It closes on its own when the workflow passes again."
+          } > /tmp/issue-body.md
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "CI failure: $FAILED_WORKFLOW" \
+            --body-file /tmp/issue-body.md \
+            --label automated
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Import bot GPG key
+        if: needs.analyze.result == 'success'
         uses: ./.github/actions/import-bot-gpg
         with:
           gpg-private-key: ${{ secrets.GH_BOT_GPG_KEY }}
@@ -250,15 +270,15 @@ jobs:
           gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
 
       - name: Emit failure_analyzed ledger event
+        if: needs.analyze.result == 'success'
         run: |
           python tools/ledger-event.py \
             --event failure_analyzed \
             --pr-number 0 \
-            --head-sha "${{ github.sha }}" \
+            --head-sha "$FAILED_HEAD_SHA" \
             --actor claude-on-failure \
-            --details-json "{\"workflow\": \"${{ env.FAILED_WORKFLOW }}\", \"failed_run_id\": \"${{ env.FAILED_RUN_ID }}\", \"issue_type\": \"${{ needs.analyze.outputs.issue_type }}\", \"run_url\": \"${{ env.FAILED_RUN_URL }}\"}" \
+            --details-json "{\"workflow\": \"$FAILED_WORKFLOW\", \"failed_run_id\": \"$FAILED_RUN_ID\", \"run_url\": \"$FAILED_RUN_URL\"}" \
             --push
         env:
-          GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
-          GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          FAILED_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
