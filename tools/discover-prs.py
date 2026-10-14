@@ -50,7 +50,7 @@ import sys
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import yaml
 
@@ -86,7 +86,7 @@ TIER_ORDER = {"S": 0, "A": 1, "B": 2, "SUSPECT": 3}
 PR = dict[str, Any]
 
 
-def die(code: int, message: str, **extra: object) -> None:
+def die(code: int, message: str, **extra: object) -> NoReturn:
     print(json.dumps({"error": message, **extra}), file=sys.stderr)
     sys.exit(code)
 

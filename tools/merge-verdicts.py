@@ -620,10 +620,10 @@ def _load_or_error(
     except ReviewLoadError as exc:
         errors.append(str(exc))
         return None
-    problem = origin_problem(path, rv, label, origin)
-    if problem:
-        errors.append(problem)
-        origin_errors.append(problem)
+    origin_issue = origin_problem(path, rv, label, origin)
+    if origin_issue:
+        errors.append(origin_issue)
+        origin_errors.append(origin_issue)
         return None
     return rv
 
