@@ -338,6 +338,9 @@ jobs:
     name: Generate release notes (Claude Sonnet)
     needs: [verify-tag, build]
     if: needs.build.result == 'success'
+    # Notes are optional: publish falls back to generated notes, so a failed
+    # notes run must not mark the whole release as failed.
+    continue-on-error: true
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -416,7 +419,7 @@ jobs:
         id: claude
         uses: anthropics/claude-code-action@v1
         with:
-          allowed_bots: initial-force-wpf-bot
+          allowed_bots: initial-force-wpf-bot,github-actions
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ github.token }}
           prompt: ${{ steps.load-prompt.outputs.prompt }}
