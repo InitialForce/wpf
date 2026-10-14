@@ -271,8 +271,8 @@ jobs:
             --strict-mcp-config
             --max-turns ${{ steps.settings.outputs.max_turns }}
             --model ${{ steps.settings.outputs.model }}
-            --allowedTools Read(./review-input/**),Read(./.if-fork/config.yaml),Write(./review-output/review-1.json)
-            --disallowedTools Bash,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task,Glob,Grep,Read(//proc/**),Read(//home/runner/work/_temp/**)
+            --allowedTools Read(./review-input/**),Read(./.if-fork/config.yaml),Edit(./review-output/review-1.json)
+            --disallowedTools Bash,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task,Glob,Grep,Read(//proc/**),Read(//home/runner/work/_temp/**)
           github_token: ${{ github.token }}
 
       # Upload whatever verdict exists, even when the reviewer hit its turn
@@ -400,8 +400,8 @@ jobs:
             --strict-mcp-config
             --max-turns ${{ steps.settings.outputs.max_turns }}
             --model ${{ steps.settings.outputs.model }}
-            --allowedTools Read(./review-input/**),Read(./.if-fork/config.yaml),Write(./review-output/review-2.json)
-            --disallowedTools Bash,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task,Glob,Grep,Read(//proc/**),Read(//home/runner/work/_temp/**)
+            --allowedTools Read(./review-input/**),Read(./.if-fork/config.yaml),Edit(./review-output/review-2.json)
+            --disallowedTools Bash,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task,Glob,Grep,Read(//proc/**),Read(//home/runner/work/_temp/**)
           github_token: ${{ github.token }}
 
       # The hash goes to merge-verdict as a job output, which no other job

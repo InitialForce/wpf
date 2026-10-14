@@ -632,22 +632,26 @@ def test_reviewers_load_only_trusted_claude_settings(workflow, n):
 
 @pytest.mark.parametrize("n", [1, 2])
 def test_reviewer_tool_rules_are_path_scoped(workflow, n):
-    """Regression: Read only on the input and config, Write only on the
-    reviewer's own verdict file, and /proc and the runner temp dir denied."""
+    """Regression: Read only on the input and config, file writes only on the
+    reviewer's own verdict file, and /proc and the runner temp dir denied.
+    Claude Code checks every file-writing tool, Write included, against Edit
+    rules, so the verdict file needs an Edit rule and Edit must not be denied."""
     args = _claude_step(workflow, f"review-{n}")["with"]["claude_args"]
     allowed = _tool_list(args, "allowedTools")
     assert sorted(allowed) == sorted([
         "Read(./review-input/**)",
         "Read(./.if-fork/config.yaml)",
-        f"Write(./review-output/review-{n}.json)",
+        f"Edit(./review-output/review-{n}.json)",
     ])
     denied = _tool_list(args, "disallowedTools")
     assert "Read(//proc/**)" in denied
     assert "Read(//home/runner/work/_temp/**)" in denied
     # Read, Glob and Grep need no approval, so an allow rule does not confine
     # Glob and Grep; deny them outright.
-    for tool in ("Bash", "Edit", "MultiEdit", "WebFetch", "WebSearch", "Task", "Glob", "Grep"):
+    for tool in ("Bash", "MultiEdit", "WebFetch", "WebSearch", "Task", "Glob", "Grep"):
         assert tool in denied
+    assert "Edit" not in denied
+    assert "Write" not in allowed
 
 
 @pytest.mark.parametrize("n", [1, 2])
