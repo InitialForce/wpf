@@ -207,7 +207,7 @@ For a wrong sync PR, do not just close it: the next nightly run would ask Claude
 When `if/main` has moved on, `automerge.yml` does not use GitHub's "update branch" (its merge commit would not be bot-signed). It sends `pr-ingestion-requested` again for a cherry-pick PR, or `nightly-rebase` with `force: true` for the sync PR, once per PR head (a `<!-- automerge-rebuild:<sha> -->` comment records it). The rebuilt branch gets a new Build, which runs `automerge.yml` again. If the nightly force run is replaced in the queue by a scheduled one, the scheduled run rebuilds the sync PR by itself, because `if/staging` is behind `if/main`.
 
 ### Where Claude runs, and what it can reach
-Claude resolves merge and cherry-pick conflicts in a job of its own (`resolve-conflicts` in `pr-ingestion.yml` and `nightly-rebase.yml`). That job has `contents: read`, no environment, no App token, no GPG key and no stored git credentials. It does hold `ANTHROPIC_API_KEY` (a repository secret today), so the Claude step is locked down:
+Claude resolves merge and cherry-pick conflicts in a job of its own (`resolve-conflicts` in `pr-ingestion.yml` and `nightly-rebase.yml`). That job has `contents: read`, only the `claude` environment (which holds just `ANTHROPIC_API_KEY`), no App token, no GPG key and no stored git credentials. It does hold the Anthropic key, so the Claude step is locked down:
 - `--setting-sources user`, `--strict-mcp-config` and `disableAllHooks`: Claude Code loads only the settings the action writes, not the work tree's `.claude/`, `CLAUDE.md`, `.mcp.json` or hooks.
 - `tools/prepare-resolver.sh` refuses to start Claude when the work tree holds any of those files, or when a conflicted path has characters a tool rule cannot hold. It writes `.escalation.md` instead, which the trusted job turns into an escalation.
 - No shell and no web tools. Claude reads the work tree; the base, fork and upstream sides of each conflict are written to `.resolver-input/` beforehand. It may edit only the conflicted files, `.escalation.md` and `.resolver-delete.txt` (where it lists files to delete). Reads of `/proc` and the runner's `_temp` folder are denied.
@@ -279,25 +279,21 @@ python tools/ledger-validate.py --ledger-path .if-fork/patch-ledger.jsonl --stri
 ```
 
 ### Rotate a secret
-All seven secrets are **repository secrets today** (`ANTHROPIC_API_KEY`, `GH_APP_ID`, `GH_APP_PRIVATE_KEY`, `GH_BOT_GPG_FINGERPRINT`, `GH_BOT_GPG_KEY`, `GH_BOT_GPG_KEY_ID`, `NUGET_ORG_API_KEY`). Set them at repository level. Do not add `--env`: a secret set on an environment is read only by jobs that name that environment, and several jobs that need these secrets name none, so they would get an empty value.
+The sensitive secrets are environment secrets, limited to `if/main`. Set each one on every environment that holds it:
 ```bash
-gh secret set GH_APP_PRIVATE_KEY --repo InitialForce/wpf < new-private-key.pem
-gh secret set ANTHROPIC_API_KEY  --repo InitialForce/wpf
-gh secret set NUGET_ORG_API_KEY  --repo InitialForce/wpf
-# Bot GPG key: all three together, and commit the new public key as
-# docs/bot-gpg-pubkey.asc on if/main first (automerge-verify.sh and release.yml
-# check signatures against that file and GH_BOT_GPG_FINGERPRINT).
-gh secret set GH_BOT_GPG_KEY         --repo InitialForce/wpf < bot-private.asc
+gh secret set GH_APP_PRIVATE_KEY --repo InitialForce/wpf --env bot-credentials  < new-private-key.pem
+gh secret set GH_APP_PRIVATE_KEY --repo InitialForce/wpf --env branch-promotion < new-private-key.pem
+gh secret set ANTHROPIC_API_KEY  --repo InitialForce/wpf --env claude
+gh secret set NUGET_ORG_API_KEY  --repo InitialForce/wpf --env wpf-nuget-publish
+# Bot GPG key: commit the new public key as docs/bot-gpg-pubkey.asc on if/main
+# first (automerge-verify.sh and release.yml check signatures against that file
+# and GH_BOT_GPG_FINGERPRINT), then set all three.
+gh secret set GH_BOT_GPG_KEY         --repo InitialForce/wpf --env bot-credentials  < bot-private.asc
+gh secret set GH_BOT_GPG_KEY         --repo InitialForce/wpf --env branch-promotion < bot-private.asc
 gh secret set GH_BOT_GPG_KEY_ID      --repo InitialForce/wpf
 gh secret set GH_BOT_GPG_FINGERPRINT --repo InitialForce/wpf
 ```
-For the App key, delete the old key in the GitHub App settings afterwards.
-
-**After the planned move to environments**, the commands get `--env`: `NUGET_ORG_API_KEY` in `wpf-nuget-publish`, `GH_APP_*` and `GH_BOT_GPG_*` in `bot-credentials`, `ANTHROPIC_API_KEY` in `claude`, each limited to `if/main`. Make that move only together with a workflow change that adds the matching `environment:` to every job that reads the secret, then delete the repository copies.
-
----
-
-## Kill-Switch Operations
+`GH_APP_ID`, `GH_BOT_GPG_KEY_ID` and `GH_BOT_GPG_FINGERPRINT` are not sensitive and stay repository secrets. For the App key, delete the old key in the GitHub App settings afterwards. A new job that needs a sensitive secret must name its environment.
 
 ### Pause all autonomous activity immediately
 ```bash
@@ -534,9 +530,10 @@ MTTR target: 24 hours from CVE public disclosure.
 gh variable set IF_AUTONOMY_ENABLED -b "false" --repo InitialForce/wpf
 ```
 
-**Remediation:** generate a new private key in the App settings, then set it as a repository secret (see "Rotate a secret"; no `--env` until the move to environments):
+**Remediation:** generate a new private key in the App settings, then set it on both environments that hold it (see "Rotate a secret"):
 ```bash
-gh secret set GH_APP_PRIVATE_KEY --repo InitialForce/wpf < new-private-key.pem
+gh secret set GH_APP_PRIVATE_KEY --repo InitialForce/wpf --env bot-credentials  < new-private-key.pem
+gh secret set GH_APP_PRIVATE_KEY --repo InitialForce/wpf --env branch-promotion < new-private-key.pem
 # Delete the old key in the GitHub App settings.
 gh variable set IF_AUTONOMY_ENABLED -b "true" --repo InitialForce/wpf
 gh workflow run pr-discovery.yml --repo InitialForce/wpf  # checks that the new key works
@@ -595,7 +592,7 @@ git revert <bad-commit> --no-edit
 git push origin ledger-repair
 gh pr create --repo InitialForce/wpf --base if/main --head ledger-repair --title "Revert ledger tampering"
 ```
-If an outside actor did it, rotate every secret as in "Rotate a secret" (repository secrets today, so no `--env`).
+If an outside actor did it, rotate every secret as in "Rotate a secret".
 High-severity security event — file a separate incident report.
 
 ---

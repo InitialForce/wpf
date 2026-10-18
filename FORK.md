@@ -321,17 +321,18 @@ The October 2026 repair (branch `fix/autonomy-pipeline`) changed each stage as d
 Known gaps:
 
 - **The perf gates measure nothing yet.** The `perf` job in `build.yml` runs no benchmark. The release perf gate runs `test/InitialForce.WpfSmoke/Perf/PerfHarness.cs`, whose benchmarks are placeholder loops, against `perf/baseline.json`, which holds seed numbers that were never measured. A WPF performance regression is not caught by either gate.
-- **Secrets are repository secrets.** All seven (`ANTHROPIC_API_KEY`, `GH_APP_ID`, `GH_APP_PRIVATE_KEY`, `GH_BOT_GPG_FINGERPRINT`, `GH_BOT_GPG_KEY`, `GH_BOT_GPG_KEY_ID`, `NUGET_ORG_API_KEY`) are set on the repository, not on an environment. The `environment:` lines in the workflows do not limit them today: any workflow on any branch of this repository can read every secret. The owner will move them into environments limited to `if/main`:
+- **Secrets.** The four sensitive secrets are environment secrets, readable only by jobs that run on `if/main` and name the environment:
 
-  | Environment | Secrets | Branch policy |
-  |---|---|---|
-  | `wpf-nuget-publish` | `NUGET_ORG_API_KEY` | `if/main` only |
-  | `bot-credentials` | `GH_APP_ID`, `GH_APP_PRIVATE_KEY`, `GH_BOT_GPG_FINGERPRINT`, `GH_BOT_GPG_KEY`, `GH_BOT_GPG_KEY_ID` | `if/main` only |
-  | `claude` | `ANTHROPIC_API_KEY` | `if/main` only |
+  | Environment | Secrets | Branch policy | Approval |
+  |---|---|---|---|
+  | `bot-credentials` | `GH_APP_PRIVATE_KEY`, `GH_BOT_GPG_KEY` | `if/main` only | none |
+  | `claude` | `ANTHROPIC_API_KEY` | `if/main` only | none |
+  | `wpf-nuget-publish` | `NUGET_ORG_API_KEY` | `if/main` only | none |
+  | `branch-promotion` | `GH_APP_PRIVATE_KEY`, `GH_BOT_GPG_KEY` | `if/main` only | `@oysteinkrog` (manual single-review approval only) |
 
-  Before that move, every job that uses one of these secrets must name the environment, or it gets an empty value. Today `automerge.yml` (merge), `auto-release.yml` (tag), `upstream-stable-adoption.yml` and every Claude job have no `environment:` line.
+  `GH_APP_ID`, `GH_BOT_GPG_KEY_ID` and `GH_BOT_GPG_FINGERPRINT` are not sensitive and stay repository secrets. A workflow on another branch cannot read the four sensitive values. A job that needs one of them must name its environment, or it gets an empty value.
 - **Pull requests where Claude resolved a conflict need a person.** See stages 3, 5 and 6.
-- **Claude steps may refuse to start when a bot started the run.** `anthropics/claude-code-action` checks that the run's actor is a person unless the actor is listed in its `allowed_bots` input. Reviews dispatched by discovery, ingestion runs dispatched by the bot App, and failure analysis of runs the bot started are such runs. Until this is set, automatic reviews fail. No workflow sets `allowed_bots` yet; the owner decides which App login to list.
+- **Claude steps and bot actors.** `anthropics/claude-code-action` refuses a run started by a bot unless `allowed_bots` lists it. Every Claude step lists `initial-force-wpf-bot`; release notes and failure analysis also list `github-actions`, because auto-release dispatches Release with the workflow token.
 
 Repository settings the pipeline needs:
 

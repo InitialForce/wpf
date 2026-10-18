@@ -115,6 +115,7 @@ jobs:
   # ---------------------------------------------------------------------------
   analyze:
     name: Analyse failure (${{ github.event.workflow_run.name }})
+    environment: claude
     needs: [triage, gate]
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest

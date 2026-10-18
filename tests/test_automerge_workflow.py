@@ -129,10 +129,11 @@ def test_failed_build_comment_is_deduplicated(workflow: dict) -> None:
     assert "grep -qF" in step["run"]
 
 
-def test_merge_job_uses_app_token_without_environment(workflow: dict) -> None:
+def test_merge_job_uses_app_token_from_bot_credentials(workflow: dict) -> None:
     job = workflow["jobs"]["merge"]
     assert job["needs"] == "gate"
-    assert "environment" not in job
+    # The App key is an environment secret, limited to if/main, with no approval.
+    assert job["environment"] == "bot-credentials"
     assert any("create-github-app-token" in s.get("uses", "") for s in job["steps"])
 
 

@@ -341,10 +341,12 @@ def test_actionlint_release_yml() -> None:
 
 def test_release_notes_agent_has_no_tools_and_read_only_token(workflow: dict) -> None:
     """The notes agent reads community PR titles: no tools at all, no secrets
-    beyond the Anthropic key, read-only GITHUB_TOKEN, no environment."""
+    beyond the Anthropic key, read-only GITHUB_TOKEN, only the claude environment."""
     job = workflow["jobs"]["release-notes"]
     assert job["permissions"] == {"contents": "read"}
-    assert "environment" not in job
+    # Only the "claude" environment, which holds just the Anthropic key and is
+    # limited to if/main. The App and GPG keys live in bot-credentials.
+    assert job["environment"] == "claude"
     claude = next(s for s in job["steps"] if "claude-code-action" in str(s.get("uses", "")))
     args = claude["with"]["claude_args"]
     assert "--allowedTools" not in args

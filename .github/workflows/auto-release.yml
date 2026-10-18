@@ -50,6 +50,7 @@ jobs:
 
   tag:
     name: Tag a release if src/ changed
+    environment: bot-credentials
     needs: gate
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest

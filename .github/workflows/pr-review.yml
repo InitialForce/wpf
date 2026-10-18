@@ -181,7 +181,7 @@ jobs:
     needs: [gate, prepare]
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
-    environment: bot-credentials
+    environment: claude
     # The reviewer reads untrusted PR content: read-only token, no issue or
     # OIDC rights, never the bot App token.
     permissions:
@@ -316,7 +316,7 @@ jobs:
     # Default (unset) = require two reviews.
     if: needs.gate.outputs.proceed == 'true' && vars.IF_REVIEW_DOUBLE_REQUIRED != 'false'
     runs-on: ubuntu-latest
-    environment: bot-credentials
+    environment: claude
     permissions:
       contents: read
       pull-requests: read

@@ -190,7 +190,9 @@ def test_no_dated_branches() -> None:
 def test_agent_job_has_no_credentials(workflow: dict) -> None:
     job = workflow["jobs"]["resolve-conflicts"]
     assert job["permissions"] == {"contents": "read"}
-    assert "environment" not in job
+    # Only the "claude" environment, which holds just the Anthropic key and is
+    # limited to if/main. The App and GPG keys live in bot-credentials.
+    assert job["environment"] == "claude"
     text = yaml.safe_dump(job)
     assert "GH_APP" not in text and "GPG" not in text
     assert "import-bot-gpg" not in text and "github-app-token" not in text

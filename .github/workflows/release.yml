@@ -336,6 +336,7 @@ jobs:
   # ---------------------------------------------------------------------------
   release-notes:
     name: Generate release notes (Claude Sonnet)
+    environment: claude
     needs: [verify-tag, build]
     if: needs.build.result == 'success'
     # Notes are optional: publish falls back to generated notes, so a failed

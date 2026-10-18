@@ -260,6 +260,7 @@ jobs:
   # -------------------------------------------------------------------------
   resolve-conflicts:
     name: Resolve conflicts (no credentials)
+    environment: claude
     needs: [gate, sync]
     if: >-
       needs.gate.outputs.proceed == 'true' &&

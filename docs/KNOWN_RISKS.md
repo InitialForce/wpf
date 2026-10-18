@@ -69,17 +69,16 @@ The packages are not Authenticode-signed. `release.yml` publishes `InitialForce.
 
 ---
 
-## RISK-004: Repository-level secrets and the App's ruleset bypass
+## RISK-004: The App's ruleset bypass
 
-**Severity:** high
-**Status:** open (owner action planned)
+**Severity:** medium
+**Status:** mitigated
 
-All seven secrets (`ANTHROPIC_API_KEY`, `GH_APP_ID`, `GH_APP_PRIVATE_KEY`, `GH_BOT_GPG_FINGERPRINT`, `GH_BOT_GPG_KEY`, `GH_BOT_GPG_KEY_ID`, `NUGET_ORG_API_KEY`) are repository secrets. The environments `bot-credentials` and `wpf-nuget-publish` hold none and have no branch policy. So any workflow on any branch of this repository, including a same-repository PR's own copy of a workflow, can read every secret. The App has `contents: write`, and the ruleset `if-fork-protected-branches` (deletion and force-push rules on `if/main` and `if/release/*`) lists the App and repository admins as bypass actors. The ruleset requires no status check and no code-owner review.
+The four sensitive secrets (`GH_APP_PRIVATE_KEY`, `GH_BOT_GPG_KEY`, `NUGET_ORG_API_KEY`, `ANTHROPIC_API_KEY`) are environment secrets in `bot-credentials`, `branch-promotion`, `wpf-nuget-publish` and `claude`, each limited to `if/main`. A workflow pushed to another branch cannot read them. The App has `contents: write`, and the ruleset `if-fork-protected-branches` (deletion and force-push rules on `if/main` and `if/release/*`) lists the App and repository admins as bypass actors. The ruleset requires no status check and no code-owner review.
 
 **Mitigation:**
-- Pipeline jobs that run candidate code or an agent hold no App token and no GPG key, and check out without stored credentials.
+- Pipeline jobs that run candidate code or an agent hold no App token and no GPG key, and check out without stored credentials. Agent jobs use only the `claude` environment.
 - `automerge.yml` merges only bot-signed pipeline PRs that pass `tools/automerge-verify.sh`, and never a change to a fork-owned path (`.github/`, `.if-fork/`, `tools/`, `docs/` and others).
-- Planned by the owner: move `NUGET_ORG_API_KEY` into `wpf-nuget-publish`, `GH_APP_*` and `GH_BOT_GPG_*` into `bot-credentials`, and `ANTHROPIC_API_KEY` into a new `claude` environment, each limited to `if/main`. Every job that reads a secret must then name its environment.
 - App key rotation: monthly per the operator runbook ("Rotate a secret").
 - CODEOWNERS lists `@oysteinkrog` for every path, but nothing enforces it until the ruleset requires code-owner review.
 

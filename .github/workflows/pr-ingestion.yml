@@ -370,6 +370,7 @@ jobs:
   # -------------------------------------------------------------------------
   resolve-conflicts:
     name: Resolve conflicts (no credentials)
+    environment: claude
     needs: [gate, cherry-pick]
     if: >-
       needs.gate.outputs.proceed == 'true' &&

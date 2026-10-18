@@ -79,6 +79,7 @@ jobs:
 
   merge:
     name: Merge or report
+    environment: bot-credentials
     needs: gate
     # Runs even when auto-merge is frozen, so failed builds are still reported.
     if: needs.gate.result == 'success'
