@@ -317,66 +317,72 @@ def test_permissions_contents_read(workflow):
     )
 
 
-def test_permissions_pull_requests_read(workflow):
+def test_workflow_permissions_have_no_write(workflow):
+    """Issues are opened with the bot App token in merge-verdict, so the
+    workflow token needs no write scope and no OIDC."""
     perms = workflow.get("permissions", {})
-    assert perms.get("pull-requests") == "read", (
-        f"permissions.pull-requests must be 'read'; got {perms.get('pull-requests')!r}"
-    )
+    assert "write" not in perms.values(), f"workflow permissions must be read-only: {perms}"
 
 
-def test_permissions_issues_write(workflow):
-    perms = workflow.get("permissions", {})
-    assert perms.get("issues") == "write", (
-        "permissions.issues must be 'write' (to open disagreement issues); "
-        f"got {perms.get('issues')!r}"
-    )
-
-
-def test_permissions_id_token_write(workflow):
-    perms = workflow.get("permissions", {})
-    assert perms.get("id-token") == "write", (
-        f"permissions.id-token must be 'write'; got {perms.get('id-token')!r}"
+@pytest.mark.parametrize("job", ["prepare", "review-1", "review-2"])
+def test_untrusted_content_jobs_are_read_only(workflow, job):
+    perms = workflow["jobs"][job].get("permissions")
+    assert perms == {"contents": "read", "pull-requests": "read"}, (
+        f"{job} reads untrusted PR content and must have read-only job permissions; got {perms}"
     )
 
 
 # ---------------------------------------------------------------------------
-# 13. ledger-event.py called for review_1, review_2, and merged_verdict events
+# 13. Reviewers only write verdict files; merge-verdict records the whole
+#     review (review_1, review_2, merged_verdict, outcome) in one ledger commit
+#     and pushes it before dispatching pr-ingestion.
 # ---------------------------------------------------------------------------
 
-def test_ledger_event_review_1_emitted(workflow):
-    review1 = workflow["jobs"]["review-1"]
-    steps = review1.get("steps", [])
-    step_runs = " ".join(s.get("run", "") for s in steps)
-    assert "ledger-event.py" in step_runs, (
-        "review-1 job must call tools/ledger-event.py"
-    )
-    assert "--event review_1" in step_runs, (
-        "review-1 job must emit --event review_1 to ledger-event.py"
-    )
+def _runs(workflow, job: str) -> str:
+    return "\n".join(s.get("run", "") for s in workflow["jobs"][job].get("steps", []))
 
 
-def test_ledger_event_review_2_emitted(workflow):
-    review2 = workflow["jobs"]["review-2"]
-    steps = review2.get("steps", [])
-    step_runs = " ".join(s.get("run", "") for s in steps)
-    assert "ledger-event.py" in step_runs, (
-        "review-2 job must call tools/ledger-event.py"
-    )
-    assert "--event review_2" in step_runs, (
-        "review-2 job must emit --event review_2 to ledger-event.py"
-    )
+def test_reviewers_do_not_write_ledger(workflow):
+    for job in ("review-1", "review-2"):
+        assert "ledger-event.py" not in _runs(workflow, job), (
+            f"{job} must not write the ledger; merge-verdict records all review events"
+        )
 
 
-def test_ledger_event_merged_verdict_emitted(workflow):
-    mv = workflow["jobs"]["merge-verdict"]
-    steps = mv.get("steps", [])
-    step_runs = " ".join(s.get("run", "") for s in steps)
-    assert "ledger-event.py" in step_runs, (
-        "merge-verdict job must call tools/ledger-event.py"
+def test_merge_verdict_records_review_events_in_one_commit(workflow):
+    runs = _runs(workflow, "merge-verdict")
+    assert "--events-out" in runs, "merge-verdicts.py must write the review events"
+    assert runs.count("ledger-event.py") == 1
+    assert "--events-file" in runs
+
+
+def test_merge_verdict_records_before_dispatch(workflow):
+    steps = workflow["jobs"]["merge-verdict"]["steps"]
+    runs = [s.get("run", "") for s in steps]
+    record = next(i for i, r in enumerate(runs) if "ledger-event.py" in r)
+    dispatch = next(i for i, r in enumerate(runs) if "dispatch-approved.py" in r)
+    assert record < dispatch, "Ledger must be pushed before pr-ingestion is dispatched"
+
+
+def test_merge_verdict_tolerates_rejected_and_escalated_exit_codes(workflow):
+    runs = _runs(workflow, "merge-verdict")
+    assert "set +e" in runs and '"$rc" -eq 3' in runs, (
+        "merge-verdicts.py exits 1, 2 and 4 are outcomes; only 3 fails the step"
     )
-    assert "--event merged_verdict" in step_runs, (
-        "merge-verdict job must emit --event merged_verdict to ledger-event.py"
-    )
+    assert "--retry-missing" in runs
+
+
+def test_review_models_come_from_config(workflow_text):
+    assert "claude-opus" not in workflow_text
+    assert "claude_models']['review_1']" in workflow_text
+    assert "claude_models']['review_2']" in workflow_text
+    assert "max_turns_review" in workflow_text
+
+
+def test_reviewers_use_read_only_token(workflow):
+    for job in ("review-1", "review-2"):
+        text = str(workflow["jobs"][job])
+        assert "app-token" not in text, f"{job} must not get the bot App token"
 
 
 # ---------------------------------------------------------------------------
@@ -567,13 +573,202 @@ def test_ledger_event_uses_actor_pr_review(workflow_text):
 
 
 def test_ledger_event_uses_head_sha_flag(workflow_text):
-    """All ledger-event.py invocations must pass --head-sha."""
+    """All ledger-event.py invocations must pass --head-sha or an events file."""
     import re
     invocations = re.findall(
         r'ledger-event\.py.*?(?=\n\s*(?:env:|GH_TOKEN|$))', workflow_text, re.DOTALL
     )
     assert invocations, "No ledger-event.py invocations found in workflow"
     for inv in invocations:
-        assert "--head-sha" in inv, (
+        assert "--head-sha" in inv or "--events-file" in inv, (
             f"ledger-event.py invocation missing --head-sha:\n{inv}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Pinned review input: reviewers never fetch the live PR
+# ---------------------------------------------------------------------------
+
+def test_prepare_pins_head_and_writes_diff(workflow):
+    runs = _runs(workflow, "prepare")
+    assert "refs/pull/$PR_NUMBER/head" in runs
+    assert '"$FETCHED" != "$HEAD_SHA"' in runs, "prepare must refuse a moved PR head"
+    assert "git merge-base" in runs
+    assert "pr.diff" in runs and "files.txt" in runs
+
+
+@pytest.mark.parametrize("job", ["review-1", "review-2"])
+def test_reviewers_need_prepare_and_have_no_shell(workflow, job):
+    j = workflow["jobs"][job]
+    assert "prepare" in j["needs"]
+    action = next(s for s in j["steps"] if "claude-code-action" in s.get("uses", ""))
+    args = action["with"]["claude_args"]
+    denied = args.split("--disallowedTools", 1)[1].split()[0].split(",")
+    assert "Bash" in denied
+    assert "WebFetch" in denied
+
+
+def _claude_step(workflow, job: str) -> dict:
+    return next(
+        s for s in workflow["jobs"][job]["steps"] if "claude-code-action" in s.get("uses", "")
+    )
+
+
+def _tool_list(args: str, flag: str) -> list[str]:
+    return args.split(f"--{flag}", 1)[1].split()[0].split(",")
+
+
+@pytest.mark.parametrize("n", [1, 2])
+def test_reviewers_load_only_trusted_claude_settings(workflow, n):
+    """Regression: candidate content must not configure Claude. No project or
+    local settings, no project hooks, no MCP servers from the checkout."""
+    step = _claude_step(workflow, f"review-{n}")
+    args = step["with"]["claude_args"].split()
+    assert args[args.index("--setting-sources") + 1] == "user"
+    assert "--strict-mcp-config" in args
+    assert '"disableAllHooks": true' in step["with"]["settings"]
+    assert "--mcp-config" not in args
+
+
+@pytest.mark.parametrize("n", [1, 2])
+def test_reviewer_tool_rules_are_path_scoped(workflow, n):
+    """Regression: Read only on the input and config, file writes only on the
+    reviewer's own verdict file, and /proc and the runner temp dir denied.
+    Claude Code checks every file-writing tool, Write included, against Edit
+    rules, so the verdict file needs an Edit rule and Edit must not be denied."""
+    args = _claude_step(workflow, f"review-{n}")["with"]["claude_args"]
+    allowed = _tool_list(args, "allowedTools")
+    assert sorted(allowed) == sorted([
+        "Read(./review-input/**)",
+        "Read(./.if-fork/config.yaml)",
+        f"Edit(./review-output/review-{n}.json)",
+    ])
+    denied = _tool_list(args, "disallowedTools")
+    assert "Read(//proc/**)" in denied
+    assert "Read(//home/runner/work/_temp/**)" in denied
+    # Read, Glob and Grep need no approval, so an allow rule does not confine
+    # Glob and Grep; deny them outright.
+    for tool in ("Bash", "MultiEdit", "WebFetch", "WebSearch", "Task", "Glob", "Grep"):
+        assert tool in denied
+    assert "Edit" not in denied
+    assert "Write" not in allowed
+
+
+@pytest.mark.parametrize("n", [1, 2])
+def test_reviewer_checkout_is_sparse(workflow, n):
+    """The reviewer's working directory holds only the config and prompts,
+    so no repository .claude/, .mcp.json or CLAUDE.md is present."""
+    checkout = next(
+        s for s in workflow["jobs"][f"review-{n}"]["steps"]
+        if s.get("uses", "").startswith("actions/checkout")
+    )
+    w = checkout["with"]
+    assert w["persist-credentials"] is False
+    assert w["sparse-checkout-cone-mode"] is False
+    assert w["sparse-checkout"].split() == ["/.if-fork/config.yaml", "/.if-fork/prompts/"]
+
+
+def test_prompts_do_not_fetch_the_diff():
+    for n in (1, 2):
+        text = (REPO_ROOT / ".if-fork" / "prompts" / f"pr-review-{n}.md").read_text()
+        assert "gh api" not in text and "gh pr view" not in text
+        assert "review-input/pr.diff" in text
+
+
+def test_merge_verdict_requires_prepare_success(workflow):
+    cond = workflow["jobs"]["merge-verdict"]["if"]
+    assert "needs.prepare.result == 'success'" in cond
+
+
+def test_merge_verdict_uses_pinned_diff_for_policy(workflow):
+    runs = _runs(workflow, "merge-verdict")
+    assert '--diff "$RUNNER_TEMP/review-input/pr.diff"' in runs
+    assert '--files "$RUNNER_TEMP/review-input/files.txt"' in runs
+
+
+def test_payload_never_interpolated_into_run(workflow_text):
+    assert "${{ env.PR_NUMBER }}" not in workflow_text
+    assert "${{ env.HEAD_SHA }}" not in workflow_text
+    assert "client_payload" not in workflow_text.split("jobs:", 1)[1]
+
+
+@pytest.mark.parametrize(
+    "job", ["prepare", "review-1", "review-2", "single-review-approval", "merge-verdict"]
+)
+def test_every_job_validates_payload(workflow, job):
+    first = workflow["jobs"][job]["steps"][0]
+    assert first["name"] == "Validate dispatch payload"
+    assert "^[0-9a-f]{40}$" in first["run"]
+
+
+# ---------------------------------------------------------------------------
+# Origin checks (Opus NEW-3): one review job must not stand in for the other
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("n", [1, 2])
+def test_review_jobs_output_their_origin(workflow, n):
+    job = workflow["jobs"][f"review-{n}"]
+    outputs = job["outputs"]
+    assert outputs["reviewer_id"] == "${{ steps.settings.outputs.reviewer_id }}"
+    assert outputs["verdict_sha256"] == "${{ steps.verdict.outputs.sha256 }}"
+    assert outputs["upload"] == "${{ steps.upload.outcome }}"
+    ids = [s.get("id") for s in job["steps"]]
+    assert ids.index("verdict") < ids.index("upload"), "hash the verdict before uploading it"
+
+
+def test_merge_verdict_downloads_verdicts_by_exact_name(workflow):
+    steps = workflow["jobs"]["merge-verdict"]["steps"]
+    downloads = [s["with"] for s in steps if "download-artifact" in s.get("uses", "")]
+    assert all("pattern" not in w and "merge-multiple" not in w for w in downloads)
+    names = {w.get("name") for w in downloads}
+    assert {"review-1.json", "review-2.json"} <= names
+
+
+def test_merge_verdict_passes_origin_of_each_verdict(workflow):
+    step = next(
+        s for s in workflow["jobs"]["merge-verdict"]["steps"] if s.get("id") == "merge"
+    )
+    for n in (1, 2):
+        for field, output in (("ID", "reviewer_id"), ("SHA256", "verdict_sha256"),
+                              ("UPLOAD", "upload")):
+            assert step["env"][f"REVIEW_{n}_{field}"] == (
+                f"${{{{ needs.review-{n}.outputs.{output} }}}}"
+            )
+        for flag in ("id", "sha256", "upload"):
+            assert f'--review-{n}-{flag} "$REVIEW_{n}_{flag.upper()}"' in step["run"]
+
+
+def test_merge_verdict_fails_job_on_origin_errors(workflow):
+    steps = workflow["jobs"]["merge-verdict"]["steps"]
+    last = steps[-1]
+    assert "origin_errors" in last["run"] and "exit 1" in last["run"]
+    names = [s.get("name", "") for s in steps]
+    assert names.index("Record review outcome in ledger (one commit)") < len(steps) - 1
+
+
+# ---------------------------------------------------------------------------
+# A failed prepare is recorded as review_error (Opus NEW-7)
+# ---------------------------------------------------------------------------
+
+def test_failed_prepare_is_recorded(workflow):
+    job = workflow["jobs"]["record-prepare-failure"]
+    assert job["needs"] == ["gate", "prepare"]
+    cond = " ".join(job["if"].split())
+    assert cond.startswith("always()")
+    assert "needs.gate.outputs.proceed == 'true'" in cond
+    assert "needs.prepare.result == 'failure'" in cond
+    runs = _runs(workflow, "record-prepare-failure")
+    assert "merge-verdicts.py" in runs and "--prepare-failed" in runs
+    assert "--ledger-path .if-fork/patch-ledger.jsonl" in runs
+    assert runs.count("ledger-event.py") == 1 and "--events-file" in runs
+    assert "dispatch-approved.py" in runs
+    names = [s.get("name") for s in job["steps"]]
+    assert names[0] == "Validate dispatch payload"
+    assert names.index("Record in ledger (one commit)") < names.index(
+        "Hand off (escalation issue on the last attempt)"
+    )
+
+
+def test_failed_prepare_never_runs_merge_verdict(workflow):
+    """Only one of record-prepare-failure and merge-verdict can run."""
+    assert "needs.prepare.result == 'success'" in workflow["jobs"]["merge-verdict"]["if"]

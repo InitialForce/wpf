@@ -216,12 +216,15 @@ def test_concurrency_cancel_in_progress(workflow: dict) -> None:
 # ---------------------------------------------------------------------------
 # 7. Permissions block
 # ---------------------------------------------------------------------------
-def test_permissions_checks_write(workflow: dict) -> None:
-    """Workflow must grant checks:write permission."""
+def test_permissions_read_only(workflow: dict) -> None:
+    """build.yml never publishes, so it needs no write permission.
+
+    It is also called from release.yml, and a called workflow cannot ask for
+    more than its caller grants.
+    """
     permissions = workflow.get("permissions", {})
-    assert permissions.get("checks") == "write", (
-        f"permissions.checks must be 'write'; got: {permissions.get('checks')}"
-    )
+    writes = {k: v for k, v in permissions.items() if v == "write"}
+    assert not writes, f"build.yml must not request write permissions; got: {writes}"
 
 
 def test_permissions_contents_read(workflow: dict) -> None:
@@ -356,3 +359,66 @@ def test_actionlint_build_yml() -> None:
     assert result.returncode == 0, (
         f"actionlint failed on build.yml:\n{result.stdout}\n{result.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 12. Never publishes; skips ledger/docs-only pushes; callable by release.yml
+# ---------------------------------------------------------------------------
+def test_no_publish_step(workflow: dict) -> None:
+    """build.yml must never push packages. release.yml owns publishing."""
+    for job_name, job in workflow["jobs"].items():
+        for step in job.get("steps", []):
+            run = str(step.get("run", ""))
+            assert "nuget push" not in run, (
+                f"{job_name}: build.yml must not push packages ({step.get('name')})"
+            )
+            assert "NUGET_ORG_API_KEY" not in run
+
+
+def test_push_ignores_ledger_and_docs(workflow: dict) -> None:
+    """Ledger/discovery and docs-only commits on if/main must not start a build."""
+    push = workflow["on"]["push"]
+    ignored = push.get("paths-ignore", [])
+    for pattern in (".if-fork/**", "docs/**", "**/*.md"):
+        assert pattern in ignored, f"push.paths-ignore must include {pattern!r}; got {ignored}"
+    assert "src/**" not in ignored
+
+
+def test_pull_request_still_builds_ledger_changes(workflow: dict) -> None:
+    """PR builds keep their own filter; .if-fork changes in a PR still build."""
+    pr = workflow["on"]["pull_request"]
+    assert ".if-fork/**" not in pr.get("paths-ignore", [])
+
+
+def test_workflow_call_package_version_input(workflow: dict) -> None:
+    """release.yml calls build.yml with the release version to pack."""
+    call = workflow["on"].get("workflow_call") or {}
+    assert "package_version" in (call.get("inputs") or {})
+    build_steps = workflow["jobs"]["build-wpf"]["steps"]
+    version_step = next(s for s in build_steps if s.get("id") == "version")
+    assert "inputs.package_version" in str(version_step.get("env", {}))
+
+
+def test_workflow_call_ref_input_used_by_every_checkout(workflow: dict) -> None:
+    """A release build must build the verified tag commit in every job, and no
+    checkout may leave a token in .git/config."""
+    call = workflow["on"].get("workflow_call") or {}
+    assert "ref" in (call.get("inputs") or {})
+    for job_name, job in workflow["jobs"].items():
+        for step in job.get("steps", []):
+            if str(step.get("uses", "")).startswith("actions/checkout"):
+                with_block = step.get("with") or {}
+                assert with_block.get("ref") == "${{ inputs.ref }}", job_name
+                assert with_block.get("persist-credentials") is False, job_name
+
+
+def test_release_call_has_its_own_concurrency_group(workflow: dict) -> None:
+    """A push build on if/main must not cancel a release build (or vice versa)."""
+    assert "inputs.ref" in workflow["concurrency"]["group"]
+
+
+def test_perf_job_is_labelled_placeholder(workflow: dict) -> None:
+    perf = workflow["jobs"]["perf"]
+    assert "placeholder" in perf["name"].lower()
+    runs = "\n".join(str(s.get("run", "")) for s in perf["steps"])
+    assert "dotnet" not in runs, "the placeholder must not look like it runs benchmarks"

@@ -473,3 +473,77 @@ def test_nonexistent_patch_path_exits_one(tmp_path: Path) -> None:
     assert result.returncode == 1, (
         f"Non-existent patch path should exit 1, got {result.returncode}"
     )
+
+
+# ===========================================================================
+# Online mode: the patch covers every commit of the PR, not only the head
+# ===========================================================================
+
+def _git(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "-c", "user.email=t@example.com",
+         "-c", "user.name=T", *args],
+        cwd=str(cwd), check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+def _make_upstream_with_two_commit_pr(tmp_path: Path) -> tuple[Path, str]:
+    """Upstream repo whose PR #7 adds src/A.cs then src/B.cs in two commits."""
+    up = tmp_path / "upstream"
+    up.mkdir()
+    _git(up, "init", "-q", "-b", "main")
+    (up / "README").write_text("base\n")
+    _git(up, "add", ".")
+    _git(up, "commit", "-q", "-m", "base")
+    _git(up, "checkout", "-q", "-b", "pr")
+    (up / "src").mkdir()
+    (up / "src" / "A.cs").write_text("class A\n{\n    int first = 1;\n}\n")
+    _git(up, "add", ".")
+    _git(up, "commit", "-q", "-m", "first")
+    (up / "src" / "B.cs").write_text("class B\n{\n    int second = 2;\n}\n")
+    _git(up, "add", ".")
+    _git(up, "commit", "-q", "-m", "second")
+    head = _git(up, "rev-parse", "HEAD")
+    _git(up, "update-ref", "refs/pull/7/head", head)
+    _git(up, "checkout", "-q", "main")
+    return up, head
+
+
+def _make_fork(tmp_path: Path, upstream: Path) -> Path:
+    fork = tmp_path / "fork"
+    _git(tmp_path, "clone", "-q", str(upstream), str(fork))
+    _git(fork, "remote", "add", "upstream", str(upstream))
+    return fork
+
+
+def _online_args(fork: Path, head: str) -> list[str]:
+    ledger = fork / ".if-fork" / "patch-ledger.jsonl"
+    _write_minimal_ledger(ledger)
+    return [
+        "--pr-number", "7",
+        "--head-sha", head,
+        "--upstream-ref", "upstream",
+        "--ledger-path", str(ledger),
+        "--target-root", str(fork),
+    ]
+
+
+def test_online_mode_new_pr_returns_apply(tmp_path: Path) -> None:
+    upstream, head = _make_upstream_with_two_commit_pr(tmp_path)
+    fork = _make_fork(tmp_path, upstream)
+    result = _run(*_online_args(fork, head), cwd=fork, env={"CI": "false"})
+    assert result.returncode == 0, result.stderr
+    assert _stdout_json(result)["action"] == "apply"
+
+
+def test_online_mode_checks_all_pr_commits(tmp_path: Path) -> None:
+    """Only the head commit's change is in the fork: that is partial, not graduated."""
+    upstream, head = _make_upstream_with_two_commit_pr(tmp_path)
+    fork = _make_fork(tmp_path, upstream)
+    (fork / "src").mkdir()
+    (fork / "src" / "B.cs").write_text("class B\n{\n    int second = 2;\n}\n")
+    _git(fork, "add", ".")
+    _git(fork, "commit", "-q", "-m", "only the second commit")
+    result = _run(*_online_args(fork, head), cwd=fork, env={"CI": "false"})
+    assert result.returncode == 2, f"stdout={result.stdout}\nstderr={result.stderr}"
+    assert _stdout_json(result)["action"] == "escalate"

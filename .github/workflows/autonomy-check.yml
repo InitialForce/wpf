@@ -40,12 +40,13 @@ jobs:
     steps:
       - name: Evaluate autonomy gate
         id: check
+        env:
+          AUTONOMY_ENABLED: ${{ vars.IF_AUTONOMY_ENABLED }}
+          AUTOMERGE_FROZEN: ${{ vars.IF_AUTOMERGE_FROZEN }}
+          REQUESTED_ACTION: ${{ inputs.requested_action }}
+          BYPASS: ${{ inputs.bypass_for_human_dispatch }}
+          TRIGGER_EVENT: ${{ github.event_name }}
         run: |
-          AUTONOMY_ENABLED="${{ vars.IF_AUTONOMY_ENABLED }}"
-          AUTOMERGE_FROZEN="${{ vars.IF_AUTOMERGE_FROZEN }}"
-          REQUESTED_ACTION="${{ inputs.requested_action }}"
-          BYPASS="${{ inputs.bypass_for_human_dispatch }}"
-          TRIGGER_EVENT="${{ github.event_name }}"
 
           # Gate 0: default-deny for unknown requested_action
           KNOWN_ACTIONS="claude-invoke auto-merge discovery-scan release-publish cherry-pick upstream-stable-adoption"
@@ -57,9 +58,12 @@ jobs:
             fi
           done
           if [ "$ACTION_KNOWN" != "true" ]; then
+            # The value is caller input: keep only [a-z0-9-] (others become
+            # '?') so it cannot add output lines or workflow commands.
+            SAFE_ACTION=$(printf '%s' "$REQUESTED_ACTION" | head -c 64 | tr -c 'a-z0-9-' '?')
             echo "proceed=false" >> "$GITHUB_OUTPUT"
-            echo "reason=unknown requested_action: $REQUESTED_ACTION" >> "$GITHUB_OUTPUT"
-            echo "::error::Autonomy gate: unknown requested_action '$REQUESTED_ACTION'. Blocked by default-deny."
+            echo "reason=unknown requested_action: $SAFE_ACTION" >> "$GITHUB_OUTPUT"
+            echo "::error::Autonomy gate: unknown requested_action '$SAFE_ACTION'. Blocked by default-deny."
             exit 0
           fi
 

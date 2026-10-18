@@ -68,6 +68,23 @@ REPO = "InitialForce/wpf"
 TOKEN = "ghp_test_token_1234"
 
 
+def _fake_api(open_issues: list[dict[str, Any]]) -> Any:
+    """urlopen stand-in: GET returns *open_issues*, POST returns 201."""
+
+    def fake(req: Any) -> Any:
+        resp = MagicMock()
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = MagicMock(return_value=False)
+        if req.get_method() == "GET":
+            resp.status = 200
+            resp.read.return_value = json.dumps(open_issues).encode()
+        else:
+            resp.status = 201
+        return resp
+
+    return fake
+
+
 def _write_verdict(tmp_path: Path, data: dict[str, Any]) -> Path:
     p = tmp_path / "verdict.json"
     p.write_text(json.dumps(data), encoding="utf-8")
@@ -163,19 +180,21 @@ def test_escalated_live_calls_urlopen(tmp_path: Path) -> None:
     mock_resp.__exit__ = MagicMock(return_value=False)
     mock_resp.status = 201
 
-    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open, \
+    with patch("urllib.request.urlopen", side_effect=_fake_api([])) as mock_open, \
          patch.dict("os.environ", {"GITHUB_TOKEN": TOKEN}):
         rc = dispatch_approved.main(_argv(p))
 
     assert rc == 0
     assert mock_open.called
     req = mock_open.call_args[0][0]
-    assert f"/repos/{REPO}/issues" in req.full_url
+    assert req.full_url.endswith(f"/repos/{REPO}/issues")
     body = json.loads(req.data)
     pr = ESCALATED_VERDICT["pr_number"]
     assert f"PR #{pr}" in body["title"]
     assert "review-disagreement" in body["labels"]
     assert "needs-human" in body["labels"]
+    assert "automated" in body["labels"]
+    assert f"<!-- if-fork:review-escalation pr={pr} -->" in body["body"]
 
 
 # ===========================================================================
@@ -186,7 +205,7 @@ def test_rejected_dry_run_prints_ledger_cmd(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     p = _write_verdict(tmp_path, REJECTED_VERDICT)
-    rc = dispatch_approved.main(_argv(p, dry_run=True))
+    rc = dispatch_approved.main(_argv(p, dry_run=True) + ["--record-rejected"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "ledger-event.py" in out
@@ -206,7 +225,7 @@ def test_rejected_live_calls_subprocess(tmp_path: Path) -> None:
 
     with patch("subprocess.run", return_value=mock_result) as mock_run, \
          patch.dict("os.environ", {"GITHUB_TOKEN": TOKEN}):
-        rc = dispatch_approved.main(_argv(p))
+        rc = dispatch_approved.main(_argv(p) + ["--record-rejected"])
 
     assert rc == 0
     assert mock_run.called
@@ -307,3 +326,76 @@ def test_fixture_escalated_loads() -> None:
     data = json.loads((FIXTURES / "merged-verdict-escalated.json").read_text())
     assert data["verdict"] == "escalated"
     assert "pr_number" in data
+
+
+# ===========================================================================
+# rejected without --record-rejected: no ledger write, no HTTP call
+# ===========================================================================
+
+def test_rejected_default_does_not_write_ledger(tmp_path: Path) -> None:
+    p = _write_verdict(tmp_path, REJECTED_VERDICT)
+    with patch("subprocess.run") as mock_run, \
+         patch("urllib.request.urlopen") as mock_open, \
+         patch.dict("os.environ", {"GITHUB_TOKEN": TOKEN}):
+        rc = dispatch_approved.main(_argv(p))
+    assert rc == 0
+    assert not mock_run.called
+    assert not mock_open.called
+
+
+# ===========================================================================
+# merge-verdicts.py output (no *_summary fields): summaries come from reasoning
+# ===========================================================================
+
+def test_approved_payload_from_merge_verdicts_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    verdict = {
+        "verdict": "approved",
+        "pr_number": 6511,
+        "head_sha": "abc",
+        "review_1": {"verdict": "safe", "rationale": "Fine."},
+        "review_2": {"verdict": "safe", "reasoning": "Also fine."},
+        "reasoning": "Both safe.",
+    }
+    p = _write_verdict(tmp_path, verdict)
+    rc = dispatch_approved.main(_argv(p, dry_run=True))
+    assert rc == 0
+    out = capsys.readouterr().out
+    body = json.loads(out.split("[dry-run] body: ", 1)[1])
+    assert body["event_type"] == "pr-ingestion-requested"
+    assert body["client_payload"]["pr_number"] == 6511
+    assert body["client_payload"]["head_sha"] == "abc"
+    assert body["client_payload"]["review_1_summary"] == "safe: Fine."
+    assert body["client_payload"]["review_2_summary"] == "safe: Also fine."
+
+
+# ===========================================================================
+# escalation dedupe: one open issue per PR, later escalations comment on it
+# ===========================================================================
+
+def test_escalated_comments_on_existing_issue(tmp_path: Path) -> None:
+    p = _write_verdict(tmp_path, ESCALATED_VERDICT)
+    pr = ESCALATED_VERDICT["pr_number"]
+    existing = [
+        {"number": 7, "body": "other"},
+        {"number": 42, "body": f"<!-- if-fork:review-escalation pr={pr} -->\n..."},
+    ]
+    with patch("urllib.request.urlopen", side_effect=_fake_api(existing)) as mock_open, \
+         patch.dict("os.environ", {"GITHUB_TOKEN": TOKEN}):
+        rc = dispatch_approved.main(_argv(p))
+
+    assert rc == 0
+    posts = [c[0][0] for c in mock_open.call_args_list if c[0][0].get_method() == "POST"]
+    assert len(posts) == 1
+    assert posts[0].full_url.endswith(f"/repos/{REPO}/issues/42/comments")
+
+
+def test_review_error_does_nothing(tmp_path: Path) -> None:
+    p = _write_verdict(tmp_path, {"verdict": "review_error", "pr_number": 1, "head_sha": "a"})
+    with patch("urllib.request.urlopen") as mock_open, \
+         patch("subprocess.run") as mock_run, \
+         patch.dict("os.environ", {"GITHUB_TOKEN": TOKEN}):
+        rc = dispatch_approved.main(_argv(p))
+    assert rc == 0
+    assert not mock_open.called and not mock_run.called

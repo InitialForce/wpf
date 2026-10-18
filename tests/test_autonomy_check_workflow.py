@@ -122,17 +122,13 @@ def test_gating_logic_references_vars(workflow: dict) -> None:
     steps = gate_job.get("steps", [])
     assert steps, "gate job must have at least one step"
 
-    # Collect all run scripts across steps
-    combined_script = "\n".join(
-        step.get("run", "") for step in steps if isinstance(step, dict)
-    )
-
-    assert "${{ vars.IF_AUTONOMY_ENABLED }}" in combined_script, (
-        "Gate script must reference ${{ vars.IF_AUTONOMY_ENABLED }} literally"
-    )
-    assert "${{ vars.IF_AUTOMERGE_FROZEN }}" in combined_script, (
-        "Gate script must reference ${{ vars.IF_AUTOMERGE_FROZEN }} literally"
-    )
+    # The values reach the script through env, never ${{ }} inside run.
+    env = steps[0].get("env", {})
+    assert env.get("AUTONOMY_ENABLED") == "${{ vars.IF_AUTONOMY_ENABLED }}"
+    assert env.get("AUTOMERGE_FROZEN") == "${{ vars.IF_AUTOMERGE_FROZEN }}"
+    assert env.get("REQUESTED_ACTION") == "${{ inputs.requested_action }}"
+    for step in steps:
+        assert "${{" not in step.get("run", ""), step.get("name")
 
 
 # ---------------------------------------------------------------------------
@@ -249,3 +245,43 @@ def test_actionlint_test_caller() -> None:
     assert result.returncode == 0, (
         f"actionlint failed on test-autonomy-check.yml:\n{result.stdout}\n{result.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Dispatch input reaching the shell (Astra LOW, round 2)
+# ---------------------------------------------------------------------------
+HOSTILE_ACTION = "x\nproceed=true\n$(touch pwned)`touch pwned2`\n::warning::injected"
+
+
+def _run_step(script: str, env: dict[str, str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", "-e", "-c", script], cwd=cwd, env={"PATH": "/usr/bin:/bin", **env},
+        capture_output=True, text=True,
+    )
+
+
+def test_unknown_action_cannot_add_outputs_or_commands(workflow: dict, tmp_path: Path) -> None:
+    step = next(s for s in workflow["jobs"]["gate"]["steps"] if s.get("id") == "check")
+    out = tmp_path / "output"
+    result = _run_step(step["run"], {
+        "REQUESTED_ACTION": HOSTILE_ACTION, "AUTONOMY_ENABLED": "true",
+        "GITHUB_OUTPUT": str(out),
+    }, tmp_path)
+    assert result.returncode == 0, result.stderr
+    lines = out.read_text().splitlines()
+    assert lines[0] == "proceed=false"
+    assert len(lines) == 2 and lines[1].startswith("reason=unknown requested_action: ")
+    assert "proceed=true" not in out.read_text()
+    assert not any(line.startswith("::warning::") for line in result.stdout.splitlines())
+    assert not (tmp_path / "pwned").exists() and not (tmp_path / "pwned2").exists()
+
+
+def test_caller_reads_gate_outputs_through_env(caller_workflow: dict, tmp_path: Path) -> None:
+    step = caller_workflow["jobs"]["report"]["steps"][0]
+    assert "${{" not in step["run"]
+    assert step["env"]["GATE_REASON"] == "${{ needs.gate.outputs.reason }}"
+    result = _run_step(step["run"], {
+        "GATE_PROCEED": "false", "GATE_REASON": "unknown requested_action: $(touch pwned)",
+    }, tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "pwned").exists()

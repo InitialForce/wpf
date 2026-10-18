@@ -1,4 +1,19 @@
 # .github/workflows/pr-discovery.yml
+#
+# Daily discovery of upstream dotnet/wpf community PRs. No model call:
+# tools/discover-prs.py applies the `discovery` block of .if-fork/config.yaml.
+#
+# One run:
+#   1. Records every new (pr_number, head_sha) as a `discovered` ledger event.
+#      All events go into ONE commit and ONE push, marked [skip ci].
+#   2. Dispatches `pr-discovered` (client_payload: pr_number, head_sha) to
+#      pr-review.yml for at most discovery.max_reviews_per_run PRs that have no
+#      review verdict yet, so the backlog drains over several days.
+#   3. Re-sends `pr-ingestion-requested` (no model call) for approved SHAs whose
+#      handoff to pr-ingestion.yml was lost: approved, no ingestion outcome
+#      event, last attempt over 6 hours ago. Each attempt is an
+#      `ingestion_requested` ledger event; after 3 the SHA is recorded as
+#      escalated. These events go into the same single commit as step 1.
 name: PR Discovery
 
 on:
@@ -25,13 +40,11 @@ jobs:
       requested_action: discovery-scan
 
   discover:
-    name: Discover upstream PRs
+    name: Discover upstream PRs and queue reviews
     needs: gate
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     environment: bot-credentials
-    outputs:
-      batch_count: ${{ steps.run.outputs.batch_count }}
 
     steps:
       - name: Generate GH App token
@@ -51,78 +64,34 @@ jobs:
         with:
           python-version: "3.12"
 
-      # NOTE: The actual Claude action wiring (anthropics/claude-code-action) is implemented
-      # in a separate bead. This step is a placeholder that calls the action in the same form
-      # as the rest of the pipeline; CI will skip/fail gracefully until the action is wired.
-      - name: Load pr-discovery prompt
-        id: load-prompt
-        shell: bash
+      - name: Install Python dependencies
+        run: pip install pyyaml
+
+      - name: Find new candidates and the review queue
+        id: discover
         run: |
+          python tools/discover-prs.py \
+            --config .if-fork/config.yaml \
+            --ledger-path .if-fork/patch-ledger.jsonl \
+            --events-out "$RUNNER_TEMP/discovered-events.jsonl" \
+            --queue-out "$RUNNER_TEMP/review-queue.json" \
+            --ingest-out "$RUNNER_TEMP/ingest-queue.json" | tee "$RUNNER_TEMP/counts.json"
           {
-            echo 'prompt<<__EOF_PROMPT__'
-            cat .if-fork/prompts/pr-discovery.md
-            echo
-            echo '__EOF_PROMPT__'
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Run discovery (Claude Haiku)
-        id: run
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: ${{ steps.load-prompt.outputs.prompt }}
-          claude_args: >-
-            --max-turns 50
-            --model claude-haiku-4-5
-            --allowedTools Bash,Read,Grep,mcp__github__list_pull_requests,mcp__github__search_pull_requests,mcp__github__issue_write
-            --disallowedTools Edit,Write
-          github_token: ${{ steps.app-token.outputs.token }}
+            echo "### PR discovery"
+            echo '```json'
+            cat "$RUNNER_TEMP/counts.json"
+            echo '```'
+            echo "Queued for review:"
+            echo '```json'
+            cat "$RUNNER_TEMP/review-queue.json"
+            echo '```'
+            echo "Re-sent to ingestion:"
+            echo '```json'
+            cat "$RUNNER_TEMP/ingest-queue.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
         env:
-          CONFIG_PATH: .if-fork/config.yaml
-          LEDGER_PATH: .if-fork/patch-ledger.jsonl
-          STATE_PATH: .if-fork/patch-state.json
-          BATCH_ISSUE_PATH: /tmp/batch-issue.md
-
-      - name: Upload discovered PRs artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: discovered-prs-${{ github.run_id }}
-          path: /tmp/discovered-batch.json
-          retention-days: 30
-          if-no-files-found: ignore
-
-  record:
-    name: Record discovered events in ledger
-    needs: [gate, discover]
-    if: needs.discover.result == 'success'
-    runs-on: ubuntu-latest
-    environment: bot-credentials
-
-    steps:
-      - name: Generate GH App token
-        id: app-token
-        uses: tibdex/github-app-token@v2
-        with:
-          app_id: ${{ secrets.GH_APP_ID }}
-          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ steps.app-token.outputs.token }}
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Download discovered PRs artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: discovered-prs-${{ github.run_id }}
-          path: /tmp/
-        continue-on-error: true
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Import bot GPG key
         uses: ./.github/actions/import-bot-gpg
@@ -131,29 +100,47 @@ jobs:
           gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
           gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
 
-      - name: Emit ledger events for discovered PRs
+      # One commit for the whole run. ledger-event.py adds [skip ci] to the
+      # subject, so this push does not start build.yml.
+      - name: Record discovered events in ledger (one commit)
         run: |
-          if [ -f /tmp/discovered-batch.json ]; then
-            python tools/ledger-event.py \
-              --event discovered \
-              --pr-number 0 \
-              --head-sha "${{ github.sha }}" \
-              --actor pr-discovery \
-              --details-json "{\"batch_date\": \"$(date -u +%Y-%m-%d)\", \"run_url\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
-              --push
-          else
-            echo "::notice::No discovered-batch.json artifact; nothing to record."
+          COUNT=$(grep -c . "$RUNNER_TEMP/discovered-events.jsonl" || true)
+          if [ "$COUNT" = "0" ]; then
+            echo "::notice::No new upstream PRs, head SHAs or ingestion retries; ledger unchanged."
+            exit 0
           fi
+          python tools/ledger-event.py \
+            --events-file "$RUNNER_TEMP/discovered-events.jsonl" \
+            --actor pr-discovery \
+            --message "ledger: discovery run $(date -u +%Y-%m-%d), $COUNT event(s)" \
+            --push
         env:
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
-      - name: Trigger review for discovered PRs if new batch found
-        if: fromJSON(needs.discover.outputs.batch_count || '0') > 0
+      # Dispatch after the ledger push so each review run checks out a ledger
+      # that already has its `discovered` event. The pause spreads the reviews
+      # out so their ledger pushes rarely collide.
+      - name: Dispatch reviews (pr-discovered)
         run: |
-          gh api repos/${{ github.repository }}/dispatches \
-            --field event_type=pr-discovered \
-            --field "client_payload[batch_date]=$(date -u +%Y-%m-%d)"
+          jq -c '.[]' "$RUNNER_TEMP/review-queue.json" | while read -r item; do
+            jq -n --argjson item "$item" \
+              '{event_type: "pr-discovered", client_payload: {pr_number: $item.pr_number, head_sha: $item.head_sha}}' \
+              | gh api "repos/$GITHUB_REPOSITORY/dispatches" --input -
+            echo "Dispatched review for $item"
+            sleep 20
+          done
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Re-send lost ingestion handoffs (pr-ingestion-requested)
+        run: |
+          jq -c '.[]' "$RUNNER_TEMP/ingest-queue.json" | while read -r item; do
+            jq -n --argjson item "$item" \
+              '{event_type: "pr-ingestion-requested", client_payload: {pr_number: $item.pr_number, head_sha: $item.head_sha}}' \
+              | gh api "repos/$GITHUB_REPOSITORY/dispatches" --input -
+            echo "Re-sent ingestion for $item"
+          done
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}

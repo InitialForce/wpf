@@ -37,10 +37,15 @@ jobs:
     if: always()
     steps:
       - name: Print gate result
+        # The reason can carry the dispatch input, so it reaches the shell
+        # through env, never through ${{ }} in the script.
+        env:
+          GATE_PROCEED: ${{ needs.gate.outputs.proceed }}
+          GATE_REASON: ${{ needs.gate.outputs.reason }}
         run: |
-          echo "proceed : ${{ needs.gate.outputs.proceed }}"
-          echo "reason  : ${{ needs.gate.outputs.reason }}"
-          if [ "${{ needs.gate.outputs.proceed }}" = "true" ]; then
+          echo "proceed : $GATE_PROCEED"
+          echo "reason  : $GATE_REASON"
+          if [ "$GATE_PROCEED" = "true" ]; then
             echo "::notice::Gate PASSED — would continue to Claude jobs."
           else
             echo "::warning::Gate BLOCKED — downstream Claude jobs would be skipped."
