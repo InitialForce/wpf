@@ -29,7 +29,7 @@ The pipeline runs without a person in the loop; [FORK.md](../FORK.md#pipeline) d
 
 - Every change reaches `if/main` through a PR labelled `automated`: one sync PR `if/staging -> if/main` for upstream `release/10.0`, and one `claude/cherry-pick-pr-<N>` PR per approved upstream PR. `automerge.yml` merges each one when its `Build` run passes.
 - Conflict resolutions need no person. `resolution-review.yml` has Fable review each one. A rejected resolution is redone once from scratch. After the second rejection the change is given up: a cherry-pick is closed and recorded `escalated`, and a sync SHA is recorded `rebase_failed`. `automerge.yml` merges a resolution only when the ledger has `resolution_approved` for that exact commit.
-- `automerge.yml` leaves a PR to you when it changes a fork-owned file, or when a cherry-pick changes anything outside `src/` and `eng/`. It says why in a comment on the PR. See "Merge a PR that needs a person" below.
+- Ingestion and the nightly sync check the path rules `automerge.yml` uses before they push (`tools/path-policy.py`): no fork-owned file, and only `src/` and `eng/` for a cherry-pick. A change that breaks them gets no PR; it is recorded `escalated` (reason `fork_owned_paths` or `paths_outside_allowlist`) or, for a sync, `rebase_failed`. Fork-owned changes go through normal human PRs.
 - The perf gates do not measure WPF yet: the `Build` perf job runs nothing, and the release perf gate runs placeholder benchmarks against an unmeasured baseline.
 - `auto-release.yml` tags and publishes to nuget.org at most once a day, and only when `src/` changed since the last release.
 - Every problem that needs a person is one open issue labelled `automated`. Repeats add a comment instead of a new issue, and the issue closes itself when the problem is gone:
@@ -39,7 +39,7 @@ The pipeline runs without a person in the loop; [FORK.md](../FORK.md#pipeline) d
 | `CI failure: <workflow>` | `claude-on-failure.yml`, with a Claude analysis | that workflow passes again |
 | `Nightly upstream sync blocked` | `nightly-rebase.yml` | a later sync succeeds |
 | `Weekly differential: fork smoke results differ from upstream` | `weekly-differential.yml` | a clean weekly run |
-| `review-disagreement: PR #<N> ...` | `pr-review.yml` | a person closes it (see below) |
+| `review-disagreement: PR #<N> ...` | `pr-review.yml` | a person closes it; it is a notice and needs no action |
 
 A failed build on a pipeline PR is reported as one comment on that PR, not as an issue.
 
@@ -124,7 +124,8 @@ A failed build on a pipeline PR is reported as one comment on that PR, not as an
 gh workflow run pr-discovery.yml --repo InitialForce/wpf
 ```
 
-### Escalate a review-disagreement issue
+### Apply a PR the reviewers did not agree on
+A `review-disagreement` issue is a notice. The pipeline does not apply that head of the PR, and a new upstream head is reviewed from the start. Nothing needs to be done. To apply it anyway:
 1. Open the issue: `gh issue view <N> --repo InitialForce/wpf`
 2. Read both reviewer rationales attached to the issue.
 3. Make a judgment call: comment `human-resolution: safe` or `human-resolution: unsafe`.
@@ -176,7 +177,7 @@ gh pr merge <N> --repo InitialForce/wpf --merge
 ```
 
 ### Merge a PR that needs a person
-`automerge.yml` refuses these, and comments once per PR head with the reason:
+The pipeline does not open these: ingestion and the nightly sync run the same path rules before they push. You see one only after someone pushed to a pipeline branch, or after the rule changed. `automerge.yml` refuses these, and comments once per PR head with the reason:
 - **Fork-owned files** (`.github/`, `.if-fork/`, `tools/`, `tests/`, `test/`, `docs/`, `perf/`, `packaging/InitialForce.*`, agent configuration such as `CLAUDE.md` or `.mcp.json`). Upstream has none of these, so a change there is unexpected. Find out why before merging.
 - **A cherry-pick outside `src/` and `eng/`** (for example the root `Directory.Build.props`). Check that the change is what the upstream PR intended.
 
@@ -188,7 +189,7 @@ python tools/ledger-event.py --event escalated --pr-number <upstream N> --head-s
 If you push to or edit a pipeline branch yourself, add the label `needs-human-merge` so readers know, and merge it by hand: its commit has no review approval, so `automerge.yml` will not.
 
 ### Check or override a resolution review
-The review's outcome is in the ledger: `resolution_approved` or `resolution_rejected`, with `details.branch_sha` (the commit reviewed), `attempt`, `reasons` (the code rules that failed) and `reasoning` (the reviewer's own words). The `resolution-review-input` artifact of the run holds what the reviewer read, including `novel-lines.json`; start with those lines. For a sync, `pr_number` is 0 and `head_sha` is the upstream SHA.
+The review's outcome is in the ledger: `resolution_approved` or `resolution_rejected`, with `details.branch_sha` (the commit reviewed), `attempt`, `review_try`, `reasons` (the code rules that failed) and `reasoning` (the reviewer's own words). Each review try that left no valid verdict adds a `resolution_review_error` event before it; those are not attempts. The `resolution-review-input-<try>` artifact of the run holds what the reviewer read, including `novel-lines.json`; start with those lines. More than `conflict_resolution.max_novel_lines` (50) novel lines is a rejection whatever the reviewer said. For a sync, `pr_number` is 0 and `head_sha` is the upstream SHA.
 
 To stop an approved resolution from merging, record a rejection for its head commit. `automerge.yml` then refuses it:
 ```bash
@@ -228,10 +229,10 @@ Claude resolves merge and cherry-pick conflicts in a job of its own (`resolve-co
 
 The job uploads only the conflicted files as an artifact. The next job (`finalize`) runs `if/main`'s own scripts. It repeats the merge or cherry-pick itself on that same commit and takes only the conflicted paths from the artifact. It refuses symlinks, missing files and leftover conflict markers. It then runs `file_denylist` from `if/main` on the whole branch diff and checks for files upstream did not change. Only after that does it import the bot key, sign with the trailer `Conflict-Resolved-By: claude` and push. Nothing is pushed before that check, so an open PR cannot be updated with denylisted content. `automerge.yml` merges that trailer only after a review approves the commit.
 
-Both workflows then call `resolution-review.yml`, which has three jobs:
-- `prepare` has no secrets and a read-only token. It checks the pushed commit's parents: one commit on the pinned `if/main` commit, or for a sync the merge of it and `UPSTREAM_SHA`. For a cherry-pick it checks that upstream `refs/pull/<N>/head` still equals the approved head. It writes the `resolution-review-input` artifact: the upstream side's diff (the approved PR diff, or `release/10.0` from its merge base with `if/main`), the branch diff, the base, upstream and final version of each changed file (1 MB max each), and `novel-lines.json` from `tools/novel-lines.py`.
-- `review` runs Claude Fable with the pr-review.yml reviewer limits: the `claude` environment, `contents: read`, a sparse checkout of `.if-fork/config.yaml` and `.if-fork/prompts/` only, trusted settings only, Read on `review-input/` and the config, Write on `review-output/resolution.json` only, no shell or web tools. It hashes its verdict as a job output.
-- `record` (`bot-credentials`, `if/main`'s tools) checks the upload, the hash and the reviewer ID, computes the diff to scan itself, and runs `tools/record-resolution-verdict.py`. It approves only on verdict `approve`, `novel_lines_justified: true`, confidence of at least `conflict_resolution.review_min_confidence`, and no `review_hard_fail_patterns` hit. A cherry-pick scans its whole branch diff; a sync scans the lines the resolution added against git's own merge. It records `resolution_approved` or `resolution_rejected` with `branch_sha` and the attempt number, and returns `approved`, `retry` or `give_up`. A missing verdict is a rejection.
+Both workflows then call `resolution-review.yml`. It runs up to three review tries for the same commit (`resolution-reviewer.yml`, jobs `prepare` and `review`). Try 2 runs after 120 seconds and try 3 after 600, each only when the try before left no verdict. Then one `record` job decides:
+- `prepare` has no secrets and a read-only token. On a retry it waits first. It checks the pushed commit's parents: one commit on the pinned `if/main` commit, or for a sync the merge of it and `UPSTREAM_SHA`. For a cherry-pick it checks that upstream `refs/pull/<N>/head` still equals the approved head. It writes the `resolution-review-input-<try>` artifact: the upstream side's diff (the approved PR diff, or `release/10.0` from its merge base with `if/main`), the branch diff, the base, upstream and final version of each changed file (1 MB max each), and `novel-lines.json` from `tools/novel-lines.py`, whose hash is a job output.
+- `review` runs Claude Fable with the pr-review.yml reviewer limits: the `claude` environment, `contents: read`, a sparse checkout of `.if-fork/config.yaml` and `.if-fork/prompts/` only, trusted settings only, Read on `review-input/` and the config, Write on `review-output/resolution.json` only, no shell or web tools. It hashes its verdict as a job output and sets `done` when the verdict is well formed, which stops the retries.
+- `record` (`bot-credentials`, `if/main`'s tools) checks each try's upload, hashes and reviewer ID, computes the diff to scan itself, and runs `tools/record-resolution-verdict.py`. The first try with a valid verdict decides. It approves only on verdict `approve`, `novel_lines_justified: true`, confidence of at least `conflict_resolution.review_min_confidence`, at most `conflict_resolution.max_novel_lines` novel lines, and no `review_hard_fail_patterns` hit. A cherry-pick scans its whole branch diff; a sync scans the lines the resolution added against git's own merge. It records `resolution_approved` or `resolution_rejected` with `branch_sha` and the attempt number, and returns `approved`, `retry` or `give_up`. Each try without a valid verdict is recorded as `resolution_review_error`. No valid verdict in any try is a rejection. A cancelled run records nothing.
 
 `claude-on-failure.yml` runs Claude with the same settings. It reads only `failure-input/` (the failed log, an excerpt and recent commits) and `.if-fork/config.yaml`, and writes only `failure-output/analysis.md`.
 
@@ -631,4 +632,4 @@ The Phase-0 hand-off stubs (bulk review through candidate issues, a hand-pushed 
 4. **First resolved cherry-pick and sync.** Check that the run called `resolution-review.yml`, that the ledger has `resolution_approved` or `resolution_rejected` with the pushed commit as `branch_sha`, and that a rejection led to a fresh run or, on the second, to the close and `escalated` or `rebase_failed`. Read the first few approved resolutions yourself before you trust the review. PR #27 (upstream #9215) predates the review: `automerge.yml` asks for its rebuild, and the rebuilt commit should be reviewed and lose the `needs-human-merge` label.
 5. **automerge.yml.** The 30-minute runs show "No passed Build" or a merge for each open pipeline PR; none fail.
 6. **First release.** `auto-release.yml` tags and dispatches `release.yml` on `if/main`. Check the packages on nuget.org and that SC restores the new version.
-7. **Review disagreements.** Work each open `review-disagreement` issue as in "Escalate a review-disagreement issue".
+7. **Review disagreements.** Read each open `review-disagreement` notice and close it. Apply one only if you disagree with the outcome ("Apply a PR the reviewers did not agree on").
