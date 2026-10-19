@@ -256,6 +256,11 @@ jobs:
             AUTO=$(git merge-tree --write-tree "$BASE_SHA" "$UPSTREAM_SHA" | head -n1 || true)
             [[ "$AUTO" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not recreate the merge"; exit 1; }
             git diff --no-color --no-ext-diff --no-renames "$AUTO" "$BRANCH_SHA" > "$RUNNER_TEMP/scan.diff"
+            # Upstream's own change: a fork line in a conflict region that
+            # upstream removed too may be dropped; any other dropped fork
+            # line is scanned.
+            MB=$(git merge-base "$BASE_SHA" "$UPSTREAM_SHA")
+            git diff --no-color --no-ext-diff --no-renames "$MB" "$UPSTREAM_SHA" > "$RUNNER_TEMP/upstream.diff"
           else
             git diff --no-color --no-ext-diff --no-renames "$BASE_SHA" "$BRANCH_SHA" > "$RUNNER_TEMP/scan.diff"
           fi
@@ -274,7 +279,7 @@ jobs:
         run: |
           MODEL=$(python3 -c "import yaml; print(yaml.safe_load(open('.if-fork/config.yaml'))['claude_models']['resolution_review'])")
           SCAN_ARGS=()
-          if [ "$KIND" = sync ]; then SCAN_ARGS=(--skip-conflict-markers); fi
+          if [ "$KIND" = sync ]; then SCAN_ARGS=(--sync-upstream-diff "$RUNNER_TEMP/upstream.diff"); fi
           echo "$TRIES_JSON" | jq --arg tmp "$RUNNER_TEMP" '[range(1; 4) as $n | .["try-\($n)"] as $t | {
               try: $n, result: ($t.result // ""),
               verdict: "\($tmp)/try-\($n)/verdict/resolution.json",

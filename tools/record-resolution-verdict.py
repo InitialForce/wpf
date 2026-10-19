@@ -17,10 +17,16 @@ of these hold:
     BASE_SHA..BRANCH_SHA (the upstream part was already scanned at review).
     For a sync it is the diff from git's automatic merge (with conflict
     markers) to the result, which is what the resolution changed; the rest
-    is upstream release/10.0. Its added and removed lines are scanned, but
-    not removed conflict-marker lines (--skip-conflict-markers). So a
-    resolution that drops a fork [SecurityCritical] or Demand() line from a
-    conflict region is caught.
+    is upstream release/10.0 (--sync-upstream-diff, see sync_lines_to_scan):
+      - every added line;
+      - every removed line outside a conflict region: merged content the
+        resolution dropped, for example a fork Demand() elsewhere in the
+        file;
+      - removed lines of the fork side ("ours") of a conflict region, unless
+        upstream removed the same line from that file: fork protections
+        the resolution dropped;
+      - not the conflict markers, and not the base or upstream ("theirs")
+        side of a region: those are alternatives a resolution may discard.
   - the novel-lines report from the prepare job (no secrets, no model)
     matches the SHA-256 that job recorded as a job output, and its
     novel_count is at most conflict_resolution.max_novel_lines (default 50).
@@ -91,6 +97,7 @@ import importlib.util
 import json
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -183,27 +190,91 @@ def verdict_problems(verdict: dict[str, Any], threshold: float) -> list[str]:
 
 
 # Lines git writes into a conflicted file: <<<<<<< ours, ||||||| base,
-# =======, >>>>>>> theirs. The resolution removes them, so they are not scanned.
-_CONFLICT_MARKER = re.compile(r"^(<{7}|\|{7}|>{7})( |$)|^={7}$")
+# =======, >>>>>>> theirs. In `git merge-tree BASE_SHA UPSTREAM_SHA`, "ours"
+# is the fork and "theirs" is upstream.
+_OURS = re.compile(r"^<{7}( |$)")
+_BASE = re.compile(r"^\|{7}( |$)")
+_SPLIT = re.compile(r"^={7}$")
+_THEIRS = re.compile(r"^>{7}( |$)")
 
 
-def _lines_to_scan(diff_text: str, skip_conflict_markers: bool) -> list[str]:
-    lines = _changed_lines(diff_text)
-    if not skip_conflict_markers:
-        return lines
-    removed_markers = {
-        line[1:] for line in diff_text.splitlines()
-        if line.startswith("-") and not line.startswith("---")
-        and _CONFLICT_MARKER.match(line[1:])
-    }
-    return [line for line in lines if line not in removed_markers]
+def _novel_lines_module() -> Any:
+    path = Path(__file__).parent / "novel-lines.py"
+    spec = importlib.util.spec_from_file_location("novel_lines", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault("novel_lines", module)
+    spec.loader.exec_module(module)
+    return module
+
+
+def sync_lines_to_scan(diff_text: str, upstream_diff_text: str) -> list[str]:
+    """The lines of a sync resolution to scan (see the module docstring).
+
+    diff_text is git's automatic merge -> the result; upstream_diff_text is
+    upstream's own change (merge base -> UPSTREAM_SHA), used to excuse a
+    fork line that upstream removed too.
+    """
+    nl = _novel_lines_module()
+    up_removed: dict[str, Counter[str]] = {}
+    for f in nl.parse_diff(upstream_diff_text):
+        up_removed.setdefault(f.path, Counter()).update(t.strip() for _, t in f.removed)
+
+    lines: list[str] = []
+    path = ""
+    old_path: str | None = None
+    state = "clean"
+    in_hunk = False
+    for raw in diff_text.splitlines():
+        if raw.startswith("diff --git "):
+            path, old_path, state, in_hunk = "", None, "clean", False
+            continue
+        if not in_hunk and raw.startswith("--- "):
+            old_path = nl._strip_prefix(raw[4:], "a/")
+            continue
+        if not in_hunk and raw.startswith("+++ "):
+            new_path = nl._strip_prefix(raw[4:], "b/")
+            path = new_path if new_path is not None else (old_path or "")
+            continue
+        if raw.startswith("@@ "):
+            in_hunk = True
+            continue
+        if not in_hunk:
+            continue
+        if raw.startswith("+"):
+            lines.append(raw[1:])
+        elif raw.startswith("-"):
+            text = raw[1:]
+            if state == "clean" and _OURS.match(text):
+                state = "ours"
+            elif state == "ours" and _BASE.match(text):
+                state = "base"
+            elif state in ("ours", "base") and _SPLIT.match(text):
+                state = "theirs"
+            elif state == "theirs" and _THEIRS.match(text):
+                state = "clean"
+            elif state == "clean":
+                lines.append(text)
+            elif state == "ours":
+                excused = up_removed.get(path, Counter())
+                if excused[text.strip()] > 0:
+                    excused[text.strip()] -= 1
+                else:
+                    lines.append(text)
+            # base and theirs: an alternative the resolution may discard
+        elif not (raw.startswith(" ") or raw == "" or raw.startswith("\\")):
+            in_hunk = False
+    return lines
 
 
 def hard_fail_hits(
-    diff_text: str, patterns: list[str], skip_conflict_markers: bool = False
+    diff_text: str, patterns: list[str], sync_upstream_diff: str | None = None
 ) -> list[dict[str, str]]:
     """Return the first scanned line of the diff that each pattern matches."""
-    lines = _lines_to_scan(diff_text, skip_conflict_markers)
+    lines = (
+        _changed_lines(diff_text) if sync_upstream_diff is None
+        else sync_lines_to_scan(diff_text, sync_upstream_diff)
+    )
     hits: list[dict[str, str]] = []
     for pattern in patterns:
         regex = re.compile(pattern)
@@ -438,8 +509,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--final-diff", type=Path)
     parser.add_argument("--failed-step", default="",
                         help="Record that the record job failed at this step (see above)")
-    parser.add_argument("--skip-conflict-markers", action="store_true",
-                        help="Do not scan removed conflict-marker lines (sync)")
+    parser.add_argument("--sync-upstream-diff", type=Path,
+                        help="Upstream's own diff (merge base -> UPSTREAM_SHA); "
+                             "scan --final-diff as a sync resolution")
     parser.add_argument("--novel-lines", type=Path)
     parser.add_argument("--novel-sha256", default="",
                         help="SHA-256 of --novel-lines, from the prepare job's output")
@@ -465,6 +537,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("a cherry-pick needs the upstream PR number")
     if not args.failed_step and args.final_diff is None:
         parser.error("--final-diff is required")
+    if not args.failed_step and (args.kind == "sync") != (args.sync_upstream_diff is not None):
+        parser.error("--sync-upstream-diff goes with --kind sync, and only with it")
     return args
 
 
@@ -545,6 +619,10 @@ def main(argv: list[str] | None = None) -> int:
         prior_errors = prior_review_errors(ledger_text, args.pr_number, args.head_sha)
         patterns = list(config.get("review_hard_fail_patterns", []))
         diff_text = args.final_diff.read_text(encoding="utf-8", errors="replace")
+        sync_upstream_diff = (
+            args.sync_upstream_diff.read_text(encoding="utf-8", errors="replace")
+            if args.sync_upstream_diff is not None else None
+        )
     except (OSError, yaml.YAMLError, KeyError, TypeError, ValueError) as exc:
         die(f"cannot read policy inputs: {exc}")
         raise  # unreachable
@@ -559,7 +637,7 @@ def main(argv: list[str] | None = None) -> int:
         if novel is not None:
             novel_reasons = novel_cap_problems(novel, cap)
 
-    hits = hard_fail_hits(diff_text, patterns, skip_conflict_markers=args.skip_conflict_markers)
+    hits = hard_fail_hits(diff_text, patterns, sync_upstream_diff)
     reasons = decide(verdict, errors, hits, threshold) + novel_reasons
     if not diff_text.strip():
         reasons.append("the diff to scan is empty")
