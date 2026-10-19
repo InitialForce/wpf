@@ -53,7 +53,9 @@ bot_signed() {
     | awk -v f="$KEY_FPR" '$2 == "VALIDSIG" && ($3 == f || $NF == f) {ok = 1} END {exit !ok}'
 }
 
-# Nobody reviews what the conflict agent writes, so a person merges it.
+# A conflict resolution written by Claude merges by itself only for a
+# cherry-pick, and only when a Fable review approved that exact commit (see
+# the cherry-pick case). Otherwise a person merges it.
 HUMAN_MERGE="a person must review and merge it (needs-human-merge)"
 agent_resolved() {
   [ -n "$(git log -1 --format='%(trailers:key=Conflict-Resolved-By,valueonly)' "$1")" ]
@@ -82,7 +84,6 @@ case "$HEAD_BRANCH" in
     [[ "$BRANCH_PR" =~ ^[0-9]+$ ]] || refuse "bad branch name $HEAD_BRANCH"
     [ "$(git rev-list --count "$MAIN..HEAD")" -eq 1 ] || refuse "cherry-pick PR must have exactly one commit"
     bot_signed HEAD || refuse "commit $HEAD_SHA is not signed by the bot key"
-    agent_resolved HEAD && refuse "Claude resolved a conflict in this cherry-pick; $HUMAN_MERGE"
     UP_URL=$(git log -1 --format='%(trailers:key=Upstream-PR,valueonly)' HEAD | head -n1)
     UP_HEAD=$(git log -1 --format='%(trailers:key=Upstream-PR-Head,valueonly)' HEAD | head -n1)
     [ "$UP_URL" = "https://github.com/dotnet/wpf/pull/$BRANCH_PR" ] \
@@ -97,6 +98,16 @@ case "$HEAD_BRANCH" in
     python3 "$TRUSTED/tools/check-approval.py" --ledger "$OUT/ledger.jsonl" \
       --pr-number "$BRANCH_PR" --head-sha "$UP_HEAD" > "$OUT/approval.json" \
       || refuse "upstream #$BRANCH_PR at $UP_HEAD has no approved verdict in the ledger"
+    # Claude resolved a conflict: the if/main ledger must hold a
+    # resolution_approved event for this upstream pair whose branch_sha is
+    # this very commit, with no later resolution_rejected for it. Any new
+    # push changes the SHA, so an approval never carries over.
+    if agent_resolved HEAD; then
+      python3 "$TRUSTED/tools/check-approval.py" --ledger "$OUT/ledger.jsonl" \
+        --pr-number "$BRANCH_PR" --head-sha "$UP_HEAD" --resolution-branch-sha "$HEAD_SHA" \
+        > "$OUT/resolution.json" \
+        || refuse "Claude resolved a conflict in this cherry-pick and the resolution review did not approve commit $HEAD_SHA ($(jq -r .reason "$OUT/resolution.json")); $HUMAN_MERGE"
+    fi
     deny "$OUT/changed.txt"
     echo "$BRANCH_PR" > "$OUT/upstream_pr"
     echo "$UP_HEAD" > "$OUT/upstream_head"

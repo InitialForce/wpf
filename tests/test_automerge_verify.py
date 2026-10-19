@@ -176,16 +176,107 @@ def test_cherry_pick_ok(tmp_path, env, origin, trusted, bot_key) -> None:
     assert verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1]) == ("ok", "")
 
 
-def test_conflict_resolved_cherry_pick_needs_a_person(
+RESOLVED_MSG = (
+    "pick\n\nUpstream-PR: https://github.com/dotnet/wpf/pull/77\n"
+    f"Upstream-PR-Head: {UPSTREAM_HEAD}\nConflict-Resolved-By: claude\n"
+)
+
+
+def resolution(event: str, branch_sha: str, pr: int = 77, head: str = UPSTREAM_HEAD) -> str:
+    return json.dumps({
+        "event": event, "pr_number": pr, "head_sha": head,
+        "details": {"branch_sha": branch_sha},
+    }) + "\n"
+
+
+def record(origin: Path, env: dict[str, str], *events: str) -> None:
+    """Append resolution review events to the if/main ledger (a ledger-only commit)."""
+    text = (origin / ".if-fork" / "patch-ledger.jsonl").read_text() + "".join(events)
+    commit(origin, env, {".if-fork/patch-ledger.jsonl": text}, "ledger: resolution")
+
+
+def test_conflict_resolved_cherry_pick_without_review_needs_a_person(
     tmp_path, env, origin, trusted, bot_key
 ) -> None:
-    msg = (
-        "pick\n\nUpstream-PR: https://github.com/dotnet/wpf/pull/77\n"
-        f"Upstream-PR-Head: {UPSTREAM_HEAD}\nConflict-Resolved-By: claude\n"
-    )
-    sha = make_pick(origin, env, {"src/b.cs": "b\n"}, msg=msg)
+    sha = make_pick(origin, env, {"src/b.cs": "b\n"}, msg=RESOLVED_MSG)
     result, reason = verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])
     assert result == "refuse" and "needs-human-merge" in reason
+    assert f"no resolution review approved commit {sha}" in reason
+
+
+def test_conflict_resolved_cherry_pick_with_approved_review_is_ok(
+    tmp_path, env, origin, trusted, bot_key
+) -> None:
+    sha = make_pick(origin, env, {"src/b.cs": "b\n"}, msg=RESOLVED_MSG)
+    record(origin, env, resolution("resolution_approved", sha))
+    assert verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1]) == ("ok", "")
+
+
+def test_resolution_approval_is_stale_after_a_new_push(
+    tmp_path, env, origin, trusted, bot_key
+) -> None:
+    old = make_pick(origin, env, {"src/b.cs": "b\n"}, msg=RESOLVED_MSG)
+    record(origin, env, resolution("resolution_approved", old))
+    # The branch is pushed again with other content: a new commit, never reviewed.
+    run(origin, env, "git", "branch", "-D", BRANCH)
+    new = make_pick(origin, env, {"src/b.cs": "changed\n"}, msg=RESOLVED_MSG)
+    assert new != old
+    result, reason = verify(tmp_path, env, origin, trusted, new, BRANCH, bot_key[1])
+    assert result == "refuse" and "needs-human-merge" in reason
+
+
+def test_rejected_resolution_needs_a_person(tmp_path, env, origin, trusted, bot_key) -> None:
+    sha = make_pick(origin, env, {"src/b.cs": "b\n"}, msg=RESOLVED_MSG)
+    record(origin, env, resolution("resolution_rejected", sha))
+    result, reason = verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])
+    assert result == "refuse" and "was rejected" in reason
+
+
+def test_rejection_after_approval_needs_a_person(
+    tmp_path, env, origin, trusted, bot_key
+) -> None:
+    sha = make_pick(origin, env, {"src/b.cs": "b\n"}, msg=RESOLVED_MSG)
+    record(
+        origin, env,
+        resolution("resolution_approved", sha), resolution("resolution_rejected", sha),
+    )
+    result, reason = verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])
+    assert result == "refuse" and "was rejected" in reason
+
+
+@pytest.mark.parametrize("pr,head", [(78, UPSTREAM_HEAD), (77, "c" * 40)])
+def test_resolution_approval_for_another_pair_needs_a_person(
+    tmp_path, env, origin, trusted, bot_key, pr, head
+) -> None:
+    sha = make_pick(origin, env, {"src/b.cs": "b\n"}, msg=RESOLVED_MSG)
+    record(origin, env, resolution("resolution_approved", sha, pr=pr, head=head))
+    result, reason = verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])
+    assert result == "refuse" and "needs-human-merge" in reason
+
+
+def test_approved_resolution_still_needs_every_other_check(
+    tmp_path, env, origin, trusted, bot_key
+) -> None:
+    sha = make_pick(origin, env, {"eng/Versions.props": "<Project />\n"}, msg=RESOLVED_MSG)
+    record(origin, env, resolution("resolution_approved", sha))
+    result, reason = verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])
+    assert result == "refuse" and "denylisted" in reason
+
+
+def test_approved_resolution_unsigned_is_refused(tmp_path, env, origin, trusted, bot_key) -> None:
+    sha = make_pick(origin, env, {"src/b.cs": "b\n"}, msg=RESOLVED_MSG, sign=False)
+    record(origin, env, resolution("resolution_approved", sha))
+    result, reason = verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])
+    assert result == "refuse" and "not signed" in reason
+
+
+def test_approved_resolution_behind_if_main_is_rebuilt(
+    tmp_path, env, origin, trusted, bot_key
+) -> None:
+    sha = make_pick(origin, env, {"src/b.cs": "b\n"}, msg=RESOLVED_MSG)
+    record(origin, env, resolution("resolution_approved", sha))
+    commit(origin, env, {"src/c.cs": "c\n"}, "other change")
+    assert verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])[0] == "behind"
 
 
 def test_wrong_fingerprint_refused(tmp_path, env, origin, trusted) -> None:
@@ -349,6 +440,21 @@ def test_staging_with_conflict_trailer_needs_a_person(
         tmp_path, env, origin, {}, fork_file="src/f.cs",
         trailer="\n\nConflict-Resolved-By: claude",
     )
+    result, reason = verify(
+        tmp_path, env, origin, trusted, sha, "if/staging", bot_key[1], upstream=up
+    )
+    assert result == "refuse" and "needs-human-merge" in reason
+
+
+def test_staging_conflict_trailer_needs_a_person_even_with_resolution_approval(
+    tmp_path, env, origin, trusted, bot_key
+) -> None:
+    # Only cherry-picks accept a reviewed resolution; the sync PR stays human-merged.
+    sha, up = staging(
+        tmp_path, env, origin, {}, fork_file="src/f.cs",
+        trailer="\n\nConflict-Resolved-By: claude",
+    )
+    record(origin, env, resolution("resolution_approved", sha))
     result, reason = verify(
         tmp_path, env, origin, trusted, sha, "if/staging", bot_key[1], upstream=up
     )
