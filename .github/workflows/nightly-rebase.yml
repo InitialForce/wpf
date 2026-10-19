@@ -137,7 +137,18 @@ jobs:
           git remote add upstream https://github.com/dotnet/wpf.git 2>/dev/null || true
           git fetch --no-tags upstream release/10.0
           git fetch origin "$MAIN_BRANCH" "$STAGING_BRANCH" 2>/dev/null || git fetch origin "$MAIN_BRANCH"
-          UPSTREAM_SHA=$(git rev-parse upstream/release/10.0)
+          # A resolution retry pins the upstream SHA it was rejected for, so
+          # the attempt count (per upstream SHA) cannot restart when
+          # release/10.0 moves between runs. It must still be on release/10.0.
+          if [ -n "$PINNED_UPSTREAM" ]; then
+            [[ "$PINNED_UPSTREAM" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Invalid upstream_sha in the payload"; exit 1; }
+            git fetch --no-tags upstream "$PINNED_UPSTREAM"
+            git merge-base --is-ancestor "$PINNED_UPSTREAM" upstream/release/10.0 \
+              || { echo "::error::$PINNED_UPSTREAM is not on upstream release/10.0"; exit 1; }
+            UPSTREAM_SHA="$PINNED_UPSTREAM"
+          else
+            UPSTREAM_SHA=$(git rev-parse upstream/release/10.0)
+          fi
           export UPSTREAM_SHA
           echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
           echo "main_sha=$(git rev-parse "origin/$MAIN_BRANCH")" >> "$GITHUB_OUTPUT"
@@ -214,6 +225,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TRUSTED: ${{ github.workspace }}/trusted
           FORCE: ${{ (github.event_name == 'workflow_dispatch' && inputs.force_rebase) || (github.event_name == 'repository_dispatch' && github.event.client_payload.force == true) }}
+          PINNED_UPSTREAM: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.upstream_sha || '' }}
 
       - name: Close sync PR made redundant by if/main
         if: steps.plan.outputs.result == 'up-to-date' && steps.plan.outputs.open_pr != ''
@@ -581,8 +593,9 @@ jobs:
 
   # -------------------------------------------------------------------------
   # retry-resolution: rejected with an attempt left. Run this workflow again
-  # with force: it merges and resolves from scratch in new jobs, and the new
-  # merge commit gets a new review. The ledger counts the attempts.
+  # with force and the same upstream SHA: it merges exactly that commit and
+  # resolves from scratch in new jobs, and the new merge commit gets a new
+  # review. The ledger counts the attempts per upstream SHA.
   # -------------------------------------------------------------------------
   retry-resolution:
     name: Resolve again from scratch
@@ -609,7 +622,8 @@ jobs:
       # The new run waits for this one (same concurrency group).
       - name: Dispatch a fresh sync run
         run: |
-          jq -n '{event_type: "nightly-rebase", client_payload: {force: true}}' \
+          jq -n --arg sha "$UPSTREAM_SHA" \
+            '{event_type: "nightly-rebase", client_payload: {force: true, upstream_sha: $sha}}' \
             | gh api "repos/$GITHUB_REPOSITORY/dispatches" --input -
           echo "::notice::Resolution attempt $ATTEMPT for upstream $UPSTREAM_SHA was rejected ($REASON). A fresh run merges and resolves again."
         env:

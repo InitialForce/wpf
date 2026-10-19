@@ -369,7 +369,23 @@ def test_rejection_with_an_attempt_left_reruns_with_force(workflow: dict) -> Non
     job = workflow["jobs"]["retry-resolution"]
     assert "needs.resolution-review.outputs.next_action == 'retry'" in job["if"]
     run = _step(job["steps"], "Dispatch a fresh sync run")["run"]
-    assert '{event_type: "nightly-rebase", client_payload: {force: true}}' in run
+    # Opus M2: the retry merges exactly the rejected upstream SHA, so the
+    # attempt count cannot restart when release/10.0 moves.
+    assert "client_payload: {force: true, upstream_sha: $sha}" in run
+    assert '--arg sha "$UPSTREAM_SHA"' in run
+
+
+def test_plan_merges_a_pinned_upstream_sha(sync_steps: list[dict]) -> None:
+    step = _step(sync_steps, "Decide whether a sync is needed")
+    run = step["run"]
+    assert step["env"]["PINNED_UPSTREAM"] == (
+        "${{ github.event_name == 'repository_dispatch' && "
+        "github.event.client_payload.upstream_sha || '' }}"
+    )
+    assert '[[ "$PINNED_UPSTREAM" =~ ^[0-9a-f]{40}$ ]]' in run
+    assert 'git merge-base --is-ancestor "$PINNED_UPSTREAM" upstream/release/10.0' in run
+    assert 'UPSTREAM_SHA="$PINNED_UPSTREAM"' in run
+    assert run.index('UPSTREAM_SHA="$PINNED_UPSTREAM"') < run.index('echo "upstream_sha=')
 
 
 def test_last_rejection_closes_the_pr_and_records_rebase_failed(
