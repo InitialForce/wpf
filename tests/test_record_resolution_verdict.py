@@ -43,6 +43,8 @@ def _run(
     upload: str = "success",
     reviewer_id: str = REVIEWER,
     config: Path = CONFIG,
+    novel: dict[str, Any] | None = None,
+    novel_sha256: str | None = None,
 ) -> tuple[int, dict[str, Any], dict[str, Any] | None]:
     vpath = tmp_path / "resolution.json"
     if verdict is not None:
@@ -50,13 +52,17 @@ def _run(
         if sha256 is None:
             sha256 = hashlib.sha256(vpath.read_bytes()).hexdigest()
     (tmp_path / "final.diff").write_text(diff)
-    (tmp_path / "novel.json").write_text(json.dumps({"novel_count": 2, "dropped_count": 1}))
+    npath = tmp_path / "novel.json"
+    default = {"novel_count": 2, "dropped_count": 1}
+    npath.write_text(json.dumps(default if novel is None else novel))
+    if novel_sha256 is None:
+        novel_sha256 = hashlib.sha256(npath.read_bytes()).hexdigest()
     out, events = tmp_path / "decision.json", tmp_path / "events.jsonl"
     r = subprocess.run(
         [sys.executable, str(TOOL), "--verdict", str(vpath), "--reviewer-id", reviewer_id,
          "--verdict-sha256", sha256 or "", "--upload", upload, "--config", str(config),
          "--final-diff", str(tmp_path / "final.diff"),
-         "--novel-lines", str(tmp_path / "novel.json"),
+         "--novel-lines", str(npath), "--novel-sha256", novel_sha256,
          "--pr-number", "77", "--head-sha", HEAD, "--branch-sha", BRANCH_SHA,
          "--branch", "claude/cherry-pick-pr-77", "--run-url", "https://example/run",
          "--output", str(out), "--events-out", str(events)],
@@ -183,8 +189,12 @@ def _run_with(tmp_path: Path, verdict: dict[str, Any], *extra: str) -> dict[str,
     vpath = tmp_path / "resolution.json"
     vpath.write_text(json.dumps(verdict))
     (tmp_path / "final.diff").write_text(CLEAN_DIFF)
+    npath = tmp_path / "novel.json"
+    npath.write_text(json.dumps({"novel_count": 0, "dropped_count": 0}))
     out, events = tmp_path / "decision.json", tmp_path / "events.jsonl"
-    args = ["--pr-number", "77", "--head-sha", HEAD, *extra]
+    args = ["--pr-number", "77", "--head-sha", HEAD, *extra,
+            "--novel-lines", str(npath),
+            "--novel-sha256", hashlib.sha256(npath.read_bytes()).hexdigest()]
     r = subprocess.run(
         [sys.executable, str(TOOL), "--verdict", str(vpath), "--reviewer-id", REVIEWER,
          "--verdict-sha256", hashlib.sha256(vpath.read_bytes()).hexdigest(),
@@ -196,6 +206,52 @@ def _run_with(tmp_path: Path, verdict: dict[str, Any], *extra: str) -> dict[str,
     )
     assert r.returncode in (0, 1), r.stderr
     return {**json.loads(out.read_text()), "event": json.loads(events.read_text())}
+
+
+# ---------------------------------------------------------------------------
+# The novel-lines cap (conflict_resolution.max_novel_lines, 50 in config.yaml)
+# ---------------------------------------------------------------------------
+
+
+def test_novel_lines_at_the_cap_are_approved(tmp_path: Path) -> None:
+    rc, decision, event = _run(tmp_path, _verdict(), novel={"novel_count": 50})
+    assert rc == 0 and decision["decision"] == "approved"
+    assert event is not None and event["details"]["max_novel_lines"] == 50
+
+
+def test_novel_lines_above_the_cap_are_rejected_whatever_fable_says(tmp_path: Path) -> None:
+    rc, decision, event = _run(tmp_path, _verdict(confidence=1.0), novel={"novel_count": 51})
+    assert rc == 1 and decision["decision"] == "rejected"
+    assert decision["reasons"] == [
+        "51 novel lines, above the cap of 50 (conflict_resolution.max_novel_lines)"
+    ]
+    assert event is not None and event["event"] == "resolution_rejected"
+    assert event["details"]["novel_count"] == 51
+
+
+@pytest.mark.parametrize(
+    "bad", [{"novel_count": "3"}, {"novel_count": -1}, {}, {"novel_count": True}]
+)
+def test_novel_report_without_a_valid_count_is_rejected(
+    tmp_path: Path, bad: dict[str, Any]
+) -> None:
+    rc, decision, _ = _run(tmp_path, _verdict(), novel=bad)
+    assert rc == 1 and "no valid novel_count" in decision["reasons"][0]
+
+
+@pytest.mark.parametrize("sha", ["", "0" * 64])
+def test_novel_report_not_from_prepare_is_rejected(tmp_path: Path, sha: str) -> None:
+    # A report another job swapped in does not match prepare's job-output hash.
+    rc, decision, _ = _run(tmp_path, _verdict(), novel={"novel_count": 0}, novel_sha256=sha)
+    assert rc == 1
+    assert decision["reasons"] == [
+        "the novel-lines report is missing or does not match the prepare job's hash"
+    ]
+
+
+def test_cap_from_the_command_line(tmp_path: Path) -> None:
+    d = _run_with(tmp_path, _verdict(), "--max-novel-lines", "0")
+    assert d["decision"] == "approved"  # _run_with reports 0 novel lines
 
 
 def test_first_rejection_is_retried(tmp_path: Path) -> None:
@@ -243,6 +299,13 @@ def test_max_attempts_from_the_command_line(tmp_path: Path) -> None:
     assert d["next_action"] == "give_up"
 
 
+def _novel_args(tmp_path: Path, count: int = 0) -> list[str]:
+    npath = tmp_path / "novel.json"
+    npath.write_text(json.dumps({"novel_count": count, "dropped_count": 0}))
+    return ["--novel-lines", str(npath),
+            "--novel-sha256", hashlib.sha256(npath.read_bytes()).hexdigest()]
+
+
 def test_sync_is_recorded_with_pr_0_and_upstream_sha(tmp_path: Path) -> None:
     vpath = tmp_path / "resolution.json"
     vpath.write_text(json.dumps(_verdict()))
@@ -258,7 +321,8 @@ def test_sync_is_recorded_with_pr_0_and_upstream_sha(tmp_path: Path) -> None:
          "--upload", "success", "--config", str(CONFIG),
          "--final-diff", str(tmp_path / "final.diff"),
          "--pr-number", "0", "--head-sha", HEAD, "--branch-sha", BRANCH_SHA,
-         "--branch", "if/staging", "--output", str(out), "--events-out", str(events)],
+         "--branch", "if/staging", "--output", str(out), "--events-out", str(events),
+         *_novel_args(tmp_path)],
         capture_output=True, text=True,
     )
     assert r.returncode == 0, r.stderr
@@ -279,7 +343,8 @@ def test_sync_added_line_with_hard_fail_is_rejected(tmp_path: Path) -> None:
          "--upload", "success", "--config", str(CONFIG),
          "--final-diff", str(tmp_path / "final.diff"),
          "--pr-number", "0", "--head-sha", HEAD, "--branch-sha", BRANCH_SHA,
-         "--branch", "if/staging", "--output", str(out), "--events-out", str(events)],
+         "--branch", "if/staging", "--output", str(out), "--events-out", str(events),
+         *_novel_args(tmp_path)],
         capture_output=True, text=True,
     )
     assert r.returncode == 1

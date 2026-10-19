@@ -202,7 +202,7 @@
     },
     "conflict_resolution": {
       "type": "object",
-      "required": ["max_hunk_count", "max_conflict_lines", "min_confidence", "pause_run_if_escalation_pct_exceeds", "review_min_confidence", "max_resolution_attempts"],
+      "required": ["max_hunk_count", "max_conflict_lines", "min_confidence", "pause_run_if_escalation_pct_exceeds", "review_min_confidence", "max_resolution_attempts", "max_novel_lines"],
       "additionalProperties": false,
       "properties": {
         "max_hunk_count": {
@@ -237,6 +237,11 @@
           "type": "integer",
           "minimum": 1,
           "description": "Resolver runs per change before a rejected resolution is given up (escalated or rebase_failed)"
+        },
+        "max_novel_lines": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Most novel lines a resolution may add; above it the resolution review is rejected whatever the reviewer says"
         }
       }
     },

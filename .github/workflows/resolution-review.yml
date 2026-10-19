@@ -25,7 +25,9 @@
 #            verdict as a job output.
 #   record   trusted (bot-credentials, if/main's tools). Checks the verdict's
 #            origin, computes the diff to scan itself, applies the code rules
-#            and attempt limit (tools/record-resolution-verdict.py) and
+#            (including the conflict_resolution.max_novel_lines cap on the
+#            novel-lines report, checked against prepare's hash) and the
+#            attempt limit (tools/record-resolution-verdict.py) and
 #            records resolution_approved or resolution_rejected for the exact
 #            branch commit. A missing verdict is a rejection.
 #
@@ -97,6 +99,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # record checks the novel-lines report against this hash (a job output,
+    # which no other job can set) before it applies the novel-lines cap.
+    outputs:
+      novel_sha256: ${{ steps.input.outputs.novel_sha256 }}
 
     steps:
       - name: Validate inputs
@@ -128,6 +134,7 @@ jobs:
           python-version: "3.12"
 
       - name: Write the review input
+        id: input
         working-directory: work
         env:
           GH_TOKEN: ${{ github.token }}
@@ -209,6 +216,7 @@ jobs:
             --final-diff "$OUT/final.diff" --upstream-diff "$OUT/upstream.diff" \
             --base-dir "$OUT/base" --upstream-head-dir "$OUT/upstream-head" \
             --output "$OUT/novel-lines.json"
+          echo "novel_sha256=$(sha256sum "$OUT/novel-lines.json" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
           jq -n --slurpfile novel "$OUT/novel-lines.json" --arg kind "$KIND" \
             --argjson pr "$PR_NUMBER" --arg title "$TITLE" --arg up "$UPSTREAM_SHA" \
@@ -416,7 +424,8 @@ jobs:
           name: resolution-verdict.json
           path: ${{ runner.temp }}/verdict/
 
-      # Only the counts of the novel-lines report go into the ledger.
+      # The novel-lines report: its novel_count is checked against
+      # conflict_resolution.max_novel_lines, and its counts go into the ledger.
       - name: Download the review input
         uses: actions/download-artifact@v4
         continue-on-error: true
@@ -451,6 +460,7 @@ jobs:
         id: decide
         env:
           VERDICT_SHA256: ${{ needs.review.outputs.verdict_sha256 }}
+          NOVEL_SHA256: ${{ needs.prepare.outputs.novel_sha256 }}
           UPLOAD: ${{ needs.review.outputs.upload }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -468,6 +478,7 @@ jobs:
             --final-diff "$RUNNER_TEMP/scan.diff" \
             "${SCAN_ARGS[@]}" \
             --novel-lines "$RUNNER_TEMP/review-input/novel-lines.json" \
+            --novel-sha256 "$NOVEL_SHA256" \
             --ledger .if-fork/patch-ledger.jsonl \
             --pr-number "$PR_NUMBER" \
             --head-sha "$UPSTREAM_SHA" \

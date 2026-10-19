@@ -87,6 +87,13 @@ def test_prepare_holds_no_secrets(workflow: dict) -> None:
     assert '"$MERGE_BASE" "$UPSTREAM_SHA" > "$OUT/upstream.diff"' in run
     assert 'git diff --no-color --no-ext-diff --no-renames "$BASE_SHA" "$BRANCH_SHA"' in run
     assert 'python3 "$TRUSTED/tools/novel-lines.py"' in run
+    # record checks the report against this job output before the novel cap.
+    assert 'echo "novel_sha256=$(sha256sum "$OUT/novel-lines.json"' in run
+    assert job["outputs"]["novel_sha256"] == "${{ steps.input.outputs.novel_sha256 }}"
+    record = workflow["jobs"]["record"]
+    decide = _step(record, "Apply the rules")
+    assert decide["env"]["NOVEL_SHA256"] == "${{ needs.prepare.outputs.novel_sha256 }}"
+    assert '--novel-sha256 "$NOVEL_SHA256"' in decide["run"]
     upload = next(s for s in job["steps"] if "upload-artifact" in s.get("uses", ""))
     assert upload["with"]["name"] == "resolution-review-input"
 

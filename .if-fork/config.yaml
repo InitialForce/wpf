@@ -168,6 +168,10 @@ conflict_resolution:
   # review below this starts a fresh resolver run; at it, a cherry-pick is
   # escalated and closed, and a sync is recorded as rebase_failed.
   max_resolution_attempts: 2
+  # Code cap on novel lines in a resolution (tools/novel-lines.py: added
+  # lines found in neither upstream's change nor the base or upstream file).
+  # Above it the review is rejected whatever the reviewer says.
+  max_novel_lines: 50
 
 stable_adoption:
   abort_run_if_escalation_pct_exceeds: 30

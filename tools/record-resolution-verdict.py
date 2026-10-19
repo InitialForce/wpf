@@ -18,6 +18,10 @@ of these hold:
     For a sync it is the added lines of the diff from git's automatic merge
     (with conflict markers) to the result, which is what the resolution
     itself wrote; the rest is upstream release/10.0 (--added-only).
+  - the novel-lines report from the prepare job (no secrets, no model)
+    matches the SHA-256 that job recorded as a job output, and its
+    novel_count is at most conflict_resolution.max_novel_lines (default 50).
+    Above the cap the resolution is rejected whatever the reviewer says.
 Anything else, including a missing or malformed verdict, is a rejection.
 
 The decision is bound to the exact commit that was reviewed: the ledger event
@@ -40,7 +44,8 @@ Usage:
       --reviewer-id ID --verdict-sha256 HEX --upload success \\
       --config .if-fork/config.yaml --final-diff final.diff \\
       --pr-number N --head-sha SHA --branch-sha SHA --branch NAME \\
-      --output decision.json --events-out events.jsonl [--novel-lines report.json]
+      --novel-lines report.json --novel-sha256 HEX \\
+      --output decision.json --events-out events.jsonl
 
 Exit codes: 0 approved, 1 rejected, 3 bad arguments or unreadable policy input.
 """
@@ -66,6 +71,7 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 VALID_VERDICTS = frozenset(["approve", "reject"])
 KINDS = ("cherry-pick", "sync")
 DEFAULT_MAX_ATTEMPTS = 2
+DEFAULT_MAX_NOVEL_LINES = 50
 
 
 def die(message: str) -> None:
@@ -151,6 +157,35 @@ def hard_fail_hits(
     return hits
 
 
+def load_novel(path: Path, sha256: str) -> tuple[dict[str, Any] | None, list[str]]:
+    """Return the novel-lines report if it is the one the prepare job hashed."""
+    problem = ["the novel-lines report is missing or does not match the prepare job's hash"]
+    if not sha256 or not path.is_file() or path.is_symlink():
+        return None, problem
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != sha256.lower():
+        return None, problem
+    try:
+        obj: Any = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None, ["the novel-lines report is not valid JSON"]
+    if not isinstance(obj, dict):
+        return None, ["the novel-lines report is not a JSON object"]
+    return obj, []
+
+
+def novel_cap_problems(novel: dict[str, Any], cap: int) -> list[str]:
+    """The code cap on novel lines, which no verdict can override."""
+    count = novel.get("novel_count")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        return ["the novel-lines report has no valid novel_count"]
+    if count > cap:
+        return [
+            f"{count} novel lines, above the cap of {cap} (conflict_resolution.max_novel_lines)"
+        ]
+    return []
+
+
 def prior_rejections(ledger_text: str, pr_number: int, head_sha: str) -> int:
     """resolution_rejected events for the pair since its last resolution_approved."""
     count = 0
@@ -218,6 +253,7 @@ def build_event(
     if novel is not None:
         details["novel_count"] = novel.get("novel_count")
         details["dropped_count"] = novel.get("dropped_count")
+        details["max_novel_lines"] = args.max_novel_lines
     if args.run_url:
         details["run_url"] = args.run_url
     return {
@@ -247,7 +283,10 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--final-diff", type=Path, required=True)
     parser.add_argument("--added-only", action="store_true",
                         help="Scan only added lines of --final-diff (sync)")
-    parser.add_argument("--novel-lines", type=Path)
+    parser.add_argument("--novel-lines", type=Path, required=True)
+    parser.add_argument("--novel-sha256", default="",
+                        help="SHA-256 of --novel-lines, from the prepare job's output")
+    parser.add_argument("--max-novel-lines", type=int)
     parser.add_argument("--ledger", type=Path,
                         help="Ledger to count earlier resolution attempts for the pair")
     parser.add_argument("--max-attempts", type=int)
@@ -280,6 +319,10 @@ def main(argv: list[str] | None = None) -> int:
             or config["conflict_resolution"].get("max_resolution_attempts", DEFAULT_MAX_ATTEMPTS)
         )
         ledger_text = args.ledger.read_text(encoding="utf-8") if args.ledger else ""
+        cap = args.max_novel_lines
+        if cap is None:
+            cap = int(config["conflict_resolution"].get("max_novel_lines", DEFAULT_MAX_NOVEL_LINES))
+        args.max_novel_lines = cap
         prior = prior_rejections(ledger_text, args.pr_number, args.head_sha)
         patterns = list(config.get("review_hard_fail_patterns", []))
         diff_text = args.final_diff.read_text(encoding="utf-8", errors="replace")
@@ -289,19 +332,15 @@ def main(argv: list[str] | None = None) -> int:
     if not diff_text.strip():
         die("final diff is empty")
 
-    novel: dict[str, Any] | None = None
-    if args.novel_lines is not None:
-        try:
-            loaded = json.loads(args.novel_lines.read_text(encoding="utf-8"))
-            novel = loaded if isinstance(loaded, dict) else None
-        except (OSError, json.JSONDecodeError):
-            novel = None
+    novel, novel_reasons = load_novel(args.novel_lines, args.novel_sha256)
+    if novel is not None:
+        novel_reasons = novel_cap_problems(novel, cap)
 
     verdict, origin_reasons = load_verdict(
         args.verdict, args.reviewer_id, args.verdict_sha256, args.upload
     )
     hits = hard_fail_hits(diff_text, patterns, added_only=args.added_only)
-    reasons = decide(verdict, origin_reasons, hits, threshold)
+    reasons = decide(verdict, origin_reasons, hits, threshold) + novel_reasons
     attempt = prior + 1
     event = build_event(args, verdict, reasons, hits, novel, attempt)
 
