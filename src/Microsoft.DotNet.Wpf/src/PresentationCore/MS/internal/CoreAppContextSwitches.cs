@@ -401,5 +401,106 @@ namespace MS.Internal
 
         #endregion
 
+        #region DoNotApplyZoneCheckForDefaultCredentials
+
+        // Switch to opt out of the URL Security Zone check that gates whether
+        // default (NTLM/Kerberos/Negotiate) credentials are attached to outgoing
+        // WebRequests created by WpfWebRequestHelper.
+        //
+        // Default (false): zone check is enforced - default credentials are sent
+        // only to Local Machine / Intranet / Trusted zones, preventing default
+        // credentials from being sent to Internet-zone or Untrusted-zone hosts.
+        //
+        // When set to true: restores the previous behavior where every outgoing
+        // HttpWebRequest unconditionally has UseDefaultCredentials = true. This
+        // exists as a compatibility escape hatch only.
+        internal const string DoNotApplyZoneCheckForDefaultCredentialsSwitchName = "Switch.System.Windows.Net.DoNotApplyZoneCheckForDefaultCredentials";
+        private static int _doNotApplyZoneCheckForDefaultCredentials;
+        public static bool DoNotApplyZoneCheckForDefaultCredentials
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get
+            {
+                return LocalAppContext.GetCachedSwitchValue(DoNotApplyZoneCheckForDefaultCredentialsSwitchName, ref _doNotApplyZoneCheckForDefaultCredentials);
+            }
+        }
+
+        #endregion
+
+        #region DisableDirectWriteForwarderBoundsCheckProtection
+
+        internal const string DisableDirectWriteForwarderBoundsCheckProtectionSwitchName = "Switch.MS.Internal.TtfDelta.DisableDirectWriteForwarderBoundsCheckProtection";
+        private static int _disableDirectWriteForwarderBoundsCheckProtection;
+        public static bool DisableDirectWriteForwarderBoundsCheckProtection
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get
+            {
+                return LocalAppContext.GetCachedSwitchValue(DisableDirectWriteForwarderBoundsCheckProtectionSwitchName, ref _disableDirectWriteForwarderBoundsCheckProtection);
+            }
+        }
+
+        #endregion
+
+        #region DisableCmapAndSbitOverflowProtection
+
+        internal const string DisableCmapAndSbitOverflowProtectionSwitchName = "Switch.MS.Internal.TtfDelta.DisableCmapAndSbitOverflowProtection";
+        private static int _disableCmapAndSbitOverflowProtection;
+        public static bool DisableCmapAndSbitOverflowProtection
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get
+            {
+                return LocalAppContext.GetCachedSwitchValue(DisableCmapAndSbitOverflowProtectionSwitchName, ref _disableCmapAndSbitOverflowProtection);
+            }
+        }
+
+        #endregion
+
+        #region DisablePenImcBoundsCheckProtection
+
+        internal const string DisablePenImcBoundsCheckProtectionSwitchName = "Switch.MS.Internal.PenImc.DisablePenImcBoundsCheckProtection";
+        private static int _disablePenImcBoundsCheckProtection;
+        public static bool DisablePenImcBoundsCheckProtection
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get
+            {
+                return LocalAppContext.GetCachedSwitchValue(DisablePenImcBoundsCheckProtectionSwitchName, ref _disablePenImcBoundsCheckProtection);
+            }
+        }
+
+        #endregion
+
+        #region DisableWpfGfxBoundsCheckProtection
+
+        internal const string DisableWpfGfxBoundsCheckProtectionSwitchName = "Switch.MS.Internal.WpfGfx.DisableWpfGfxBoundsCheckProtection";
+        private static int _disableWpfGfxBoundsCheckProtection;
+        public static bool DisableWpfGfxBoundsCheckProtection
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get
+            {
+                return LocalAppContext.GetCachedSwitchValue(DisableWpfGfxBoundsCheckProtectionSwitchName, ref _disableWpfGfxBoundsCheckProtection);
+            }
+        }
+
+        #endregion
+
+        #region DisableXpsPackageBoundaryRestriction
+
+        internal const string DisableXpsPackageBoundaryRestrictionSwitchName = "Switch.System.Windows.DisableXpsPackageBoundaryRestriction";
+        private static int _disableXpsPackageBoundaryRestriction;
+        public static bool DisableXpsPackageBoundaryRestriction
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get
+            {
+                return LocalAppContext.GetCachedSwitchValue(DisableXpsPackageBoundaryRestrictionSwitchName, ref _disableXpsPackageBoundaryRestriction);
+            }
+        }
+
+        #endregion
+
     }
 }

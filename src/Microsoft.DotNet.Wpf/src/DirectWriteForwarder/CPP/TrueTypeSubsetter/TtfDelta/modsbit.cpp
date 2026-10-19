@@ -24,6 +24,61 @@
 // mark them as SecurityCritical because they have unverfiable code and we could 
 // not negotiate with the CRT team to fix it.
 #include "intsafe_private_copy.h"
+#include "ttf_safe_checks.h"
+
+/* ------------------------------------------------------------------- */
+
+/* Helper function for bounds checking EBDT buffer ranges */
+PRIVATE int16 CheckEBDTBounds(uint32 ulOffset, uint32 ulLength, uint32 ulAllocatedSize)
+{
+    uint32 ulEndOffset;
+    
+    /* Check for integer overflow in offset + length */
+    if (FAILED(UIntAdd32(ulOffset, ulLength, &ulEndOffset)))
+    {
+        return ERR_INVALID_EBLC;
+    }
+    
+    /* Check if write would exceed buffer bounds */
+    if (ulEndOffset > ulAllocatedSize)
+    {
+        return ERR_INVALID_EBLC;
+    }
+    
+    return NO_ERROR;
+}
+
+/* Helper function for copying EBDT bytes with read/write bounds and overflow checks */
+PRIVATE int16 CopyEBDTBytesChecked(
+    TTFACC_FILEBUFFERINFO *pInputBufferInfo,
+    uint8 *puchEBDTDestPtr,
+    uint32 ulEBDTSrcOffset,
+    uint32 ulEBDTAllocatedSize,
+    uint32 ulDestImageDataOffset,
+    uint32 ulDestGlyphOffset,
+    uint32 ulSrcImageDataOffset,
+    uint32 ulSrcGlyphOffset,
+    uint32 ulGlyphLength)
+{
+    uint32 ulWriteOffset;
+    uint32 ulReadRelativeOffset;
+    uint32 ulReadOffset;
+    int16 errCode;
+
+    if (FAILED(UIntAdd32(ulDestImageDataOffset, ulDestGlyphOffset, &ulWriteOffset)))
+        return ERR_INVALID_EBLC;
+    if ((errCode = CheckEBDTBounds(ulWriteOffset, ulGlyphLength, ulEBDTAllocatedSize)) != NO_ERROR)
+        return errCode;
+
+    if (FAILED(UIntAdd32(ulSrcImageDataOffset, ulSrcGlyphOffset, &ulReadRelativeOffset)))
+        return ERR_INVALID_EBLC;
+    if ((errCode = CheckEBDTBounds(ulReadRelativeOffset, ulGlyphLength, ulEBDTAllocatedSize)) != NO_ERROR)
+        return errCode;
+    if (FAILED(UIntAdd32(ulEBDTSrcOffset, ulReadRelativeOffset, &ulReadOffset)))
+        return ERR_INVALID_EBLC;
+
+    return ReadBytes(pInputBufferInfo, puchEBDTDestPtr + ulWriteOffset, ulReadOffset, ulGlyphLength);
+}
 
 /* ------------------------------------------------------------------- */
 
@@ -57,11 +112,30 @@ PRIVATE int16 RecordGlyphOffset(PGLYPHOFFSETRECORDKEEPER pKeeper,
 
     if (pKeeper->ulNextArrayIndex >= pKeeper->ulOffsetArrayLen)
     {
-        pKeeper->pGlyphOffsetArray = (GlyphOffsetRecord *) Mem_ReAlloc(pKeeper->pGlyphOffsetArray, (pKeeper->ulOffsetArrayLen + 100) * sizeof(*(pKeeper->pGlyphOffsetArray)));
-        if (pKeeper->pGlyphOffsetArray == NULL)
-            return ERR_MEM; /* ("EBLC: Not enough memory to allocate Offset Array."); */
-        memset((char *)(pKeeper->pGlyphOffsetArray) + (sizeof(*(pKeeper->pGlyphOffsetArray)) * pKeeper->ulOffsetArrayLen), '\0', sizeof(*(pKeeper->pGlyphOffsetArray)) * 100); 
-        pKeeper->ulOffsetArrayLen += 100;
+        if (TTF_SAFE_CHECKS_ENABLED())
+        {
+            uint32 ulNewLen;
+            uint32 ulAllocSize;
+            if (UIntAdd32(pKeeper->ulOffsetArrayLen, 100, &ulNewLen) != S_OK ||
+                ULongMult32(ulNewLen, (uint32)sizeof(*(pKeeper->pGlyphOffsetArray)), &ulAllocSize) != S_OK)
+                return ERR_MEM;
+            {
+                GlyphOffsetRecord *pNewArray = (GlyphOffsetRecord *) Mem_ReAlloc(pKeeper->pGlyphOffsetArray, ulAllocSize);
+                if (pNewArray == NULL)
+                    return ERR_MEM; /* ("EBLC: Not enough memory to allocate Offset Array."); */
+                pKeeper->pGlyphOffsetArray = pNewArray;
+            }
+            memset((char *)(pKeeper->pGlyphOffsetArray) + (sizeof(*(pKeeper->pGlyphOffsetArray)) * pKeeper->ulOffsetArrayLen), '\0', sizeof(*(pKeeper->pGlyphOffsetArray)) * 100); 
+            pKeeper->ulOffsetArrayLen = ulNewLen;
+        }
+        else
+        {
+            pKeeper->pGlyphOffsetArray = (GlyphOffsetRecord *) Mem_ReAlloc(pKeeper->pGlyphOffsetArray, (pKeeper->ulOffsetArrayLen + 100) * sizeof(*(pKeeper->pGlyphOffsetArray)));
+            if (pKeeper->pGlyphOffsetArray == NULL)
+                return ERR_MEM; /* ("EBLC: Not enough memory to allocate Offset Array."); */
+            memset((char *)(pKeeper->pGlyphOffsetArray) + (sizeof(*(pKeeper->pGlyphOffsetArray)) * pKeeper->ulOffsetArrayLen), '\0', sizeof(*(pKeeper->pGlyphOffsetArray)) * 100); 
+            pKeeper->ulOffsetArrayLen += 100;
+        }
     }
     pKeeper->pGlyphOffsetArray[pKeeper->ulNextArrayIndex].ulOldOffset = ulOldOffset;
     pKeeper->pGlyphOffsetArray[pKeeper->ulNextArrayIndex].ImageDataBlock.ulNewImageDataOffset = pImageDataBlock->ulNewImageDataOffset ;
@@ -123,6 +197,7 @@ PRIVATE int16 FixSbitSubTables(CONST_TTFACC_FILEBUFFERINFO * pInputBufferInfo, /
                               uint32 *pulEBDTBytesWritten, /* number of bytes written to the EBDT table buffer */
                               uint8 *puchEBDTDestPtr, /* EBDT data byffer */
                               uint32 ulEBDTSrcOffset, /* beginning of EBDT table in the InputBufferInfo */
+                              uint32 ulEBDTAllocatedSize, /* allocated size of EBDT buffer for bounds checking */
                               PGLYPHOFFSETRECORDKEEPER pKeeper)  /* structure to keep track of multiply referenced EBDT data */
 {
     INDEXSUBHEADER  IndexSubHeader;
@@ -208,11 +283,23 @@ PRIVATE int16 FixSbitSubTables(CONST_TTFACC_FILEBUFFERINFO * pInputBufferInfo, /
                     return errCode;
                 ulOffset += usBytesRead;
                 IndexSubTable1.header.ulImageDataOffset = ulCurrentImageDataOffset;  /* set to the new one */
-                if (FAILED(UIntAdd(ulLocalCurrentOffset,SIZEOF_INDEXSUBTABLE1,(UINT *)&ulIndexSubtableAfterEnd)) ||
-                    (ulIndexSubtableAfterEnd > *pulIndexSubTableSize)
-                   )
+                if (TTF_SAFE_CHECKS_ENABLED())
                 {
-                    return ERR_INVALID_EBLC;
+                    if (FAILED(UIntAdd32(ulLocalCurrentOffset, SIZEOF_INDEXSUBTABLE1, &ulIndexSubtableAfterEnd)) ||
+                        (ulIndexSubtableAfterEnd > *pulIndexSubTableSize)
+                       )
+                    {
+                        return ERR_INVALID_EBLC;
+                    }
+                }
+                else
+                {
+                    if (FAILED(UIntAdd(ulLocalCurrentOffset, SIZEOF_INDEXSUBTABLE1, (UINT *)&ulIndexSubtableAfterEnd)) ||
+                        (ulIndexSubtableAfterEnd > *pulIndexSubTableSize)
+                       )
+                    {
+                        return ERR_INVALID_EBLC;
+                    }
                 }
                 memcpy(*ppuchIndexSubTable + ulLocalCurrentOffset, &IndexSubTable1, SIZEOF_INDEXSUBTABLE1);
                 ulTableSize = SIZEOF_INDEXSUBTABLE1;
@@ -233,12 +320,25 @@ PRIVATE int16 FixSbitSubTables(CONST_TTFACC_FILEBUFFERINFO * pInputBufferInfo, /
                     {
                      /* if the indexTableSize length field was incorrect */
                      /* use 2* to account for the extra offset at the end */
-                        if (FAILED(UIntAdd(ulLocalCurrentOffset, ulTableSize, (UINT *)&ulIndexSubtableAfterEnd)) ||
-                            FAILED(UIntAdd(ulIndexSubtableAfterEnd, 2*sizeof(ulNewGlyphOffset), (UINT *)&ulIndexSubtableAfterEnd)) ||
-                            (ulIndexSubtableAfterEnd > *pulIndexSubTableSize)
-                           )
+                        if (TTF_SAFE_CHECKS_ENABLED())
                         {
-                            return ERR_INVALID_EBLC;
+                            if (FAILED(UIntAdd32(ulLocalCurrentOffset, ulTableSize, &ulIndexSubtableAfterEnd)) ||
+                                FAILED(UIntAdd32(ulIndexSubtableAfterEnd, 2*sizeof(ulNewGlyphOffset), &ulIndexSubtableAfterEnd)) ||
+                                (ulIndexSubtableAfterEnd > *pulIndexSubTableSize)
+                               )
+                            {
+                                return ERR_INVALID_EBLC;
+                            }
+                        }
+                        else
+                        {
+                            if (FAILED(UIntAdd(ulLocalCurrentOffset, ulTableSize, (UINT *)&ulIndexSubtableAfterEnd)) ||
+                                FAILED(UIntAdd(ulIndexSubtableAfterEnd, 2*sizeof(ulNewGlyphOffset), (UINT *)&ulIndexSubtableAfterEnd)) ||
+                                (ulIndexSubtableAfterEnd > *pulIndexSubTableSize)
+                               )
+                            {
+                                return ERR_INVALID_EBLC;
+                            }
                         }
                         
                         memcpy(*ppuchIndexSubTable + ulLocalCurrentOffset+ulTableSize, &ulNewGlyphOffset, 
@@ -254,10 +354,28 @@ PRIVATE int16 FixSbitSubTables(CONST_TTFACC_FILEBUFFERINFO * pInputBufferInfo, /
                             ulGlyphLength = ulNextGlyphOffset-ulOldGlyphOffset;
                             if (DoCopy)
                             {
-                                if ((errCode = ReadBytes((TTFACC_FILEBUFFERINFO *)pInputBufferInfo, puchEBDTDestPtr + IndexSubTable1.header.ulImageDataOffset + ulNewGlyphOffset,
-                                          ulEBDTSrcOffset + ulOldImageDataOffset + ulOldGlyphOffset, 
-                                          ulGlyphLength)) != NO_ERROR)
-                                    return errCode;
+                                if (TTF_SAFE_CHECKS_ENABLED())
+                                {
+                                    errCode = CopyEBDTBytesChecked(
+                                        (TTFACC_FILEBUFFERINFO *)pInputBufferInfo,
+                                        puchEBDTDestPtr,
+                                        ulEBDTSrcOffset,
+                                        ulEBDTAllocatedSize,
+                                        IndexSubTable1.header.ulImageDataOffset,
+                                        ulNewGlyphOffset,
+                                        ulOldImageDataOffset,
+                                        ulOldGlyphOffset,
+                                        ulGlyphLength);
+                                    if (errCode != NO_ERROR)
+                                        return errCode;
+                                }
+                                else
+                                {
+                                    if ((errCode = ReadBytes((TTFACC_FILEBUFFERINFO *)pInputBufferInfo, puchEBDTDestPtr + IndexSubTable1.header.ulImageDataOffset + ulNewGlyphOffset,
+                                              ulEBDTSrcOffset + ulOldImageDataOffset + ulOldGlyphOffset, 
+                                              ulGlyphLength)) != NO_ERROR)
+                                        return errCode;
+                                }
                             }
                             ulNewGlyphOffset += ulGlyphLength;
                         }
@@ -294,20 +412,49 @@ PRIVATE int16 FixSbitSubTables(CONST_TTFACC_FILEBUFFERINFO * pInputBufferInfo, /
                 {
                     if (i < usGlyphListCount && puchKeepGlyphList[i])
                         ++IndexSubTable5.ulNumGlyphs;
+                    if (CMAP_SAFE_CHECKS_ENABLED())
+                    {
+                        if (i == *pusNewLastGlyphIndex)
+                            break; /* prevent uint16 wraparound on increment */
+                    }
                 }
                 if (IndexSubTable5.ulNumGlyphs == 0)
                     return NO_ERROR; /* don't copy */
                 /*  check if there are any gaps */
                 if (IndexSubTable5.ulNumGlyphs != (uint32) (*pusNewLastGlyphIndex - *pusNewFirstGlyphIndex + 1)) /* not sparse, we got everyone */
                 {
-                    ausGlyphCodeArray = (uint16 *) Mem_Alloc(sizeof(uint16) * IndexSubTable5.ulNumGlyphs);
-                    /* Need to enlarge pointer too by the difference between Format 2 and format 5 */
-                    *pulIndexSubTableSize += (IndexSubTable5.ulNumGlyphs * sizeof(uint16) + sizeof(uint32));
-                    *ppuchIndexSubTable = (uint8 *)Mem_ReAlloc(*ppuchIndexSubTable, *pulIndexSubTableSize); 
-                    if ((ausGlyphCodeArray == NULL) || (*ppuchIndexSubTable == NULL))
+                    if (TTF_SAFE_CHECKS_ENABLED())
                     {
-                        Mem_Free(ausGlyphCodeArray);
-                        return ERR_MEM;
+                        uint32 ulGlyphAllocSize, ulExtraSize;
+                        if (ULongMult32((uint32)sizeof(uint16), IndexSubTable5.ulNumGlyphs, &ulGlyphAllocSize) != S_OK)
+                            return ERR_MEM;
+                        ausGlyphCodeArray = (uint16 *) Mem_Alloc(ulGlyphAllocSize);
+                        /* Need to enlarge pointer too by the difference between Format 2 and format 5 */
+                        if (UIntAdd32(ulGlyphAllocSize, (uint32)sizeof(uint32), &ulExtraSize) != S_OK ||
+                            UIntAdd32(*pulIndexSubTableSize, ulExtraSize, pulIndexSubTableSize) != S_OK)
+                        {
+                            Mem_Free(ausGlyphCodeArray);
+                            return ERR_MEM;
+                        }
+                        uint8 *pNewSubTable = (uint8 *)Mem_ReAlloc(*ppuchIndexSubTable, *pulIndexSubTableSize);
+                        if ((ausGlyphCodeArray == NULL) || (pNewSubTable == NULL))
+                        {
+                            Mem_Free(ausGlyphCodeArray);
+                            return ERR_MEM;
+                        }
+                        *ppuchIndexSubTable = pNewSubTable;
+                    }
+                    else
+                    {
+                        ausGlyphCodeArray = (uint16 *) Mem_Alloc(sizeof(uint16) * IndexSubTable5.ulNumGlyphs);
+                        /* Need to enlarge pointer too by the difference between Format 2 and format 5 */
+                        *pulIndexSubTableSize += (IndexSubTable5.ulNumGlyphs * sizeof(uint16) + sizeof(uint32));
+                        *ppuchIndexSubTable = (uint8 *)Mem_ReAlloc(*ppuchIndexSubTable, *pulIndexSubTableSize); 
+                        if ((ausGlyphCodeArray == NULL) || (*ppuchIndexSubTable == NULL))
+                        {
+                            Mem_Free(ausGlyphCodeArray);
+                            return ERR_MEM;
+                        }
                     }
                 }
 
@@ -320,17 +467,43 @@ PRIVATE int16 FixSbitSubTables(CONST_TTFACC_FILEBUFFERINFO * pInputBufferInfo, /
                             ausGlyphCodeArray[IndexSubTable5.ulNumGlyphs++] = i;
                         if (DoCopy) /* if this glyph is supposed to be kept, copy glyph. */
                         {
-                            if ((errCode = ReadBytes( (TTFACC_FILEBUFFERINFO *)pInputBufferInfo, puchEBDTDestPtr + IndexSubTable2.header.ulImageDataOffset + ulNewGlyphOffset,
-                                      ulEBDTSrcOffset + ulOldImageDataOffset + ulOldGlyphOffset, 
-                                      ulGlyphLength)) != NO_ERROR)
+                            if (TTF_SAFE_CHECKS_ENABLED())
                             {
-                                Mem_Free(ausGlyphCodeArray); /* in case it got allocated */
-                                return errCode;
+                                errCode = CopyEBDTBytesChecked(
+                                    (TTFACC_FILEBUFFERINFO *)pInputBufferInfo,
+                                    puchEBDTDestPtr,
+                                    ulEBDTSrcOffset,
+                                    ulEBDTAllocatedSize,
+                                    IndexSubTable2.header.ulImageDataOffset,
+                                    ulNewGlyphOffset,
+                                    ulOldImageDataOffset,
+                                    ulOldGlyphOffset,
+                                    ulGlyphLength);
+                                if (errCode != NO_ERROR)
+                                {
+                                    Mem_Free(ausGlyphCodeArray); /* in case it got allocated */
+                                    return errCode;
+                                }
+                            }
+                            else
+                            {
+                                if ((errCode = ReadBytes((TTFACC_FILEBUFFERINFO *)pInputBufferInfo, puchEBDTDestPtr + IndexSubTable2.header.ulImageDataOffset + ulNewGlyphOffset,
+                                          ulEBDTSrcOffset + ulOldImageDataOffset + ulOldGlyphOffset, 
+                                          ulGlyphLength)) != NO_ERROR)
+                                {
+                                    Mem_Free(ausGlyphCodeArray); /* in case it got allocated */
+                                    return errCode;
+                                }
                             }
                         }
                         ulNewGlyphOffset += ulGlyphLength;
                     }
                     ulOldGlyphOffset += ulGlyphLength;
+                    if (CMAP_SAFE_CHECKS_ENABLED())
+                    {
+                        if (i == usOldLastGlyphIndex)
+                            break; /* prevent uint16 wraparound on increment */
+                    }
                 }
                 if (ulNewGlyphOffset == 0)
                 {
@@ -340,14 +513,34 @@ PRIVATE int16 FixSbitSubTables(CONST_TTFACC_FILEBUFFERINFO * pInputBufferInfo, /
 
                 if (ausGlyphCodeArray != NULL) /* we changed to format 5 */
                 {
-                    ulTableSize = SIZEOF_INDEXSUBTABLE5 + sizeof(*ausGlyphCodeArray) * IndexSubTable5.ulNumGlyphs;
-                    if (ulLocalCurrentOffset + ulTableSize > *pulIndexSubTableSize)
+                    if (TTF_SAFE_CHECKS_ENABLED())
                     {
-                        Mem_Free(ausGlyphCodeArray); /* in case it got allocated */
-                        return ERR_INVALID_EBLC;
+                        uint32 ulGlyphDataSize;
+                        if (ULongMult32((uint32)sizeof(*ausGlyphCodeArray), IndexSubTable5.ulNumGlyphs, &ulGlyphDataSize) != S_OK ||
+                            UIntAdd32(SIZEOF_INDEXSUBTABLE5, ulGlyphDataSize, &ulTableSize) != S_OK)
+                        {
+                            Mem_Free(ausGlyphCodeArray);
+                            return ERR_INVALID_EBLC;
+                        }
+                        if (ulLocalCurrentOffset + ulTableSize > *pulIndexSubTableSize)
+                        {
+                            Mem_Free(ausGlyphCodeArray); /* in case it got allocated */
+                            return ERR_INVALID_EBLC;
+                        }
+                        memcpy(*ppuchIndexSubTable + ulLocalCurrentOffset, &IndexSubTable5, SIZEOF_INDEXSUBTABLE5);
+                        memcpy(*ppuchIndexSubTable + ulLocalCurrentOffset + SIZEOF_INDEXSUBTABLE5, ausGlyphCodeArray, ulGlyphDataSize);
                     }
-                    memcpy(*ppuchIndexSubTable + ulLocalCurrentOffset, &IndexSubTable5, SIZEOF_INDEXSUBTABLE5);
-                    memcpy(*ppuchIndexSubTable + ulLocalCurrentOffset + SIZEOF_INDEXSUBTABLE5, ausGlyphCodeArray, sizeof(*ausGlyphCodeArray) * IndexSubTable5.ulNumGlyphs);
+                    else
+                    {
+                        ulTableSize = SIZEOF_INDEXSUBTABLE5 + sizeof(*ausGlyphCodeArray) * IndexSubTable5.ulNumGlyphs;
+                        if (ulLocalCurrentOffset + ulTableSize > *pulIndexSubTableSize)
+                        {
+                            Mem_Free(ausGlyphCodeArray); /* in case it got allocated */
+                            return ERR_INVALID_EBLC;
+                        }
+                        memcpy(*ppuchIndexSubTable + ulLocalCurrentOffset, &IndexSubTable5, SIZEOF_INDEXSUBTABLE5);
+                        memcpy(*ppuchIndexSubTable + ulLocalCurrentOffset + SIZEOF_INDEXSUBTABLE5, ausGlyphCodeArray, sizeof(*ausGlyphCodeArray) * IndexSubTable5.ulNumGlyphs);
+                    }
                     Mem_Free(ausGlyphCodeArray);
                 }
                 else
@@ -396,16 +589,47 @@ PRIVATE int16 FixSbitSubTables(CONST_TTFACC_FILEBUFFERINFO * pInputBufferInfo, /
                         ulTableSize +=sizeof(usNewGlyphOffset); /* update the size of the table */
                         if (usGlyphIndex < usGlyphListCount && puchKeepGlyphList[usGlyphIndex]) /* if this glyph is supposed to be kept, copy glyph. */
                         {
-                            assert(usNextGlyphOffset>=usOldGlyphOffset);
+                            if (TTF_SAFE_CHECKS_ENABLED())
+                            {
+                                if (usNextGlyphOffset < usOldGlyphOffset)
+                                    return ERR_INVALID_EBLC;
+                            }
+                            else
+                            {
+                                assert(usNextGlyphOffset>=usOldGlyphOffset);
+                            }
                             usGlyphLength = usNextGlyphOffset-usOldGlyphOffset;
                             if (DoCopy)
                             {
-                                if ((errCode = ReadBytes( (TTFACC_FILEBUFFERINFO *) pInputBufferInfo, puchEBDTDestPtr + IndexSubTable3.header.ulImageDataOffset + usNewGlyphOffset,
-                                          ulEBDTSrcOffset + ulOldImageDataOffset + usOldGlyphOffset, 
-                                          usGlyphLength)) != NO_ERROR)
-                                    return errCode;
+                                if (TTF_SAFE_CHECKS_ENABLED())
+                                {
+                                    errCode = CopyEBDTBytesChecked(
+                                        (TTFACC_FILEBUFFERINFO *)pInputBufferInfo,
+                                        puchEBDTDestPtr,
+                                        ulEBDTSrcOffset,
+                                        ulEBDTAllocatedSize,
+                                        IndexSubTable3.header.ulImageDataOffset,
+                                        (uint32)usNewGlyphOffset,
+                                        ulOldImageDataOffset,
+                                        (uint32)usOldGlyphOffset,
+                                        (uint32)usGlyphLength);
+                                    if (errCode != NO_ERROR)
+                                        return errCode;
+                                }
+                                else
+                                {
+                                    if ((errCode = ReadBytes((TTFACC_FILEBUFFERINFO *)pInputBufferInfo, puchEBDTDestPtr + IndexSubTable3.header.ulImageDataOffset + usNewGlyphOffset,
+                                              ulEBDTSrcOffset + ulOldImageDataOffset + usOldGlyphOffset, 
+                                              usGlyphLength)) != NO_ERROR)
+                                        return errCode;
+                                }
                             }
                             usNewGlyphOffset = (uint16)(usNewGlyphOffset + usGlyphLength);
+                            if (TTF_SAFE_CHECKS_ENABLED())
+                            {
+                                if (usNewGlyphOffset < usGlyphLength) /* uint16 wrap check */
+                                    return ERR_INVALID_EBLC;
+                            }
                         }
                     }
                     usOldGlyphOffset = usNextGlyphOffset;
@@ -457,16 +681,44 @@ PRIVATE int16 FixSbitSubTables(CONST_TTFACC_FILEBUFFERINFO * pInputBufferInfo, /
                         ulTableSize +=sizeof(usGlyphIndex);
                         memcpy(*ppuchIndexSubTable + ulLocalCurrentOffset+ulTableSize, &usNewGlyphOffset, sizeof(usNewGlyphOffset));
                         ulTableSize +=sizeof(usNewGlyphOffset);
+                        if (TTF_SAFE_CHECKS_ENABLED())
+                        {
+                            if (usNextGlyphOffset < usOldGlyphOffset)
+                                return ERR_INVALID_EBLC;
+                        }
                         usGlyphLength = usNextGlyphOffset-usOldGlyphOffset;
                         if (DoCopy)
                         {
-                            if ((errCode = ReadBytes( (TTFACC_FILEBUFFERINFO *) pInputBufferInfo, puchEBDTDestPtr + IndexSubTable4.header.ulImageDataOffset + usNewGlyphOffset,
-                                      ulEBDTSrcOffset + ulOldImageDataOffset + usOldGlyphOffset, 
-                                      usGlyphLength)) != NO_ERROR)
-                                return errCode;
+                            if (TTF_SAFE_CHECKS_ENABLED())
+                            {
+                                errCode = CopyEBDTBytesChecked(
+                                    (TTFACC_FILEBUFFERINFO *)pInputBufferInfo,
+                                    puchEBDTDestPtr,
+                                    ulEBDTSrcOffset,
+                                    ulEBDTAllocatedSize,
+                                    IndexSubTable4.header.ulImageDataOffset,
+                                    (uint32)usNewGlyphOffset,
+                                    ulOldImageDataOffset,
+                                    (uint32)usOldGlyphOffset,
+                                    (uint32)usGlyphLength);
+                                if (errCode != NO_ERROR)
+                                    return errCode;
+                            }
+                            else
+                            {
+                                if ((errCode = ReadBytes((TTFACC_FILEBUFFERINFO *)pInputBufferInfo, puchEBDTDestPtr + IndexSubTable4.header.ulImageDataOffset + usNewGlyphOffset,
+                                          ulEBDTSrcOffset + ulOldImageDataOffset + usOldGlyphOffset, 
+                                          usGlyphLength)) != NO_ERROR)
+                                    return errCode;
+                            }
                         }
 
                         usNewGlyphOffset = (uint16)(usNewGlyphOffset + usGlyphLength);
+                        if (TTF_SAFE_CHECKS_ENABLED())
+                        {
+                            if (usNewGlyphOffset < usGlyphLength) /* uint16 wrap check */
+                                return ERR_INVALID_EBLC;
+                        }
                         ++ulNumGlyphs;
                         *pusNewLastGlyphIndex = usGlyphIndex; 
                     }
@@ -521,10 +773,28 @@ PRIVATE int16 FixSbitSubTables(CONST_TTFACC_FILEBUFFERINFO * pInputBufferInfo, /
                         ulTableSize += sizeof(usGlyphIndex);
                         if (DoCopy)
                         {
-                            if ((errCode = ReadBytes( (TTFACC_FILEBUFFERINFO *) pInputBufferInfo, puchEBDTDestPtr + IndexSubTable5.header.ulImageDataOffset + ulNewGlyphOffset,
-                                      ulEBDTSrcOffset + ulOldImageDataOffset + ulOldGlyphOffset, 
-                                      ulGlyphLength)) != NO_ERROR)
-                                return errCode;
+                            if (TTF_SAFE_CHECKS_ENABLED())
+                            {
+                                errCode = CopyEBDTBytesChecked(
+                                    (TTFACC_FILEBUFFERINFO *)pInputBufferInfo,
+                                    puchEBDTDestPtr,
+                                    ulEBDTSrcOffset,
+                                    ulEBDTAllocatedSize,
+                                    IndexSubTable5.header.ulImageDataOffset,
+                                    ulNewGlyphOffset,
+                                    ulOldImageDataOffset,
+                                    ulOldGlyphOffset,
+                                    ulGlyphLength);
+                                if (errCode != NO_ERROR)
+                                    return errCode;
+                            }
+                            else
+                            {
+                                if ((errCode = ReadBytes((TTFACC_FILEBUFFERINFO *)pInputBufferInfo, puchEBDTDestPtr + IndexSubTable5.header.ulImageDataOffset + ulNewGlyphOffset,
+                                          ulEBDTSrcOffset + ulOldImageDataOffset + ulOldGlyphOffset, 
+                                          ulGlyphLength)) != NO_ERROR)
+                                    return errCode;
+                            }
                         }
                         ++ulNumGlyphs;
                         ulNewGlyphOffset += ulGlyphLength;
@@ -580,6 +850,7 @@ typedef struct {
 PRIVATE uint32 FixSbitSubTableFormat1(uint16 usFirstIndex, /* index of first Glyph in table */
                                     uint16 * pusLastIndex, /* pointer to index of last glyph in table - will set if not all table will fit */
                                     uint8 * puchIndexSubTable, /* buffer into which to stuff the Format 3 table(s) - does not include IndexSubTableArray */
+                                    uint32 ulIndexSubTableBufferSize, /* size of puchIndexSubTable buffer for bounds checking */
                                     uint16 usImageFormat,  /* in order to set the Format 3 header */
                                     uint32 ulCurrAdditionalOffset,  /* offset from indexSubTableArray of the IndexSubTable */ 
                                     uint32 ulInitialOffset,  /* relative offset from IndexSubTableArray of first IndexSubTable - same as CurrAdditionalOffset for first SubTable */
@@ -593,8 +864,17 @@ uint32 ulLocalCurrentOffset;
 uint32 ulTableSize;
 uint32 ulAdjustGlyphOffset;   /* amount to subtract to get the relative offset */
 uint16 usIndex;
+uint32 ulWriteEnd;
+int fCompletedRange = 0;    /* set when loop processes all entries through *pusLastIndex */
 
         ulLocalCurrentOffset = ulCurrAdditionalOffset - ulInitialOffset; /* offset within memory buffer */
+
+        /* Bounds check: ensure header write fits in buffer */
+        if (TTF_SAFE_CHECKS_ENABLED())
+        {
+            if (ulLocalCurrentOffset + SIZEOF_INDEXSUBTABLE3 > ulIndexSubTableBufferSize)
+                return 0;
+        }
 
         IndexSubTable3.header.usImageFormat = usImageFormat;
         IndexSubTable3.header.usIndexFormat = 3;
@@ -602,12 +882,31 @@ uint16 usIndex;
         memcpy(puchIndexSubTable + ulLocalCurrentOffset, &IndexSubTable3, SIZEOF_INDEXSUBTABLE3);
         ulTableSize = SIZEOF_INDEXSUBTABLE3;
 
+        /* Bounds check: ensure source reads are within buffer */
+        if (TTF_SAFE_CHECKS_ENABLED())
+        {
+            if (*pulSourceOffset + sizeof(uint32) > ulIndexSubTableBufferSize)
+                return 0;
+        }
         ulAdjustGlyphOffset = * ((uint32 *) (puchIndexSubTable + *pulSourceOffset));   /* first offset is what we adjust from */
         ulNewGlyphOffset = (* ((uint32 *) (puchIndexSubTable + *pulSourceOffset))) - ulAdjustGlyphOffset;     /* first one of array */
         *pulSourceOffset += sizeof(uint32);
 
+        if (CMAP_SAFE_CHECKS_ENABLED())
+        {
+            if (usFirstIndex > *pusLastIndex)
+                return 0; /* invalid range */
+        }
+
         for( usIndex = usFirstIndex; usIndex <= (* pusLastIndex); ++usIndex )
         {
+            /* Bounds check: ensure source read fits in buffer */
+            if (TTF_SAFE_CHECKS_ENABLED())
+            {
+                if (*pulSourceOffset + sizeof(uint32) > ulIndexSubTableBufferSize)
+                    return 0;
+            }
+
             usNewGlyphOffset = (uint16) ulNewGlyphOffset;  /* short version of the new glyph offset */
             /* now grab the next one */
             ulNewGlyphOffset = (* ((uint32 *) (puchIndexSubTable + *pulSourceOffset))) - ulAdjustGlyphOffset;
@@ -617,26 +916,53 @@ uint16 usIndex;
 
             *pulSourceOffset += sizeof(uint32); /* copied this one */
             
+            /* Bounds check: ensure write fits in buffer */
+            if (TTF_SAFE_CHECKS_ENABLED())
+            {
+                ulWriteEnd = ulLocalCurrentOffset + ulTableSize + sizeof(usNewGlyphOffset);
+                if (ulWriteEnd > ulIndexSubTableBufferSize)
+                    return 0;
+            }
+
             memcpy(puchIndexSubTable + ulLocalCurrentOffset+ulTableSize, &usNewGlyphOffset, 
                         sizeof(usNewGlyphOffset));      /* copy over the table entry */
             ulTableSize +=sizeof(usNewGlyphOffset); /* update the size of the table */
+
+            if (CMAP_SAFE_CHECKS_ENABLED())
+            {
+                if (usIndex == *pusLastIndex)
+                {
+                    fCompletedRange = 1;
+                    break; /* prevent uint16 wraparound on ++usIndex */
+                }
+            }
         }
-        if (usIndex > (* pusLastIndex)) /* we need to grab one more */
+        if ((CMAP_SAFE_CHECKS_ENABLED() && fCompletedRange) || usIndex > (* pusLastIndex)) /* we need to grab one more */
             usNewGlyphOffset = (uint16) ulNewGlyphOffset;  /* short version of the new glyph offset */
         else if (usIndex - usFirstIndex < 4) /* our break even point for staying within the buffer */
             return 0; /* ("EBLC: Internal. Cannot convert this Format1 table to format 3. Glyph Data too large.");  */
         *pulNewImageDataOffset += usNewGlyphOffset; 
 
-        if (usIndex > (* pusLastIndex)) /* we need to copy one more */
+        if ((CMAP_SAFE_CHECKS_ENABLED() && fCompletedRange) || usIndex > (* pusLastIndex)) /* we need to copy one more */
         /* Do the last table entry, which is just for Glyph size calculation purposes */
         {
+            /* Bounds check for final entry */
+            if (TTF_SAFE_CHECKS_ENABLED())
+            {
+                ulWriteEnd = ulLocalCurrentOffset + ulTableSize + sizeof(usNewGlyphOffset);
+                if (ulWriteEnd > ulIndexSubTableBufferSize)
+                    return 0;
+            }
             memcpy(puchIndexSubTable + ulLocalCurrentOffset+ulTableSize, &usNewGlyphOffset,sizeof(usNewGlyphOffset));
             ulTableSize +=sizeof(usNewGlyphOffset);
         }
         /* do we need to pad? */
         if (ulTableSize & 0x03)  /* if we aren't on a long word boundary */
             ulTableSize +=sizeof(usNewGlyphOffset);
-        *pusLastIndex = usIndex - 1; /* the one we were working on last */
+        if (CMAP_SAFE_CHECKS_ENABLED() && fCompletedRange)
+            ; /* already correct — processed through last index via safe-check break */
+        else
+            *pusLastIndex = usIndex - 1; /* the one we were working on last */
         return(ulTableSize);
 }
 
@@ -652,6 +978,7 @@ PRIVATE int16 FixSbitSubTableArray(CONST_TTFACC_FILEBUFFERINFO * pInputBufferInf
                           uint32 *pulNewImageDataOffset,
                           uint8 *puchEBDTDestPtr,
                           uint32 ulEBDTSrcOffset,
+                          uint32 ulEBDTAllocatedSize,
                           PGLYPHOFFSETRECORDKEEPER pKeeper,
                           uint32 ulEBLCEndOffset)
 {
@@ -724,6 +1051,7 @@ PRIVATE int16 FixSbitSubTableArray(CONST_TTFACC_FILEBUFFERINFO * pInputBufferInf
                                 &ulEBDTBytesWritten,
                                 puchEBDTDestPtr,
                                 ulEBDTSrcOffset,
+                                ulEBDTAllocatedSize,
                                 pKeeper);
         if (errCode != NO_ERROR)
             return errCode;
@@ -753,6 +1081,7 @@ PRIVATE int16 FixSbitSubTableArray(CONST_TTFACC_FILEBUFFERINFO * pInputBufferInf
                                 usFirstIndex, 
                                 &usLastIndex, 
                                 pSubTablePointers->puchIndexSubTables, 
+                                pSubTablePointers->nIndexSubTablesLen,
                                 ((INDEXSUBHEADER *) (pSubTablePointers->puchIndexSubTables + ulCurrAdditionalOffset-ulInitialOffset))->usImageFormat,
                                 ulCurrAdditionalOffset, 
                                 ulInitialOffset,
@@ -777,9 +1106,19 @@ PRIVATE int16 FixSbitSubTableArray(CONST_TTFACC_FILEBUFFERINFO * pInputBufferInf
                         {
                             return ERR_MEM;
                         }
-                        pSubTablePointers->pIndexSubTableArray = (INDEXSUBTABLEARRAY *)Mem_ReAlloc(pSubTablePointers->pIndexSubTableArray, ulSubTableArrayLength);
-                        if (pSubTablePointers->pIndexSubTableArray == NULL)
-                            return ERR_MEM; /* ("EBLC: Unable to allocate memory for IndexSubTableArray."); */
+                        if (TTF_SAFE_CHECKS_ENABLED())
+                        {
+                            INDEXSUBTABLEARRAY *pNewArray = (INDEXSUBTABLEARRAY *)Mem_ReAlloc(pSubTablePointers->pIndexSubTableArray, ulSubTableArrayLength);
+                            if (pNewArray == NULL)
+                                return ERR_MEM; /* ("EBLC: Unable to allocate memory for IndexSubTableArray."); */
+                            pSubTablePointers->pIndexSubTableArray = pNewArray;
+                        }
+                        else
+                        {
+                            pSubTablePointers->pIndexSubTableArray = (INDEXSUBTABLEARRAY *)Mem_ReAlloc(pSubTablePointers->pIndexSubTableArray, ulSubTableArrayLength);
+                            if (pSubTablePointers->pIndexSubTableArray == NULL)
+                                return ERR_MEM;
+                        }
                         usFirstIndex = usLastIndex;
                         usLastIndex = usSaveLastIndex;
                     }
@@ -887,7 +1226,7 @@ uint32 ulStartOffset;
 /* ------------------------------------------------------------------- */
 void Cleanup_SubTablePointers(SubTablePointers *pSubTablePointers,uint32 ulNumSizes)
 {
-uint16 ulSizeIndex;
+uint32 ulSizeIndex;
 
     if (pSubTablePointers == NULL)
         return;
@@ -954,6 +1293,7 @@ uint32      ulIndexSubTableArrayLength;
 uint32      ulIndexSubTablesDataSize;
 uint32      ulSubtablePointersArraySize;
 uint16      i;
+uint32      ulEBDTAllocatedSize = 0; /* Track allocated EBDT buffer size for bounds checking */
 GLYPHOFFSETRECORDKEEPER keeper;
 char *EBDTTag;
 char *EBLCTag;
@@ -1031,8 +1371,24 @@ uint32      ulEBLCEndOffset;
     keeper.ulOffsetArrayLen = 0;
     keeper.ulNextArrayIndex = 0;
 
-    /* create a buffer for the EBDT table */
-    puchEBDTDestPtr = (uint8 *) Mem_Alloc(TTTableLength((TTFACC_FILEBUFFERINFO *) pInputBufferInfo, EBDTTag));  /* we'll be copying the EBDT (raw bytes) table here temporarily */
+    /* Validate EBDT table size before allocation */
+    if (TTF_SAFE_CHECKS_ENABLED())
+    {
+        /* Validate EBDT table size before allocation */
+        ulEBDTAllocatedSize = TTTableLength((TTFACC_FILEBUFFERINFO*)pInputBufferInfo, EBDTTag);
+        if (ulEBDTAllocatedSize < SIZEOF_EBDTHEADER)
+        {
+            errCode = ERR_INVALID_EBLC;
+            break;
+        }
+        /* create a buffer for the EBDT table */
+        puchEBDTDestPtr = (uint8*)Mem_Alloc(ulEBDTAllocatedSize);  /* we'll be copying the EBDT (raw bytes) table here temporarily */
+    }
+    else
+    {
+        /* create a buffer for the EBDT table */
+        puchEBDTDestPtr = (uint8 *) Mem_Alloc(TTTableLength((TTFACC_FILEBUFFERINFO *) pInputBufferInfo, EBDTTag));  /* we'll be copying the EBDT (raw bytes) table here temporarily */
+    }
     if (!puchEBDTDestPtr)
     {
         errCode = ERR_MEM;
@@ -1163,6 +1519,7 @@ uint32      ulEBLCEndOffset;
                                  &ulNewImageDataOffset, 
                                  puchEBDTDestPtr,
                                  ulEBDTSrcOffset,
+                                 ulEBDTAllocatedSize,
                                  &keeper,
                                  ulEBLCEndOffset) == NO_ERROR)  /* valid table */
                                  && 

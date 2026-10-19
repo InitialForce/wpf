@@ -12,6 +12,8 @@
 // We cannot simply put this namespace specification in these 2 header files
 // or elase we will break the compilation of truetype subsetter.
 namespace MS { namespace Internal { namespace TtfDelta { 
+int g_fDWFBoundsCheckEnabled = 1; // definition for linker (initialized in truetype.cpp)
+int g_fCmapAndSbitOverflowProtectionEnabled = 1; // definition for linker (initialized via TrueTypeSubsetter)
 #include "CPP\TrueTypeSubsetter\TtfDelta\GlobalInit.h"
 #include "CPP\TrueTypeSubsetter\TtfDelta\ControlTableInit.h"
 }}} // namespace MS::Internal::TtfDelta
