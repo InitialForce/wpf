@@ -247,3 +247,46 @@ def test_a_region_without_a_base_side_excuses_nothing() -> None:
         "-<<<<<<< ours\n-    [SecurityCritical]\n-=======\n->>>>>>> theirs\n"
     )
     assert rrv.hard_fail_hits(diff, PATTERNS, sync=True)
+
+
+DUP_BASE = """class A
+{
+    void F()
+    {
+        permission.Demand();
+        A();
+        B();
+    }
+}
+"""
+
+
+def test_dropping_a_fork_added_copy_is_caught_despite_an_upstream_removal(
+    tmp_path: Path,
+) -> None:
+    # Astra round 3, exact scenario: the fork changes both calls and adds a
+    # second Demand() before B; upstream removes the original Demand() and
+    # changes both calls (one region). The resolution keeps the original
+    # Demand() and drops the fork-added one. The fork side has 2 copies and
+    # the base side 1, so the upstream removal excuses nothing.
+    fork = DUP_BASE.replace("        A();\n        B();",
+                            "        A2();\n        permission.Demand();\n        B2();")
+    upstream = DUP_BASE.replace("        permission.Demand();\n        A();\n        B();",
+                                "        A3();\n        B3();")
+    result = DUP_BASE.replace("        A();\n        B();", "        A2();\n        B2();")
+    hits = _scan(tmp_path, DUP_BASE, fork, upstream, result)
+    assert "        permission.Demand();" in (tmp_path / "scan.diff").read_text()
+    assert r"Demand\(\)" in hits
+
+
+def test_dropping_the_copy_upstream_removed_is_allowed_when_counts_match(
+    tmp_path: Path,
+) -> None:
+    # Fork side and base side each hold one Demand(); upstream removed it in
+    # this region; the resolution drops it, as upstream did.
+    fork = DUP_BASE.replace("        A();\n        B();", "        A2();\n        B2();")
+    upstream = DUP_BASE.replace("        permission.Demand();\n        A();\n        B();",
+                                "        A3();\n        B3();")
+    result = DUP_BASE.replace("        permission.Demand();\n        A();\n        B();",
+                              "        A2();\n        B3();")
+    assert _scan(tmp_path, DUP_BASE, fork, upstream, result) == []

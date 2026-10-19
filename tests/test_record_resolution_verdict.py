@@ -592,3 +592,13 @@ def test_a_valid_verdict_is_not_cut_short_by_old_errors(tmp_path: Path) -> None:
     rc, d, _ = _run_tries(tmp_path, [_try(tmp_path, 1, _verdict(verdict="reject"))],
                           "--ledger", str(led))
     assert rc == 1 and d["next_action"] == "retry"
+
+
+
+def test_cherry_pick_scan_rejects_any_removed_hard_fail_line(tmp_path: Path) -> None:
+    # Why novel-lines' hard_fail entries need no separate gate: for a
+    # cherry-pick the scan already reads every removed line.
+    diff = CLEAN_DIFF + "-        permission.Demand();\n"
+    rc, decision, _ = _run(tmp_path, _verdict(), diff=diff)
+    assert rc == 1
+    assert decision["reasons"] == ["hard-fail pattern in the final diff: Demand\\(\\)"]

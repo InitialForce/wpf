@@ -34,7 +34,12 @@ upstream diff does not remove for that path, counted, so one upstream
 removal excuses one removal of the same text. A removed line matching a
 review_hard_fail_patterns entry (--hard-fail-config) is always listed, with
 "hard_fail": true: matching by text cannot show that upstream removed that
-particular copy. These lists are for the
+particular copy. The entries are for the reviewer; code enforcement is the
+record job's hard-fail scan, on the resolution scope: for a cherry-pick it
+rejects every removed matching line, and for a sync every one outside a
+conflict region and every fork-side one its own region does not excuse
+(record-resolution-verdict.py). Enforcing this list instead would reject
+upstream's own clean removals in a sync, which are not the resolution's. These lists are for the
 reviewer; only novel_count has a code cap. Zero novel lines does not mean a
 resolution is safe.
 

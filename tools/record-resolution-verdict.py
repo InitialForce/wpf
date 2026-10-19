@@ -26,10 +26,13 @@ of these hold:
         resolution dropped, for example a fork Demand() elsewhere in the
         file;
       - removed lines of the fork side ("ours") of a conflict region, unless
-        that same region shows upstream removed the line: it is in the
-        region's base side more often than in its upstream side. Only that
-        region counts, so an upstream removal elsewhere in the file excuses
-        nothing, and a region without a base side excuses nothing;
+        that same region shows upstream removed the line (it is in the
+        region's base side more often than in its upstream side) AND the fork
+        side holds that text exactly as often as the base side. Counts cannot
+        tell copies apart, so when the fork added or removed copies of the
+        text in the region, every drop of it is scanned. An upstream removal
+        in another region excuses nothing, and a region without a base side
+        excuses nothing;
       - not the conflict markers, and not the base or upstream ("theirs")
         side of a region: those are alternatives a resolution may discard.
   - the novel-lines report from the prepare job (no secrets, no model)
@@ -215,17 +218,24 @@ def sync_lines_to_scan(diff_text: str) -> list[str]:
     state = "clean"
     in_hunk = False
     ours_removed: list[str] = []
+    ours_side: Counter[str] = Counter()
     base_side: Counter[str] = Counter()
     theirs_side: Counter[str] = Counter()
 
     def close_region() -> None:
+        # Fail closed: counts cannot tell copies apart, so an upstream removal
+        # excuses a dropped fork-side line only when the fork side holds that
+        # text exactly as often as the base side (the fork neither added nor
+        # removed it in this region). Otherwise every drop of it is scanned.
         excused = base_side - theirs_side
         for text in ours_removed:
-            if excused[text.strip()] > 0:
-                excused[text.strip()] -= 1
+            key = text.strip()
+            if ours_side[key] == base_side[key] and excused[key] > 0:
+                excused[key] -= 1
             else:
                 lines.append(text)
         ours_removed.clear()
+        ours_side.clear()
         base_side.clear()
         theirs_side.clear()
 
@@ -265,6 +275,7 @@ def sync_lines_to_scan(diff_text: str) -> list[str]:
             if removed:
                 lines.append(text)
         elif state == "ours":
+            ours_side[text.strip()] += 1
             if removed:
                 ours_removed.append(text)
         elif state == "base":
