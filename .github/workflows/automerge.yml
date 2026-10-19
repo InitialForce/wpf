@@ -24,13 +24,13 @@
 #       * cherry-pick: only files under src/ and eng/
 #       * no file on file_denylist (whole diff for a cherry-pick; for the
 #         sync PR, the files whose content differs from git's own merge)
-#       * cherry-pick with a Conflict-Resolved-By trailer: the if/main
-#         ledger has resolution_approved for the same upstream pair whose
-#         branch_sha is the PR head, and no later resolution_rejected for
-#         that commit (pr-ingestion's Fable resolution review)
-#       * sync: no conflict resolution written by Claude (trailer
-#         Conflict-Resolved-By, or any file that differs from git's own
-#         merge); a person merges those
+#       * a Conflict-Resolved-By trailer needs resolution_approved in the
+#         if/main ledger whose branch_sha is the PR head, and no later
+#         resolution_rejected for that commit (resolution-review.yml). For a
+#         cherry-pick the event names the same upstream pair; for the sync
+#         PR, pr_number 0 and the merge's second parent
+#       * sync: every file that differs from git's own merge is one git could
+#         not merge, and only with that trailer
 #       * cherry-pick: exactly one commit, signed by the bot key, whose
 #         Upstream-PR-Head trailer has an approved ledger outcome
 #       * sync: a bot-signed merge commit; every other commit is upstream's

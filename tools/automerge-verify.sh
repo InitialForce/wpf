@@ -20,6 +20,10 @@
 #   behind   every check passed, but if/main has moved on (beyond ledger
 #            commits); $OUT/upstream_pr and $OUT/upstream_head are set for a
 #            cherry-pick branch so the caller can re-dispatch ingestion
+#   unreviewed  the head carries Conflict-Resolved-By and the ledger has no
+#            resolution review event for it at all (neither approved nor
+#            rejected); the caller asks for a rebuild, which is reviewed.
+#            upstream_pr and upstream_head are set as for behind
 #   refuse   a check failed; $OUT/reason says which
 # Always exits 0 unless the inputs are malformed.
 set -euo pipefail
@@ -56,8 +60,18 @@ bot_signed() {
 # A conflict resolution written by Claude merges by itself only when the
 # Fable resolution review approved that exact commit (resolution_approved in
 # the if/main ledger with branch_sha = the PR head). A resolution with no such
-# approval, or one made by anyone else, is refused.
+# approval, or one made by anyone else, is refused. One that was never
+# reviewed at all is "unreviewed", so automerge asks for a rebuild.
 NOT_APPROVED="no resolution review approved this exact commit"
+resolution_refused() { # <what>: unreviewed when no decision exists, else refuse
+  if [ "$(jq -r .reason "$OUT/resolution.json")" = "no resolution review approved commit $HEAD_SHA" ]; then
+    echo unreviewed > "$OUT/result"
+    echo "Claude resolved a conflict in this $1 and no resolution review has decided on commit $HEAD_SHA" > "$OUT/reason"
+    echo "PR #$PR is unreviewed: $(cat "$OUT/reason")"
+    exit 0
+  fi
+  refuse "Claude resolved a conflict in this $1 and $NOT_APPROVED ($(jq -r .reason "$OUT/resolution.json"))"
+}
 agent_resolved() {
   [ -n "$(git log -1 --format='%(trailers:key=Conflict-Resolved-By,valueonly)' "$1")" ]
 }
@@ -106,12 +120,12 @@ case "$HEAD_BRANCH" in
     if agent_resolved HEAD; then
       python3 "$TRUSTED/tools/check-approval.py" --ledger "$OUT/ledger.jsonl" \
         --pr-number "$BRANCH_PR" --head-sha "$UP_HEAD" --resolution-branch-sha "$HEAD_SHA" \
-        > "$OUT/resolution.json" \
-        || refuse "Claude resolved a conflict in this cherry-pick and $NOT_APPROVED ($(jq -r .reason "$OUT/resolution.json"))"
+        > "$OUT/resolution.json" || RESOLUTION_REFUSED=1
     fi
     deny "$OUT/changed.txt"
     echo "$BRANCH_PR" > "$OUT/upstream_pr"
     echo "$UP_HEAD" > "$OUT/upstream_head"
+    [ -z "${RESOLUTION_REFUSED:-}" ] || resolution_refused cherry-pick
     ;;
   if/staging)
     UPSTREAM=upstream/release/10.0
@@ -145,7 +159,7 @@ case "$HEAD_BRANCH" in
       python3 "$TRUSTED/tools/check-approval.py" --ledger "$OUT/ledger.jsonl" \
         --pr-number 0 --head-sha "$(git rev-parse HEAD^2)" --resolution-branch-sha "$HEAD_SHA" \
         --resolution-only > "$OUT/resolution.json" \
-        || refuse "Claude resolved a conflict in this sync merge and $NOT_APPROVED ($(jq -r .reason "$OUT/resolution.json"))"
+        || resolution_refused "sync merge"
     fi
     ;;
   *)

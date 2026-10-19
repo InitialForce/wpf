@@ -186,6 +186,24 @@ def test_behind_pr_is_rebuilt_once_per_head(setup) -> None:
     assert sent[1] == {"event_type": "nightly-rebase", "client_payload": {"force": True}}
 
 
+def test_unreviewed_pr_is_rebuilt_once_per_head(setup) -> None:
+    stub, work, env = setup
+    sha = add_pr(stub, 1, "unreviewed")
+    add_pr(stub, 2, "unreviewed", branch="if/staging")
+    assert run(work, env).returncode == 0
+    assert run(work, env).returncode == 0
+    sent = [json.loads(x) for x in (stub / "dispatches").read_text().split("\n") if x.strip()]
+    assert sent == [
+        {"event_type": "pr-ingestion-requested",
+         "client_payload": {"pr_number": 77, "head_sha": "b" * 40}},
+        {"event_type": "nightly-rebase", "client_payload": {"force": True}},
+    ]
+    text = (stub / "comments-1").read_text()
+    assert text.count(f"<!-- automerge-rebuild:{sha} -->") == 1
+    assert "no resolution review has decided" in text
+    assert lines(stub / "merged") == []
+
+
 def test_refusal_is_reported_once_per_head(setup) -> None:
     stub, work, env = setup
     sha = add_pr(stub, 1, "refuse")

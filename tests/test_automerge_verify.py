@@ -195,13 +195,15 @@ def record(origin: Path, env: dict[str, str], *events: str) -> None:
     commit(origin, env, {".if-fork/patch-ledger.jsonl": text}, "ledger: resolution")
 
 
-def test_conflict_resolved_cherry_pick_without_review_needs_a_person(
+def test_conflict_resolved_cherry_pick_without_review_is_unreviewed(
     tmp_path, env, origin, trusted, bot_key
 ) -> None:
     sha = make_pick(origin, env, {"src/b.cs": "b\n"}, msg=RESOLVED_MSG)
     result, reason = verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])
-    assert result == "refuse" and "no resolution review approved" in reason
-    assert f"no resolution review approved commit {sha}" in reason
+    assert result == "unreviewed" and "no resolution review has decided" in reason
+    assert sha in reason
+    # The caller needs these to ask ingestion for a rebuild.
+    assert (tmp_path / "out" / "upstream_head").read_text().strip() == UPSTREAM_HEAD
 
 
 def test_conflict_resolved_cherry_pick_with_approved_review_is_ok(
@@ -222,7 +224,7 @@ def test_resolution_approval_is_stale_after_a_new_push(
     new = make_pick(origin, env, {"src/b.cs": "changed\n"}, msg=RESOLVED_MSG)
     assert new != old
     result, reason = verify(tmp_path, env, origin, trusted, new, BRANCH, bot_key[1])
-    assert result == "refuse" and "no resolution review approved" in reason
+    assert result == "unreviewed" and "no resolution review has decided" in reason
 
 
 def test_rejected_resolution_needs_a_person(tmp_path, env, origin, trusted, bot_key) -> None:
@@ -245,13 +247,13 @@ def test_rejection_after_approval_needs_a_person(
 
 
 @pytest.mark.parametrize("pr,head", [(78, UPSTREAM_HEAD), (77, "c" * 40)])
-def test_resolution_approval_for_another_pair_needs_a_person(
+def test_resolution_approval_for_another_pair_is_unreviewed(
     tmp_path, env, origin, trusted, bot_key, pr, head
 ) -> None:
     sha = make_pick(origin, env, {"src/b.cs": "b\n"}, msg=RESOLVED_MSG)
     record(origin, env, resolution("resolution_approved", sha, pr=pr, head=head))
     result, reason = verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])
-    assert result == "refuse" and "no resolution review approved" in reason
+    assert result == "unreviewed" and "no resolution review has decided" in reason
 
 
 def test_approved_resolution_still_needs_every_other_check(
@@ -442,14 +444,14 @@ def test_staging_resolution_without_trailer_is_refused(
     assert "src/a.cs" in reason
 
 
-def test_staging_resolution_without_approval_is_refused(
+def test_staging_resolution_without_review_is_unreviewed(
     tmp_path, env, origin, trusted, bot_key
 ) -> None:
     sha, up = staging(tmp_path, env, origin, {"src/a.cs": "fork+upstream\n"}, trailer=TRAILER)
     result, reason = verify(
         tmp_path, env, origin, trusted, sha, "if/staging", bot_key[1], upstream=up
     )
-    assert result == "refuse" and "no resolution review approved" in reason
+    assert result == "unreviewed" and "no resolution review has decided" in reason
 
 
 def test_staging_resolution_with_approval_is_ok(
@@ -461,17 +463,17 @@ def test_staging_resolution_with_approval_is_ok(
     assert result == ("ok", "")
 
 
-def test_staging_trailer_on_a_clean_merge_needs_an_approval(
+def test_staging_trailer_on_a_clean_merge_is_unreviewed(
     tmp_path, env, origin, trusted, bot_key
 ) -> None:
     sha, up = staging(tmp_path, env, origin, {}, fork_file="src/f.cs", trailer=TRAILER)
     result, reason = verify(
         tmp_path, env, origin, trusted, sha, "if/staging", bot_key[1], upstream=up
     )
-    assert result == "refuse" and "no resolution review approved" in reason
+    assert result == "unreviewed" and "no resolution review has decided" in reason
 
 
-def test_staging_approval_for_another_commit_is_refused(
+def test_staging_approval_for_another_commit_is_unreviewed(
     tmp_path, env, origin, trusted, bot_key
 ) -> None:
     sha, up = staging(tmp_path, env, origin, {"src/a.cs": "fork+upstream\n"}, trailer=TRAILER)
@@ -480,7 +482,7 @@ def test_staging_approval_for_another_commit_is_refused(
     result, reason = verify(
         tmp_path, env, origin, trusted, sha, "if/staging", bot_key[1], upstream=up
     )
-    assert result == "refuse" and "no resolution review approved" in reason
+    assert result == "unreviewed" and "no resolution review has decided" in reason
 
 
 def test_staging_rejected_resolution_is_refused(
