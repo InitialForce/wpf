@@ -283,6 +283,9 @@ def test_finish_marks_an_agent_resolution(tmp_path: Path, git_env: dict[str, str
         "claude/cherry-pick-pr-123",
     )
     assert trailers == "claude"
+    # The resolution review and automerge bind to exactly this commit.
+    pushed = git(origin, git_env, "rev-parse", "claude/cherry-pick-pr-123")
+    assert (tmp_path / "out" / "sha").read_text().strip() == pushed
 
 
 def test_finish_refuses_more_than_one_commit(tmp_path: Path, git_env: dict[str, str]) -> None:

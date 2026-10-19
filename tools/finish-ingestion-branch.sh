@@ -6,13 +6,14 @@
 # commit the branch was made from), TRUSTED (if/main checkout whose tools and
 # config are used), OUT (directory for result files), and CONFLICT_RESOLVED
 # (true when the commit holds files the conflict agent wrote; the commit then
-# gets a "Conflict-Resolved-By: claude" trailer, and automerge leaves the PR
-# to a person).
+# gets a "Conflict-Resolved-By: claude" trailer, and automerge merges the PR
+# only after a resolution review approves that exact commit).
 # The current checkout must be on $BRANCH with exactly one commit on top of
 # BASE_SHA.
 #
-# Writes $OUT/pushed (true) on success, or $OUT/result=refused and
-# $OUT/reason when the branch is refused. Exits 0 in both cases.
+# Writes $OUT/pushed (true) and $OUT/sha (the pushed commit) on success, or
+# $OUT/result=refused and $OUT/reason when the branch is refused. Exits 0 in
+# both cases.
 set -euo pipefail
 
 [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid BASE_SHA" >&2; exit 1; }
@@ -44,4 +45,5 @@ if [ "${CONFLICT_RESOLVED:-false}" = true ]; then
 fi
 git commit --amend --no-edit "${TRAILERS[@]}"
 git push --force-with-lease origin "HEAD:refs/heads/$BRANCH"
+git rev-parse HEAD > "$OUT/sha"
 echo true > "$OUT/pushed"
