@@ -71,7 +71,8 @@ A side that does not have a file has no copy. Files over 1 MB are not copied.
 
 `novel-lines.json` was computed by code, not by a model. Every check is per file:
 - `novel_lines`: every added line of `final.diff` whose text (whitespace trimmed, but
-  leading whitespace kept in YAML, Python and makefiles, where it has meaning) is in
+  compared exactly in YAML, Python, makefiles, XAML and MSBuild files, where whitespace
+  can have meaning) is in
   none of: the upstream diff's added lines for the same file, the `BASE_SHA` file, the
   upstream head file. These lines exist only because of the resolution. `novel_count` is
   the exact total. More than `conflict_resolution.max_novel_lines` is rejected by code.

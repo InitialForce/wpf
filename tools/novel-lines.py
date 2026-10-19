@@ -7,8 +7,9 @@ fork. Any other added line is "novel": the reviewer must justify each one,
 and the report gives it a list that does not depend on a model.
 
 All checks are per file, and lines are compared by line_key: surrounding
-whitespace removed, except leading whitespace in files where it has meaning
-(YAML, Python, makefiles). An added line of the final diff
+whitespace removed, except in files where whitespace can have meaning
+(YAML, Python, makefiles, XAML and MSBuild files), whose lines are compared
+exactly. An added line of the final diff
 (BASE_SHA..BRANCH_SHA) is novel when its text is not empty and appears in
 none of:
   - the added lines of the upstream diff for the same path
@@ -151,16 +152,31 @@ def parse_diff(text: str) -> list[FileDiff]:
 
 # Leading whitespace has meaning in these files (YAML and Python nesting,
 # make recipes), so only trailing whitespace is ignored there.
-_WHITESPACE_SENSITIVE_SUFFIXES = (".py", ".yml", ".yaml", ".mk", ".make", ".tsv")
+# In these files whitespace can change meaning: YAML and Python nesting,
+# make recipes (tabs), YAML block scalars, and XML text content in XAML and
+# MSBuild files. Their lines are compared exactly (only a CR is dropped), so
+# a re-indented or re-spaced line counts as a new line.
+_WHITESPACE_SENSITIVE_SUFFIXES = (
+    ".py", ".yml", ".yaml", ".mk", ".make", ".tsv",
+    ".xaml", ".props", ".targets", ".csproj", ".vbproj", ".vcxproj", ".proj",
+)
 _WHITESPACE_SENSITIVE_NAMES = ("Makefile", "GNUmakefile")
 
 
-def line_key(path: str, text: str) -> str:
-    """The text a line is compared by: trimmed, or right-trimmed only when
-    leading whitespace matters in that kind of file."""
+def whitespace_sensitive(path: str) -> bool:
     name = path.rsplit("/", 1)[-1]
-    if name in _WHITESPACE_SENSITIVE_NAMES or name.endswith(_WHITESPACE_SENSITIVE_SUFFIXES):
-        return text.rstrip()
+    return name in _WHITESPACE_SENSITIVE_NAMES or name.lower().endswith(
+        _WHITESPACE_SENSITIVE_SUFFIXES
+    )
+
+
+def line_key(path: str, text: str) -> str:
+    """The text a line is compared by: exact in whitespace-sensitive files,
+    trimmed elsewhere. A line of only whitespace is "" either way."""
+    if not text.strip():
+        return ""
+    if whitespace_sensitive(path):
+        return text.rstrip("\r")
     return text.strip()
 
 

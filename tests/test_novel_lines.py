@@ -262,3 +262,32 @@ def test_indentation_change_in_csharp_is_not_novel(tmp_path: Path) -> None:
     base = "class A\n{\n    int x;\n}\n"
     final = diff("src/a.cs", 3, 3, "-    int x;\n+        int x;\n")
     assert report(tmp_path, final, {"src/a.cs": base}, {"src/a.cs": base})["novel_count"] == 0
+
+
+
+def test_whitespace_sensitive_files_are_compared_exactly(tmp_path: Path) -> None:
+    # Astra C: XAML and MSBuild text content, YAML block scalars and make
+    # recipes can change meaning with whitespace alone.
+    cases = {
+        "src/A.xaml": ("    <TextBlock xml:space=\"preserve\">a  b</TextBlock>\n",
+                       "    <TextBlock xml:space=\"preserve\">a  b </TextBlock>\n"),
+        "eng/Build.props": ("    <Args>-x</Args>\n", "  <Args>-x</Args>\n"),
+        "src/X.targets": ("  <Exec Command=\"a\" />\n", "  <Exec Command=\"a\" />   \n"),
+        "Makefile": ("\tbuild\n", "        build\n"),
+        "ci/x.yaml": ("  key: |\n", "  key: | \n"),
+    }
+    for path, (old, new) in cases.items():
+        final = diff(path, 1, 1, "-" + old + "+" + new)
+        r = report(tmp_path / path.replace("/", "_"), final, {path: old}, {path: old})
+        assert r["novel_count"] == 1, path
+
+
+def test_blank_lines_are_ignored_in_whitespace_sensitive_files(tmp_path: Path) -> None:
+    final = diff("ci/x.yml", 1, 1, "+   \n+\n")
+    assert report(tmp_path, final, {}, {})["novel_count"] == 0
+
+
+def test_whitespace_sensitive_suffixes_are_case_insensitive() -> None:
+    assert novel_lines.whitespace_sensitive("src/Foo.XAML")
+    assert novel_lines.whitespace_sensitive("src/App.csproj")
+    assert not novel_lines.whitespace_sensitive("src/a.cs")
