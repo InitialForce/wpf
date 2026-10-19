@@ -182,7 +182,7 @@ The fork adds 159 files across the following categories. No file in this list mo
 
 The pipeline runs without a person in the loop. Each day it finds new community PRs in `dotnet/wpf`, has two Claude Fable reviewers check each one, cherry-picks the approved ones onto `if/main`, and merges upstream `release/10.0` into the fork. Each change reaches `if/main` through a PR that merges itself once the `Build` workflow passes on it. A new NuGet version goes to nuget.org once a day, only after every gate passes, and only when `src/` changed since the last release.
 
-A person is needed only when something escalates: two reviewers disagree, a conflict touches a denylisted file or is too large for Claude, or a workflow keeps failing. Each of those leaves exactly one open issue labelled `automated`. A person also merges every PR that `automerge.yml` refuses: a PR where Claude resolved a conflict (label `needs-human-merge`), and a PR that changes fork-owned files or, for a cherry-pick, anything outside `src/` and `eng/`. `automerge.yml` explains the refusal in a comment on the PR.
+A person is needed only when something escalates: two reviewers disagree, a conflict touches a denylisted file or is too large for Claude, or a workflow keeps failing. Each of those leaves exactly one open issue labelled `automated`. A person also merges every PR that `automerge.yml` refuses. That is a cherry-pick whose conflict resolution the Fable review did not approve (label `needs-human-merge`), a sync PR that holds any conflict resolution, or a PR that changes fork-owned files. A cherry-pick that changes anything outside `src/` and `eng/` also needs a person. `automerge.yml` explains the refusal in a comment on the PR.
 
 ### Branches
 
@@ -235,7 +235,8 @@ Other safety layers: `file_denylist` and `commit_denylist` in `config.yaml`, har
 - The approval check (`tools/check-approval.py`) requires an `approved` outcome in the ledger for the exact `(pr_number, head_sha)`, with no later `rejected` or `escalated` event for that pair.
 - The cherry-pick job (`tools/apply-upstream-pr.sh`, no model) checks that the upstream PR head still equals the reviewed SHA and that nothing is on `commit_denylist`. It then applies the change on `claude/cherry-pick-pr-<N>` from `if/main`: a merged PR as its upstream merge commit (`git cherry-pick -x`), an open PR as one commit of its net diff.
 - The cherry-pick job records the `if/main` commit it started from. The conflict and `finalize` jobs work on exactly that commit, so a change that lands on `if/main` meanwhile cannot be overwritten.
-- Conflicts on denylisted files escalate. Other conflicts go to Claude Sonnet (`cherry-pick.md`, 30 turns) in a separate job with no credentials, no shell and only the action's own settings. A trusted `finalize` job takes only the conflicted files back (see "Where Claude runs" in the [runbook](docs/operator-runbook.md)). Nobody reviews what Claude wrote, so the commit gets the trailer `Conflict-Resolved-By: claude`, the PR gets the label `needs-human-merge`, and a person merges it.
+- Conflicts on denylisted files escalate. Other conflicts go to Claude Sonnet (`cherry-pick.md`, 30 turns) in a separate job with no credentials, no shell and only the action's own settings. A trusted `finalize` job takes only the conflicted files back (see "Where Claude runs" in the [runbook](docs/operator-runbook.md)) and signs the commit with the trailer `Conflict-Resolved-By: claude`.
+- A resolution Claude wrote is then reviewed by a separate model run. `prepare-resolution-review` (no secrets) pins the upstream diff the reviewers approved, the pushed branch diff `BASE_SHA..BRANCH_SHA` and three versions of each changed file. It also writes a novel-lines report from `tools/novel-lines.py`. That report lists every added line found in neither the upstream PR's added lines, the `BASE_SHA` file, nor the upstream head file. `review-resolution` runs Claude Fable (`resolution-review.md`, `claude_models.resolution_review`, 40 turns) with the same limits as the PR reviewers. `record-resolution-verdict` (trusted) checks that the verdict came from that job, then approves only on verdict `approve`, `novel_lines_justified: true`, confidence at least `conflict_resolution.review_min_confidence` (0.9), and no `review_hard_fail_patterns` hit in the branch diff. It records `resolution_approved` or `resolution_rejected` with `branch_sha`, the exact commit reviewed. A missing or failed review counts as rejected. The PR gets the label `needs-human-merge` unless the resolution was approved, and its body says why.
 - Before any push, `if/main`'s own `check-denylist.py` and `config.yaml` (from a separate checkout, never the branch's copies) check the whole branch diff against `file_denylist`. That list also holds every fork-owned path (`.github/`, `.if-fork/`, `tools/`, `tests/`, `test/`, `docs/`, `perf/`, `packaging/InitialForce.*` and others) and agent configuration files (`.claude/`, `.mcp.json`, `CLAUDE.md`, `AGENTS.md`). The job then signs, pushes, opens (or reuses) one PR to `if/main`, labelled `automated`, and records `cherry_picked`.
 
 **4. Build** (`build.yml`). Runs on every PR to `if/main` and on pushes to `if/main` that change more than `.if-fork/`, `docs/` or Markdown. Jobs: Python lint and tests, actionlint, the WPF build for x64 and arm64, crossgen, pack, the smoke harness against the packed `.nupkg`, a `perf` job, and an `aggregate` job that fails the run if any gate failed. The `perf` job is a placeholder: no benchmark runs and nothing is measured. `build.yml` never publishes.
@@ -246,7 +247,8 @@ Other safety layers: `file_denylist` and `commit_denylist` in `config.yaml`, har
   - Every commit is the bot's (signed with the key in `docs/bot-gpg-pubkey.asc`), or upstream's in the sync PR.
   - A cherry-pick PR is one commit whose `Upstream-PR-Head` is approved in the ledger, and it changes only files under `src/` and `eng/`.
   - No file is on `file_denylist`, and no fork-owned file (`.github/`, `.if-fork/`, `tools/`, `tests/`, `test/`, `docs/`, `perf/`, `packaging/InitialForce.*`, agent configuration) changes. For the sync PR this includes changes upstream itself brings.
-  - Claude resolved no conflict: no `Conflict-Resolved-By` trailer, and for the sync PR no file differs from git's own merge.
+  - A cherry-pick with the `Conflict-Resolved-By` trailer needs a `resolution_approved` ledger event for the same upstream pair whose `branch_sha` is the PR head, with no later `resolution_rejected` for that commit. A new push changes the head, so it needs a new review.
+  - The sync PR holds no conflict resolution: no `Conflict-Resolved-By` trailer, and no file differs from git's own merge.
   - The PR contains the current `if/main` tip (ledger-only commits aside).
 - `if/main` has not moved between that check and the merge call. GitHub has no merge call that checks the base commit, so a push in the moment between the last fetch and the merge is not caught.
 
@@ -282,7 +284,9 @@ flowchart TD
     subgraph Ingest["pr-ingestion.yml"]
         I[pre-flight + SHA check] --> CP[cherry-pick onto if/main\nClaude only for conflicts]
         CP --> DL[file denylist]
-        DL --> PR1[PR claude/cherry-pick-pr-N -> if/main]
+        DL -->|clean| PR1[PR claude/cherry-pick-pr-N -> if/main]
+        DL -->|Claude resolved a conflict| RR[Fable resolution review\nledger: resolution_approved or rejected]
+        RR --> PR1
     end
 
     N([nightly-rebase 03:07]) --> S[merge upstream release/10.0\ninto if/staging]
@@ -295,7 +299,7 @@ flowchart TD
     B -->|passed| M[automerge.yml\nmerge commit]
     B -->|failed| C([comment on PR])
     M -->|checks pass| MAIN[(if/main)]
-    M -->|Claude resolved a conflict,\nor fork-owned files| H([person merges\nneeds-human-merge])
+    M -->|resolution not approved,\nsync conflict, or fork-owned files| H([person merges\nneeds-human-merge])
     H --> MAIN
 
     MAIN --> AR([auto-release 09:23\nif src/ changed])
@@ -331,7 +335,7 @@ Known gaps:
   | `branch-promotion` | `GH_APP_PRIVATE_KEY`, `GH_BOT_GPG_KEY` | `if/main` only | `@oysteinkrog` (manual single-review approval only) |
 
   `GH_APP_ID`, `GH_BOT_GPG_KEY_ID` and `GH_BOT_GPG_FINGERPRINT` are not sensitive and stay repository secrets. A workflow on another branch cannot read the four sensitive values. A job that needs one of them must name its environment, or it gets an empty value.
-- **Pull requests where Claude resolved a conflict need a person.** See stages 3, 5 and 6.
+- **Pull requests where Claude resolved a conflict need a person** unless the Fable resolution review approved that exact commit (cherry-picks only). Sync PRs with a resolution always need a person. See stages 3, 5 and 6.
 - **Claude steps and bot actors.** `anthropics/claude-code-action` refuses a run started by a bot unless `allowed_bots` lists it. Every Claude step lists `initial-force-wpf-bot`; release notes and failure analysis also list `github-actions`, because auto-release dispatches Release with the workflow token.
 
 Repository settings the pipeline needs:

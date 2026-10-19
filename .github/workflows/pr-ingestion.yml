@@ -632,7 +632,7 @@ jobs:
           TRUSTED: ${{ github.workspace }}/trusted
 
   # -------------------------------------------------------------------------
-  # Job 7: prepare-resolution-review — no secrets. Pin what the resolution
+  # Job 7: prepare-resolution-review. No secrets. Pin what the resolution
   # reviewer sees: the approved upstream diff, the pushed branch diff, the
   # three versions of each changed file and the novel-lines report.
   # -------------------------------------------------------------------------
@@ -767,7 +767,7 @@ jobs:
           if-no-files-found: error
 
   # -------------------------------------------------------------------------
-  # Job 8: review-resolution — Fable reviews the resolution. Same limits as
+  # Job 8: review-resolution. Fable reviews the resolution. Same limits as
   # the pr-review.yml reviewers: read-only token, sparse checkout of the
   # config and prompts only, trusted settings only, Read limited to the
   # input and the config, Write limited to its verdict file, no shell.
@@ -894,7 +894,7 @@ jobs:
           if-no-files-found: warn
 
   # -------------------------------------------------------------------------
-  # Job 9: record-resolution-verdict — trusted. Check the verdict's origin,
+  # Job 9: record-resolution-verdict. Trusted. Check the verdict's origin,
   # apply the code rules and record resolution_approved or
   # resolution_rejected for the exact branch commit. Runs when the review
   # failed too: no valid verdict is a rejection.
