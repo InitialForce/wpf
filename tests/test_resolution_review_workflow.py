@@ -1,5 +1,6 @@
 """Tests for .github/workflows/resolution-review.yml, the Fable review of a
-conflict resolution that pr-ingestion.yml and nightly-rebase.yml call.
+conflict resolution that pr-ingestion.yml and nightly-rebase.yml call, and
+resolution-reviewer.yml, the review try it calls up to three times.
 
 Structure and security invariants only; nothing is executed. The scripts it
 runs (novel-lines.py, record-resolution-verdict.py) have their own tests.
@@ -16,15 +17,31 @@ import yaml
 
 REPO_ROOT = Path(__file__).parent.parent
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "resolution-review.yml"
+REVIEWER_PATH = REPO_ROOT / ".github" / "workflows" / "resolution-reviewer.yml"
 CONFIG = yaml.safe_load((REPO_ROOT / ".if-fork" / "config.yaml").read_text())
+
+
+def _load(path: Path) -> dict:
+    doc = yaml.safe_load(path.read_text())
+    if True in doc:
+        doc["on"] = doc.pop(True)
+    return doc
 
 
 @pytest.fixture(scope="module")
 def workflow() -> dict:
-    doc = yaml.safe_load(WORKFLOW_PATH.read_text())
-    if True in doc:
-        doc["on"] = doc.pop(True)
-    return doc
+    return _load(WORKFLOW_PATH)
+
+
+@pytest.fixture(scope="module")
+def reviewer() -> dict:
+    return _load(REVIEWER_PATH)
+
+
+@pytest.fixture(scope="module")
+def jobs(workflow: dict, reviewer: dict) -> dict:
+    """Every job with steps: prepare and review (one try) and record."""
+    return {**reviewer["jobs"], "record": workflow["jobs"]["record"]}
 
 
 def _step(job: dict, name: str) -> dict:
@@ -39,11 +56,50 @@ def test_is_reusable_with_inputs_and_outputs(workflow: dict) -> None:
     }
     assert call["outputs"]["next_action"]["value"] == "${{ jobs.record.outputs.next_action }}"
     assert workflow["permissions"] == {"contents": "read"}
-    assert set(workflow["jobs"]) == {"prepare", "review", "record"}
+    assert set(workflow["jobs"]) == {"try-1", "try-2", "try-3", "record"}
 
 
-def test_inputs_reach_shell_only_through_env(workflow: dict) -> None:
-    for name, job in workflow["jobs"].items():
+def test_at_most_three_tries_each_after_the_one_before_left_no_verdict(
+    workflow: dict, reviewer: dict
+) -> None:
+    delays = {}
+    for n in (1, 2, 3):
+        job = workflow["jobs"][f"try-{n}"]
+        assert job["uses"] == "./.github/workflows/resolution-reviewer.yml"
+        assert job["secrets"] == "inherit"
+        assert job["with"]["try"] == str(n)
+        assert job["with"]["branch_sha"] == "${{ inputs.branch_sha }}"
+        delays[n] = int(job["with"]["delay_seconds"])
+        if n > 1:
+            assert job["needs"] == f"try-{n - 1}"
+            assert job["if"] == (
+                f"${{{{ !cancelled() && needs.try-{n - 1}.outputs.done != 'true' }}}}"
+            )
+    assert delays[1] == 0 < delays[2] < delays[3] <= 900
+    call = reviewer["on"]["workflow_call"]
+    assert set(call["inputs"]) == {
+        "kind", "pr_number", "upstream_sha", "base_sha", "branch_sha", "branch",
+        "conflict_files", "try", "delay_seconds",
+    }
+    assert call["outputs"]["done"]["value"] == "${{ jobs.review.outputs.done }}"
+    assert call["outputs"]["novel_sha256"]["value"] == "${{ jobs.prepare.outputs.novel_sha256 }}"
+    assert reviewer["permissions"] == {"contents": "read"}
+    wait = reviewer["jobs"]["prepare"]["steps"][0]
+    assert wait["name"] == "Wait before a retry" and '[ "$DELAY" -le 900 ]' in wait["run"]
+
+
+def test_done_needs_a_well_formed_verdict(reviewer: dict) -> None:
+    job = reviewer["jobs"]["review"]
+    done = _step(job, "done")
+    assert done["if"] == "always()"
+    assert '.reviewer_id == $id' in done["run"]
+    assert '(.verdict == "approve" or .verdict == "reject")' in done["run"]
+    assert '[ "$UPLOAD" = success ]' in done["run"]
+    assert job["outputs"]["done"] == "${{ steps.done.outputs.done }}"
+
+
+def test_inputs_reach_shell_only_through_env(jobs: dict) -> None:
+    for name, job in jobs.items():
         for step in job["steps"]:
             assert "${{" not in step.get("run", ""), f"{name}: {step.get('name')}"
             if "run" in step:
@@ -53,22 +109,26 @@ def test_inputs_reach_shell_only_through_env(workflow: dict) -> None:
 
 
 @pytest.mark.parametrize("job_name", ["prepare", "review", "record"])
-def test_every_job_validates_inputs_first(workflow: dict, job_name: str) -> None:
-    run = workflow["jobs"][job_name]["steps"][0]["run"]
+def test_every_job_validates_inputs_first(jobs: dict, job_name: str) -> None:
+    steps = jobs[job_name]["steps"]
+    names = [s.get("name") for s in steps]
+    # prepare may wait first (a retry's delay); nothing else comes before.
+    assert names.index("Validate inputs") <= (1 if job_name == "prepare" else 0)
+    run = steps[names.index("Validate inputs")]["run"]
     for check in ('"$PR_NUMBER" =~ ^[0-9]+$', '"$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$',
                   '"$BASE_SHA" =~ ^[0-9a-f]{40}$', '"$BRANCH_SHA" =~ ^[0-9a-f]{40}$'):
         assert check in run, (job_name, check)
 
 
 @pytest.mark.parametrize("job_name", ["prepare", "record"])
-def test_branch_must_match_the_kind(workflow: dict, job_name: str) -> None:
-    run = workflow["jobs"][job_name]["steps"][0]["run"]
+def test_branch_must_match_the_kind(jobs: dict, job_name: str) -> None:
+    run = next(s for s in jobs[job_name]["steps"] if s.get("name") == "Validate inputs")["run"]
     assert '[ "$BRANCH" = "claude/cherry-pick-pr-$PR_NUMBER" ]' in run
     assert '[ "$KIND" = sync ] && [ "$PR_NUMBER" = 0 ] && [ "$BRANCH" = if/staging ]' in run
 
 
-def test_prepare_holds_no_secrets(workflow: dict) -> None:
-    job = workflow["jobs"]["prepare"]
+def test_prepare_holds_no_secrets(workflow: dict, reviewer: dict) -> None:
+    job = reviewer["jobs"]["prepare"]
     assert job["permissions"] == {"contents": "read"}
     assert "environment" not in job
     text = yaml.safe_dump(job)
@@ -92,14 +152,13 @@ def test_prepare_holds_no_secrets(workflow: dict) -> None:
     assert job["outputs"]["novel_sha256"] == "${{ steps.input.outputs.novel_sha256 }}"
     record = workflow["jobs"]["record"]
     decide = _step(record, "Apply the rules")
-    assert decide["env"]["NOVEL_SHA256"] == "${{ needs.prepare.outputs.novel_sha256 }}"
-    assert '--novel-sha256 "$NOVEL_SHA256"' in decide["run"]
+    assert "novel_sha256: ($t.outputs.novel_sha256" in decide["run"]
     upload = next(s for s in job["steps"] if "upload-artifact" in s.get("uses", ""))
-    assert upload["with"]["name"] == "resolution-review-input"
+    assert upload["with"]["name"] == "resolution-review-input-${{ inputs.try }}"
 
 
-def test_reviewer_is_locked_down(workflow: dict) -> None:
-    job = workflow["jobs"]["review"]
+def test_reviewer_is_locked_down(reviewer: dict) -> None:
+    job = reviewer["jobs"]["review"]
     assert job["environment"] == "claude"
     assert job["permissions"] == {"contents": "read"}
     text = yaml.safe_dump(job)
@@ -110,7 +169,9 @@ def test_reviewer_is_locked_down(workflow: dict) -> None:
         "/.if-fork/config.yaml", "/.if-fork/prompts/",
     ]
     download = next(s for s in job["steps"] if "download-artifact" in s.get("uses", ""))
-    assert download["with"] == {"name": "resolution-review-input", "path": "review-input"}
+    assert download["with"] == {
+        "name": "resolution-review-input-${{ inputs.try }}", "path": "review-input"
+    }
     claude = next(s for s in job["steps"] if "claude-code-action" in s.get("uses", ""))
     w = claude["with"]
     assert w["allowed_bots"] == "initial-force-wpf-bot"
@@ -142,24 +203,36 @@ def test_reviewer_is_locked_down(workflow: dict) -> None:
     assert hash_step["if"] == "always()" and "sha256sum" in hash_step["run"]
     assert job["outputs"]["verdict_sha256"] == "${{ steps.verdict.outputs.sha256 }}"
     assert job["outputs"]["upload"] == "${{ steps.upload.outcome }}"
+    upload = _step(job, "upload")
+    assert upload["with"]["name"] == "resolution-verdict-${{ inputs.try }}.json"
 
 
 def test_record_checks_origin_and_records_before_publishing(workflow: dict) -> None:
     job = workflow["jobs"]["record"]
     assert job["environment"] == "bot-credentials"
-    assert job["if"] == "always()"
+    # A cancelled run is no verdict and must not use up an attempt.
+    assert job["if"] == "${{ !cancelled() }}"
+    assert job["needs"] == ["try-1", "try-2", "try-3"]
     names = [s.get("name") for s in job["steps"]]
-    verdict = _step(job, "Download the verdict")
-    assert verdict["with"]["name"] == "resolution-verdict.json"
+    for n in (1, 2, 3):
+        verdict = _step(job, f"Download try {n}'s verdict")
+        assert verdict["with"]["name"] == f"resolution-verdict-{n}.json"
+        assert verdict["continue-on-error"] is True
+        review_input = _step(job, f"Download try {n}'s review input")
+        assert review_input["with"]["name"] == f"resolution-review-input-{n}"
     scan = _step(job, "Compute the diff to scan")["run"]
     assert '"$BRANCH_SHA $PARENTS"' in scan
     # A sync scans what the resolution wrote: result against git's own merge.
     assert 'git merge-tree --write-tree "$BASE_SHA" "$UPSTREAM_SHA"' in scan
     assert 'git diff --no-color --no-ext-diff --no-renames "$AUTO" "$BRANCH_SHA"' in scan
     decide = _step(job, "decide")
-    assert decide["env"]["VERDICT_SHA256"] == "${{ needs.review.outputs.verdict_sha256 }}"
-    assert decide["env"]["UPLOAD"] == "${{ needs.review.outputs.upload }}"
+    # Results and hashes come from the tries' job outputs.
+    assert decide["env"]["TRIES_JSON"] == "${{ toJSON(needs) }}"
     run = decide["run"]
+    assert '--tries "$RUNNER_TEMP/tries.json"' in run
+    for field in ("result: ($t.result", "verdict_sha256: ($t.outputs.verdict_sha256",
+                  "upload: ($t.outputs.upload"):
+        assert field in run, field
     assert "python tools/record-resolution-verdict.py" in run
     assert "--ledger .if-fork/patch-ledger.jsonl" in run
     assert 'SCAN_ARGS=(--added-only)' in run

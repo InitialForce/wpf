@@ -22,7 +22,18 @@ of these hold:
     matches the SHA-256 that job recorded as a job output, and its
     novel_count is at most conflict_resolution.max_novel_lines (default 50).
     Above the cap the resolution is rejected whatever the reviewer says.
-Anything else, including a missing or malformed verdict, is a rejection.
+Anything else is a rejection.
+
+Review tries: resolution-review.yml runs up to three review tries for the
+same branch commit (prepare and review, with a delay before each retry) and
+stops at the first try that leaves a verdict. --tries lists them. A try that
+ran but left no valid verdict (the job failed, no verdict file, a failed
+origin check, or a verdict that is neither approve nor reject) is recorded as
+resolution_review_error. That is not a rejection and does not use up an
+attempt. The first valid try decides. When no try left a valid verdict, the
+resolution is rejected (resolution_rejected, which counts as an attempt).
+That is after three tries, or fewer when a try's own check said it left a
+verdict but the checks here disagree.
 
 The decision is bound to the exact commit that was reviewed: the ledger event
 (resolution_approved or resolution_rejected) carries pr_number and head_sha
@@ -40,12 +51,16 @@ conflict_resolution.max_resolution_attempts, else 2) is "retry": the caller
 runs the resolver again from scratch. At the limit it is "give_up".
 
 Usage:
-  python tools/record-resolution-verdict.py --verdict resolution.json \\
-      --reviewer-id ID --verdict-sha256 HEX --upload success \\
-      --config .if-fork/config.yaml --final-diff final.diff \\
+  python tools/record-resolution-verdict.py --tries tries.json \\
+      --reviewer-id ID --config .if-fork/config.yaml --final-diff final.diff \\
       --pr-number N --head-sha SHA --branch-sha SHA --branch NAME \\
-      --novel-lines report.json --novel-sha256 HEX \\
       --output decision.json --events-out events.jsonl
+
+tries.json is a list of {"try": n, "result": job result, "verdict": path,
+"verdict_sha256": hex, "upload": outcome, "novel_lines": path,
+"novel_sha256": hex}. A try whose result is "skipped" did not run. Instead
+of --tries, one try can be given with --verdict, --verdict-sha256, --upload,
+--novel-lines and --novel-sha256.
 
 Exit codes: 0 approved, 1 rejected, 3 bad arguments or unreadable policy input.
 """
@@ -58,6 +73,7 @@ import importlib.util
 import json
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +88,19 @@ VALID_VERDICTS = frozenset(["approve", "reject"])
 KINDS = ("cherry-pick", "sync")
 DEFAULT_MAX_ATTEMPTS = 2
 DEFAULT_MAX_NOVEL_LINES = 50
+
+
+@dataclass(frozen=True)
+class Try:
+    """One review try: its job result and the files and hashes it left."""
+
+    number: int
+    result: str
+    verdict: Path
+    verdict_sha256: str
+    upload: str
+    novel_lines: Path
+    novel_sha256: str
 
 
 def die(message: str) -> None:
@@ -209,18 +238,91 @@ def next_action(rejected: bool, attempt: int, max_attempts: int) -> str:
     return "retry" if attempt < max_attempts else "give_up"
 
 
+def first_valid_try(
+    tries: list[Try], reviewer_id: str
+) -> tuple[Try | None, dict[str, Any] | None, list[tuple[Try, list[str]]]]:
+    """Return the first try with a valid verdict, and every invalid try before it.
+
+    Valid means the origin checks pass and the verdict is approve or reject.
+    Skipped tries did not run and are ignored.
+    """
+    errors: list[tuple[Try, list[str]]] = []
+    for t in tries:
+        if t.result == "skipped":
+            continue
+        verdict, reasons = load_verdict(t.verdict, reviewer_id, t.verdict_sha256, t.upload)
+        if verdict is not None and verdict.get("verdict") not in VALID_VERDICTS:
+            verdict, reasons = None, ["the verdict is neither approve nor reject"]
+        if verdict is None:
+            if t.result not in ("success", ""):
+                reasons = [f"the review try's jobs did not succeed ({t.result})", *reasons]
+            errors.append((t, reasons))
+            continue
+        return t, verdict, errors
+    return None, None, errors
+
+
 def decide(
     verdict: dict[str, Any] | None,
-    origin_reasons: list[str],
+    errors: list[tuple[Try, list[str]]],
     hits: list[dict[str, str]],
     threshold: float,
 ) -> list[str]:
     """Return every reason the resolution is not approved; empty means approved."""
-    reasons = list(origin_reasons)
-    if verdict is not None:
+    reasons: list[str] = []
+    if verdict is None:
+        for _, why in errors:
+            reasons += why
+        reasons.append(f"no valid review verdict in {len(errors)} tries")
+    else:
         reasons += verdict_problems(verdict, threshold)
     reasons += [f"hard-fail pattern in the final diff: {hit['pattern']}" for hit in hits]
     return reasons
+
+
+def build_review_error(args: argparse.Namespace, t: Try, reasons: list[str]) -> dict[str, Any]:
+    """The resolution_review_error event for one try that left no valid verdict."""
+    details: dict[str, Any] = {
+        "kind": args.kind,
+        "branch": args.branch,
+        "branch_sha": args.branch_sha,
+        "reviewer_id": args.reviewer_id,
+        "try": t.number,
+        "reasons": reasons,
+    }
+    if args.kind == "sync":
+        details["upstream_sha"] = args.head_sha
+    if args.run_url:
+        details["run_url"] = args.run_url
+    return {
+        "event": "resolution_review_error",
+        "pr_number": args.pr_number,
+        "head_sha": args.head_sha,
+        "details": details,
+    }
+
+
+def load_tries(args: argparse.Namespace) -> list[Try]:
+    """Read --tries, or build the single try from the per-try arguments."""
+    if args.tries is None:
+        if args.verdict is None or args.novel_lines is None:
+            die("give --tries, or --verdict and --novel-lines")
+        return [Try(1, "success", args.verdict, args.verdict_sha256, args.upload,
+                    args.novel_lines, args.novel_sha256)]
+    try:
+        raw: Any = json.loads(args.tries.read_text(encoding="utf-8"))
+        if not isinstance(raw, list) or not raw:
+            raise ValueError("not a non-empty list")
+        tries = [
+            Try(int(item["try"]), str(item["result"]), Path(str(item["verdict"])),
+                str(item["verdict_sha256"]), str(item["upload"]),
+                Path(str(item["novel_lines"])), str(item["novel_sha256"]))
+            for item in raw
+        ]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        die(f"cannot read --tries: {exc}")
+        raise  # unreachable
+    return tries
 
 
 def build_event(
@@ -230,6 +332,8 @@ def build_event(
     hits: list[dict[str, str]],
     novel: dict[str, Any] | None,
     attempt: int,
+    review_try: int | None,
+    review_errors: int,
 ) -> dict[str, Any]:
     details: dict[str, Any] = {
         "kind": args.kind,
@@ -237,6 +341,8 @@ def build_event(
         "branch_sha": args.branch_sha,
         "reviewer_id": args.reviewer_id,
         "attempt": attempt,
+        "review_try": review_try,
+        "review_errors": review_errors,
         "reasons": reasons,
     }
     if args.kind == "sync":
@@ -275,7 +381,9 @@ class _Parser(argparse.ArgumentParser):
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = _Parser(description=__doc__.splitlines()[0])
     parser.add_argument("--kind", choices=KINDS, default="cherry-pick")
-    parser.add_argument("--verdict", type=Path, required=True)
+    parser.add_argument("--tries", type=Path,
+                        help="JSON list of review tries (see the module docstring)")
+    parser.add_argument("--verdict", type=Path)
     parser.add_argument("--reviewer-id", required=True)
     parser.add_argument("--verdict-sha256", default="")
     parser.add_argument("--upload", default="")
@@ -283,7 +391,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--final-diff", type=Path, required=True)
     parser.add_argument("--added-only", action="store_true",
                         help="Scan only added lines of --final-diff (sync)")
-    parser.add_argument("--novel-lines", type=Path, required=True)
+    parser.add_argument("--novel-lines", type=Path)
     parser.add_argument("--novel-sha256", default="",
                         help="SHA-256 of --novel-lines, from the prepare job's output")
     parser.add_argument("--max-novel-lines", type=int)
@@ -332,17 +440,24 @@ def main(argv: list[str] | None = None) -> int:
     if not diff_text.strip():
         die("final diff is empty")
 
-    novel, novel_reasons = load_novel(args.novel_lines, args.novel_sha256)
-    if novel is not None:
-        novel_reasons = novel_cap_problems(novel, cap)
+    tries = load_tries(args)
+    chosen, verdict, errors = first_valid_try(tries, args.reviewer_id)
+    novel: dict[str, Any] | None = None
+    novel_reasons: list[str] = []
+    if chosen is not None:
+        # The novel-lines report of the same try's prepare job.
+        novel, novel_reasons = load_novel(chosen.novel_lines, chosen.novel_sha256)
+        if novel is not None:
+            novel_reasons = novel_cap_problems(novel, cap)
 
-    verdict, origin_reasons = load_verdict(
-        args.verdict, args.reviewer_id, args.verdict_sha256, args.upload
-    )
     hits = hard_fail_hits(diff_text, patterns, added_only=args.added_only)
-    reasons = decide(verdict, origin_reasons, hits, threshold) + novel_reasons
+    reasons = decide(verdict, errors, hits, threshold) + novel_reasons
     attempt = prior + 1
-    event = build_event(args, verdict, reasons, hits, novel, attempt)
+    events = [build_review_error(args, t, why) for t, why in errors]
+    events.append(build_event(
+        args, verdict, reasons, hits, novel, attempt,
+        chosen.number if chosen else None, len(errors),
+    ))
 
     decision = {
         "decision": "rejected" if reasons else "approved",
@@ -353,11 +468,15 @@ def main(argv: list[str] | None = None) -> int:
         "pr_number": args.pr_number,
         "head_sha": args.head_sha,
         "branch_sha": args.branch_sha,
+        "review_try": chosen.number if chosen else None,
+        "review_errors": len(errors),
         "reasons": reasons,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(decision, indent=2) + "\n", encoding="utf-8")
-    args.events_out.write_text(json.dumps(event, sort_keys=True) + "\n", encoding="utf-8")
+    args.events_out.write_text(
+        "".join(json.dumps(e, sort_keys=True) + "\n" for e in events), encoding="utf-8"
+    )
     print(json.dumps(decision, indent=2))
     return EXIT_REJECTED if reasons else EXIT_APPROVED
 

@@ -6,30 +6,20 @@
 # Conflict-Resolved-By: claude.
 #
 # Jobs:
-#   prepare  no secrets, contents:read. Checks the pushed commit's parents and
-#            pins what the reviewer sees in the resolution-review-input
-#            artifact: the upstream side's diff, the branch diff
-#            BASE_SHA..BRANCH_SHA, the base, upstream and final version of
-#            each changed file, and the novel-lines report
-#            (tools/novel-lines.py).
-#              cherry-pick: the upstream side is the PR diff the two
-#                reviewers approved (merge base to the approved head, and
-#                refs/pull/N/head must still equal it).
-#              sync: the upstream side is release/10.0 at UPSTREAM_SHA
-#                against its merge base with BASE_SHA.
-#   review   Claude Fable (claude_models.resolution_review) with the
-#            pr-review.yml reviewer limits: the claude environment,
-#            contents:read, a sparse checkout of the config and prompts only,
-#            trusted settings only, Read on the input and the config, Write on
-#            its verdict file only, no shell or web tools. It hashes its
-#            verdict as a job output.
-#   record   trusted (bot-credentials, if/main's tools). Checks the verdict's
-#            origin, computes the diff to scan itself, applies the code rules
-#            (including the conflict_resolution.max_novel_lines cap on the
-#            novel-lines report, checked against prepare's hash) and the
-#            attempt limit (tools/record-resolution-verdict.py) and
-#            records resolution_approved or resolution_rejected for the exact
-#            branch commit. A missing verdict is a rejection.
+#   try-1, try-2, try-3  review tries (resolution-reviewer.yml: prepare with
+#            no secrets, then the Fable review with the pr-review.yml
+#            reviewer limits). try-2 and try-3 run only when the try before
+#            left no verdict, after 120 and 600 seconds. So the same branch
+#            commit gets at most three tries.
+#   record   trusted (bot-credentials, if/main's tools). Checks each try's
+#            verdict and novel-lines report against that try's job-output
+#            hashes, computes the diff to scan itself, applies the code rules
+#            (including the conflict_resolution.max_novel_lines cap) and the
+#            attempt limit (tools/record-resolution-verdict.py). It records
+#            resolution_review_error for each try that left no valid verdict
+#            (not an attempt), then resolution_approved or resolution_rejected
+#            for the exact branch commit. No valid verdict in any try is a
+#            rejection.
 #
 # Outputs: decision (approved | rejected), next_action (approved | retry |
 # give_up), attempt, reason. The caller opens the PR on approved, starts a
@@ -92,285 +82,68 @@ env:
 
 jobs:
   # -------------------------------------------------------------------------
-  # prepare: no secrets. Pin the review input.
+  # try-1..try-3: one review try each (resolution-reviewer.yml). A retry
+  # runs only when the try before left no verdict.
   # -------------------------------------------------------------------------
-  prepare:
-    name: Write the resolution review input
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    # record checks the novel-lines report against this hash (a job output,
-    # which no other job can set) before it applies the novel-lines cap.
-    outputs:
-      novel_sha256: ${{ steps.input.outputs.novel_sha256 }}
+  try-1:
+    name: Review try 1
+    uses: ./.github/workflows/resolution-reviewer.yml
+    secrets: inherit
+    with:
+      kind: ${{ inputs.kind }}
+      pr_number: ${{ inputs.pr_number }}
+      upstream_sha: ${{ inputs.upstream_sha }}
+      base_sha: ${{ inputs.base_sha }}
+      branch_sha: ${{ inputs.branch_sha }}
+      branch: ${{ inputs.branch }}
+      conflict_files: ${{ inputs.conflict_files }}
+      try: "1"
+      delay_seconds: "0"
 
-    steps:
-      - name: Validate inputs
-        run: |
-          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] && [[ "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]] \
-            && [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] && [[ "$BRANCH_SHA" =~ ^[0-9a-f]{40}$ ]] \
-            && { { [ "$KIND" = cherry-pick ] && [ "$BRANCH" = "claude/cherry-pick-pr-$PR_NUMBER" ]; } \
-                 || { [ "$KIND" = sync ] && [ "$PR_NUMBER" = 0 ] && [ "$BRANCH" = if/staging ]; }; } \
-            || { echo "::error::Invalid kind, pr_number, SHAs or branch"; exit 1; }
+  try-2:
+    name: Review try 2
+    needs: try-1
+    if: ${{ !cancelled() && needs.try-1.outputs.done != 'true' }}
+    uses: ./.github/workflows/resolution-reviewer.yml
+    secrets: inherit
+    with:
+      kind: ${{ inputs.kind }}
+      pr_number: ${{ inputs.pr_number }}
+      upstream_sha: ${{ inputs.upstream_sha }}
+      base_sha: ${{ inputs.base_sha }}
+      branch_sha: ${{ inputs.branch_sha }}
+      branch: ${{ inputs.branch }}
+      conflict_files: ${{ inputs.conflict_files }}
+      try: "2"
+      delay_seconds: "120"
 
-      - name: Check out if/main (trusted tools)
-        uses: actions/checkout@v4
-        with:
-          ref: if/main
-          path: trusted
-          persist-credentials: false
-
-      - name: Check out the pushed branch commit
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.branch_sha }}
-          path: work
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Write the review input
-        id: input
-        working-directory: work
-        env:
-          GH_TOKEN: ${{ github.token }}
-          OUT: ${{ runner.temp }}/resolution-review-input
-          UP: ${{ runner.temp }}/upstream.git
-          TRUSTED: ${{ github.workspace }}/trusted
-        run: |
-          set -euo pipefail
-          mkdir -p "$OUT/base" "$OUT/upstream-head" "$OUT/final"
-
-          # The reviewed commit must be the pushed one: one commit on the
-          # pinned if/main commit, or for a sync the merge of it and upstream.
-          [ "$(git rev-parse HEAD)" = "$BRANCH_SHA" ] \
-            || { echo "::error::Checked-out commit is not $BRANCH_SHA"; exit 1; }
-          if [ "$KIND" = sync ]; then PARENTS="$BASE_SHA $UPSTREAM_SHA"; else PARENTS="$BASE_SHA"; fi
-          [ "$(git rev-list --parents -n 1 "$BRANCH_SHA")" = "$BRANCH_SHA $PARENTS" ] \
-            || { echo "::error::$BRANCH_SHA does not have the parents $PARENTS"; exit 1; }
-
-          set -f
-          for f in $CONFLICT_FILES; do
-            [[ "$f" =~ ^[A-Za-z0-9._+-][A-Za-z0-9._/+-]*$ ]] && [[ "/$f/" != */../* ]] \
-              || { echo "::error::Unexpected conflicted path"; exit 1; }
-            echo "$f" >> "$OUT/conflicts.txt"
-          done
-          set +f
-          [ -s "$OUT/conflicts.txt" ] || { echo "::error::No conflicted paths recorded"; exit 1; }
-
-          if [ "$KIND" = cherry-pick ]; then
-            # The diff the reviewers approved, pinned as pr-review.yml pins
-            # it: refs/pull/N/head must still be the approved head.
-            gh api "repos/dotnet/wpf/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"
-            UP_BASE=$(jq -r .base.sha "$RUNNER_TEMP/pr.json")
-            [[ "$UP_BASE" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Upstream PR has no usable base SHA"; exit 1; }
-            git clone --quiet --bare --filter=blob:none --no-tags --single-branch \
-              --branch main https://github.com/dotnet/wpf.git "$UP"
-            git --git-dir="$UP" fetch --quiet --no-tags origin "+refs/pull/$PR_NUMBER/head:refs/pr/head"
-            git --git-dir="$UP" cat-file -e "$UP_BASE^{commit}" 2>/dev/null \
-              || git --git-dir="$UP" fetch --quiet --no-tags origin "$UP_BASE"
-            FETCHED=$(git --git-dir="$UP" rev-parse refs/pr/head)
-            [ "$FETCHED" = "$UPSTREAM_SHA" ] \
-              || { echo "::error::Upstream PR head is $FETCHED, not the approved $UPSTREAM_SHA"; exit 1; }
-            MERGE_BASE=$(git --git-dir="$UP" merge-base "$UP_BASE" "$UPSTREAM_SHA")
-            UPGIT="$UP"
-            TITLE=$(jq -r .title "$RUNNER_TEMP/pr.json")
-          else
-            # The merge commit brings upstream's history, so the work clone
-            # has UPSTREAM_SHA and its merge base with if/main.
-            MERGE_BASE=$(git merge-base "$BASE_SHA" "$UPSTREAM_SHA")
-            UPGIT=.git
-            TITLE="upstream release/10.0 at $UPSTREAM_SHA"
-          fi
-          git --git-dir="$UPGIT" diff --no-color --no-ext-diff --no-renames \
-            "$MERGE_BASE" "$UPSTREAM_SHA" > "$OUT/upstream.diff"
-
-          git diff --no-color --no-ext-diff --no-renames "$BASE_SHA" "$BRANCH_SHA" > "$OUT/final.diff"
-          git diff --name-only --no-renames -z "$BASE_SHA" "$BRANCH_SHA" > "$RUNNER_TEMP/files.z"
-          if [ "$(tr -dc '\n' < "$RUNNER_TEMP/files.z" | wc -c)" -gt 0 ]; then
-            echo "::error::A changed file name contains a newline."
-            exit 1
-          fi
-          tr '\0' '\n' < "$RUNNER_TEMP/files.z" > "$OUT/files.txt"
-          [ -s "$OUT/final.diff" ] || { echo "::error::Empty branch diff"; exit 1; }
-
-          # Three versions of each changed file, 1 MB max each. A file that is
-          # not copied cannot excuse a novel line.
-          copy() { # <git dir> <commit> <path> <dest root>
-            git --git-dir="$1" cat-file -e "$2:$3" 2>/dev/null || return 0
-            [ "$(git --git-dir="$1" cat-file -s "$2:$3")" -le 1048576 ] || return 0
-            mkdir -p "$4/$(dirname -- "$3")"
-            git --git-dir="$1" show "$2:$3" > "$4/$3"
-          }
-          while IFS= read -r -d '' path; do
-            copy .git "$BASE_SHA" "$path" "$OUT/base"
-            copy .git "$BRANCH_SHA" "$path" "$OUT/final"
-            copy "$UPGIT" "$UPSTREAM_SHA" "$path" "$OUT/upstream-head"
-          done < "$RUNNER_TEMP/files.z"
-
-          python3 "$TRUSTED/tools/novel-lines.py" \
-            --final-diff "$OUT/final.diff" --upstream-diff "$OUT/upstream.diff" \
-            --base-dir "$OUT/base" --upstream-head-dir "$OUT/upstream-head" \
-            --output "$OUT/novel-lines.json"
-          echo "novel_sha256=$(sha256sum "$OUT/novel-lines.json" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-
-          jq -n --slurpfile novel "$OUT/novel-lines.json" --arg kind "$KIND" \
-            --argjson pr "$PR_NUMBER" --arg title "$TITLE" --arg up "$UPSTREAM_SHA" \
-            --arg base "$BASE_SHA" --arg branch "$BRANCH_SHA" --arg mb "$MERGE_BASE" \
-            --argjson files "$(grep -c . "$OUT/files.txt")" \
-            --argjson conflicts "$(grep -c . "$OUT/conflicts.txt")" \
-            '{kind: $kind, pr_number: $pr, title: $title, upstream_sha: $up,
-              upstream_merge_base: $mb, base_sha: $base, branch_sha: $branch,
-              files_changed: $files, conflicted_files: $conflicts,
-              novel_count: $novel[0].novel_count, dropped_count: $novel[0].dropped_count}' \
-            > "$OUT/meta.json"
-          cat "$OUT/meta.json"
-
-      - name: Upload review input
-        uses: actions/upload-artifact@v4
-        with:
-          name: resolution-review-input
-          path: ${{ runner.temp }}/resolution-review-input
-          retention-days: 30
-          if-no-files-found: error
+  try-3:
+    name: Review try 3
+    needs: try-2
+    if: ${{ !cancelled() && needs.try-2.outputs.done != 'true' }}
+    uses: ./.github/workflows/resolution-reviewer.yml
+    secrets: inherit
+    with:
+      kind: ${{ inputs.kind }}
+      pr_number: ${{ inputs.pr_number }}
+      upstream_sha: ${{ inputs.upstream_sha }}
+      base_sha: ${{ inputs.base_sha }}
+      branch_sha: ${{ inputs.branch_sha }}
+      branch: ${{ inputs.branch }}
+      conflict_files: ${{ inputs.conflict_files }}
+      try: "3"
+      delay_seconds: "600"
 
   # -------------------------------------------------------------------------
-  # review: Claude Fable, with the pr-review.yml reviewer limits.
-  # -------------------------------------------------------------------------
-  review:
-    name: Review the conflict resolution (Fable)
-    needs: prepare
-    runs-on: ubuntu-latest
-    environment: claude
-    permissions:
-      contents: read
-    # record checks the verdict against these.
-    outputs:
-      verdict_sha256: ${{ steps.verdict.outputs.sha256 }}
-      upload: ${{ steps.upload.outcome }}
-
-    steps:
-      - name: Validate inputs
-        run: |
-          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] && [[ "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]] \
-            && [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] && [[ "$BRANCH_SHA" =~ ^[0-9a-f]{40}$ ]] \
-            && { [ "$KIND" = cherry-pick ] || [ "$KIND" = sync ]; } \
-            || { echo "::error::Invalid kind, pr_number or SHAs"; exit 1; }
-
-      # Only the policy file and the prompts. The working directory holds
-      # nothing else from the repository: no .claude/, .mcp.json or CLAUDE.md.
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          sparse-checkout-cone-mode: false
-          sparse-checkout: |
-            /.if-fork/config.yaml
-            /.if-fork/prompts/
-
-      - name: Download pinned review input
-        uses: actions/download-artifact@v4
-        with:
-          name: resolution-review-input
-          path: review-input
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Read review settings from config.yaml
-        id: settings
-        run: |
-          pip install --quiet pyyaml
-          python - <<'PY' >> "$GITHUB_OUTPUT"
-          import yaml
-          c = yaml.safe_load(open(".if-fork/config.yaml"))
-          print(f"model={c['claude_models']['resolution_review']}")
-          print(f"reviewer_id={c['claude_models']['resolution_review']}-resolution-review")
-          print(f"max_turns={c['claude_limits']['max_turns_resolution_review']}")
-          PY
-
-      - name: Load resolution-review prompt
-        id: load-prompt
-        env:
-          REVIEWER_ID: ${{ steps.settings.outputs.reviewer_id }}
-        run: |
-          mkdir -p review-output
-          if [ "$KIND" = sync ]; then
-            UPSTREAM="upstream dotnet/wpf release/10.0 at $UPSTREAM_SHA (nightly sync merge)"
-          else
-            UPSTREAM="https://github.com/dotnet/wpf/pull/$PR_NUMBER, approved head $UPSTREAM_SHA (cherry-pick)"
-          fi
-          {
-            echo 'prompt<<__EOF_PROMPT__'
-            cat .if-fork/prompts/resolution-review.md
-            echo
-            echo '## Run inputs'
-            echo
-            echo "- Kind: $KIND"
-            echo "- Upstream side: $UPSTREAM"
-            echo "- BASE_SHA (pinned if/main): $BASE_SHA"
-            echo "- BRANCH_SHA (commit under review): $BRANCH_SHA"
-            echo "- Reviewer ID: $REVIEWER_ID"
-            echo "- Verdict file: review-output/resolution.json"
-            echo '__EOF_PROMPT__'
-          } >> "$GITHUB_OUTPUT"
-
-      # Trusted settings only, as in pr-review.yml: the user settings the
-      # action writes (hooks off), no project settings and no MCP servers but
-      # the action's own. A double slash is an absolute path in a rule.
-      # Claude Code checks Write against the Edit rules.
-      - name: Review the resolution
-        id: review
-        uses: anthropics/claude-code-action@v1
-        with:
-          allowed_bots: initial-force-wpf-bot
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: ${{ steps.load-prompt.outputs.prompt }}
-          settings: '{"disableAllHooks": true}'
-          claude_args: >-
-            --setting-sources user
-            --strict-mcp-config
-            --max-turns ${{ steps.settings.outputs.max_turns }}
-            --model ${{ steps.settings.outputs.model }}
-            --allowedTools "Read(./review-input/**),Read(./.if-fork/config.yaml),Edit(./review-output/resolution.json)"
-            --disallowedTools "Bash,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task,Glob,Grep,Read(//proc/**),Read(//home/runner/work/_temp/**),Edit(//home/runner/work/_temp/**)"
-          github_token: ${{ github.token }}
-
-      # The hash goes to record as a job output, which no other job can set,
-      # so a verdict file swapped in by another job is caught.
-      - name: Hash the verdict
-        id: verdict
-        if: always()
-        run: |
-          F=review-output/resolution.json
-          if [ -f "$F" ] && [ ! -L "$F" ]; then
-            echo "sha256=$(sha256sum "$F" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Upload the verdict
-        id: upload
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: resolution-verdict.json
-          path: review-output/resolution.json
-          retention-days: 30
-          if-no-files-found: warn
-
-  # -------------------------------------------------------------------------
-  # record: trusted. Check the verdict, apply the rules and the attempt
-  # limit, record the outcome for the exact commit. Runs when the review
-  # failed too.
+  # record: trusted. Check the tries' verdicts, apply the rules and the
+  # attempt limit, record the outcome for the exact commit. Runs when a
+  # review try failed too, but not when the run was cancelled: a cancelled
+  # run is no verdict and must not use up an attempt.
   # -------------------------------------------------------------------------
   record:
     name: Record the resolution review
-    needs: [prepare, review]
-    if: always()
+    needs: [try-1, try-2, try-3]
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     environment: bot-credentials
     outputs:
@@ -416,22 +189,51 @@ jobs:
           gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
           gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
 
-      # Exact artifact name; a pattern could let another artifact stand in.
-      - name: Download the verdict
+      # Exact artifact names; a pattern could let another artifact stand in.
+      # A try that did not run or failed has none, which the tool reads as
+      # no verdict. The novel-lines report's counts go into the ledger and
+      # its novel_count is checked against conflict_resolution.max_novel_lines.
+      - name: Download try 1's verdict
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          name: resolution-verdict.json
-          path: ${{ runner.temp }}/verdict/
+          name: resolution-verdict-1.json
+          path: ${{ runner.temp }}/try-1/verdict/
 
-      # The novel-lines report: its novel_count is checked against
-      # conflict_resolution.max_novel_lines, and its counts go into the ledger.
-      - name: Download the review input
+      - name: Download try 1's review input
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          name: resolution-review-input
-          path: ${{ runner.temp }}/review-input/
+          name: resolution-review-input-1
+          path: ${{ runner.temp }}/try-1/input/
+
+      - name: Download try 2's verdict
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: resolution-verdict-2.json
+          path: ${{ runner.temp }}/try-2/verdict/
+
+      - name: Download try 2's review input
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: resolution-review-input-2
+          path: ${{ runner.temp }}/try-2/input/
+
+      - name: Download try 3's verdict
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: resolution-verdict-3.json
+          path: ${{ runner.temp }}/try-3/verdict/
+
+      - name: Download try 3's review input
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: resolution-review-input-3
+          path: ${{ runner.temp }}/try-3/input/
 
       # The hard-fail scan runs on a diff computed here from the pushed
       # commit, never on the artifact. A cherry-pick scans the whole branch
@@ -455,30 +257,33 @@ jobs:
 
       # Exits 0 approved, 1 rejected, 3 error. The reviewer ID comes from the
       # config here, not from the review job, so a review job that never ran
-      # cannot leave the check empty.
+      # cannot leave the check empty. The hashes and results come from the
+      # tries' job outputs, which no other job can set.
       - name: Apply the rules
         id: decide
         env:
-          VERDICT_SHA256: ${{ needs.review.outputs.verdict_sha256 }}
-          NOVEL_SHA256: ${{ needs.prepare.outputs.novel_sha256 }}
-          UPLOAD: ${{ needs.review.outputs.upload }}
+          TRIES_JSON: ${{ toJSON(needs) }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           MODEL=$(python3 -c "import yaml; print(yaml.safe_load(open('.if-fork/config.yaml'))['claude_models']['resolution_review'])")
           SCAN_ARGS=()
           if [ "$KIND" = sync ]; then SCAN_ARGS=(--added-only); fi
+          echo "$TRIES_JSON" | jq --arg tmp "$RUNNER_TEMP" '[range(1; 4) as $n | .["try-\($n)"] as $t | {
+              try: $n, result: ($t.result // ""),
+              verdict: "\($tmp)/try-\($n)/verdict/resolution.json",
+              verdict_sha256: ($t.outputs.verdict_sha256 // ""),
+              upload: ($t.outputs.upload // ""),
+              novel_lines: "\($tmp)/try-\($n)/input/novel-lines.json",
+              novel_sha256: ($t.outputs.novel_sha256 // "")}]' > "$RUNNER_TEMP/tries.json"
+          cat "$RUNNER_TEMP/tries.json"
           set +e
           python tools/record-resolution-verdict.py \
             --kind "$KIND" \
-            --verdict "$RUNNER_TEMP/verdict/resolution.json" \
+            --tries "$RUNNER_TEMP/tries.json" \
             --reviewer-id "$MODEL-resolution-review" \
-            --verdict-sha256 "$VERDICT_SHA256" \
-            --upload "$UPLOAD" \
             --config .if-fork/config.yaml \
             --final-diff "$RUNNER_TEMP/scan.diff" \
             "${SCAN_ARGS[@]}" \
-            --novel-lines "$RUNNER_TEMP/review-input/novel-lines.json" \
-            --novel-sha256 "$NOVEL_SHA256" \
             --ledger .if-fork/patch-ledger.jsonl \
             --pr-number "$PR_NUMBER" \
             --head-sha "$UPSTREAM_SHA" \

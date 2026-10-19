@@ -18,7 +18,7 @@ import yaml
 REPO_ROOT = Path(__file__).parent.parent
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 NAMES = [
-    "pr-ingestion.yml", "nightly-rebase.yml", "claude-on-failure.yml", "resolution-review.yml",
+    "pr-ingestion.yml", "nightly-rebase.yml", "claude-on-failure.yml", "resolution-reviewer.yml",
 ]
 
 

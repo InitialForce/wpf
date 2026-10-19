@@ -47,10 +47,14 @@ VALID_EVENTS: frozenset[str] = frozenset(
         # emitted just before a pr-ingestion-requested dispatch (pr-review on
         # approval, pr-discovery when it re-sends a stranded approval)
         "ingestion_requested",
-        # emitted by pr-ingestion's record-resolution-verdict job after the
-        # Fable review of a Claude conflict resolution; details.branch_sha is
-        # the exact commit reviewed (automerge-verify.sh reads it)
+        # emitted by resolution-review.yml (tools/record-resolution-verdict.py)
+        # after the Fable review of a Claude conflict resolution;
+        # details.branch_sha is the exact commit reviewed (automerge-verify.sh
+        # reads it)
         "resolution_approved",
         "resolution_rejected",
+        # emitted by the same job for each review try that left no valid
+        # verdict; not an outcome and not a resolution attempt
+        "resolution_review_error",
     ]
 )

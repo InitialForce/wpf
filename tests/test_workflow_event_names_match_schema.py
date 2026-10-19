@@ -140,6 +140,7 @@ _EMITTED_BY_TOOLS: dict[str, str] = {
     "ingestion_requested": "merge-verdicts.py",
     "resolution_approved": "record-resolution-verdict.py",  # pr-ingestion.yml
     "resolution_rejected": "record-resolution-verdict.py",
+    "resolution_review_error": "record-resolution-verdict.py",
 }
 
 
