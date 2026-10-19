@@ -136,7 +136,7 @@ review_hard_fail_patterns:
   - "\\bextern\\b"
   - "(?i)base64"
   - "(?i)https?://(?!github\\.com|microsoft\\.com|dotnet\\.microsoft\\.com)"
-  - "\\[SecurityCritical\\]\\s*$"     # removal will be detected as deletion of a line matching this
+  - "\\[SecurityCritical\\]\\s*$"     # added and removed lines are scanned, so dropping one is caught too
   - "\\[LinkDemand\\]"
   - "Demand\\(\\)"
   - "Process\\.Start"

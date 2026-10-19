@@ -239,7 +239,7 @@ def test_record_checks_origin_and_records_before_publishing(workflow: dict) -> N
         assert field in run, field
     assert "python tools/record-resolution-verdict.py" in run
     assert "--ledger .if-fork/patch-ledger.jsonl" in run
-    assert 'SCAN_ARGS=(--added-only)' in run
+    assert 'SCAN_ARGS=(--skip-conflict-markers)' in run
     assert '--branch-sha "$BRANCH_SHA"' in run and '--head-sha "$UPSTREAM_SHA"' in run
     assert names.index("Record in ledger") < names.index("Publish the decision")
     ledger = _step(job, "Record in ledger")["run"]

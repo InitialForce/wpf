@@ -314,13 +314,13 @@ def _novel_args(tmp_path: Path, count: int = 0) -> list[str]:
 def test_sync_is_recorded_with_pr_0_and_upstream_sha(tmp_path: Path) -> None:
     vpath = tmp_path / "resolution.json"
     vpath.write_text(json.dumps(_verdict()))
-    # Upstream code the resolution kept from release/10.0 shows up as a
-    # removed marker-region line; only added lines are scanned for a sync.
-    diff = CLEAN_DIFF + "-    unsafe { Upstream(); }\n"
+    # The conflict markers git wrote are removed by the resolution; they are
+    # not scanned (a marker label could hold anything).
+    diff = CLEAN_DIFF + "-<<<<<<< extern\n-=======\n->>>>>>> https://evil.example\n"
     (tmp_path / "final.diff").write_text(diff)
     out, events = tmp_path / "d.json", tmp_path / "e.jsonl"
     r = subprocess.run(
-        [sys.executable, str(TOOL), "--kind", "sync", "--added-only",
+        [sys.executable, str(TOOL), "--kind", "sync", "--skip-conflict-markers",
          "--verdict", str(vpath), "--reviewer-id", REVIEWER,
          "--verdict-sha256", hashlib.sha256(vpath.read_bytes()).hexdigest(),
          "--upload", "success", "--config", str(CONFIG),
@@ -342,7 +342,7 @@ def test_sync_added_line_with_hard_fail_is_rejected(tmp_path: Path) -> None:
     (tmp_path / "final.diff").write_text(CLEAN_DIFF + "+    unsafe { New(); }\n")
     out, events = tmp_path / "d.json", tmp_path / "e.jsonl"
     r = subprocess.run(
-        [sys.executable, str(TOOL), "--kind", "sync", "--added-only",
+        [sys.executable, str(TOOL), "--kind", "sync", "--skip-conflict-markers",
          "--verdict", str(vpath), "--reviewer-id", REVIEWER,
          "--verdict-sha256", hashlib.sha256(vpath.read_bytes()).hexdigest(),
          "--upload", "success", "--config", str(CONFIG),
@@ -492,3 +492,43 @@ def test_bad_tries_file_is_an_error(tmp_path: Path, text: str) -> None:
         capture_output=True, text=True,
     )
     assert r.returncode == 3
+
+
+def test_sync_dropping_a_fork_security_line_is_rejected(tmp_path: Path) -> None:
+    # Opus M3: a sync resolution that drops a fork-only [SecurityCritical]
+    # line from a conflict region shows only as a removal in AUTO..BRANCH.
+    vpath = tmp_path / "resolution.json"
+    vpath.write_text(json.dumps(_verdict()))
+    (tmp_path / "final.diff").write_text(
+        CLEAN_DIFF + "-<<<<<<< ours\n-    [SecurityCritical]\n-=======\n->>>>>>> theirs\n"
+    )
+    out, events = tmp_path / "d.json", tmp_path / "e.jsonl"
+    r = subprocess.run(
+        [sys.executable, str(TOOL), "--kind", "sync", "--skip-conflict-markers",
+         "--verdict", str(vpath), "--reviewer-id", REVIEWER,
+         "--verdict-sha256", hashlib.sha256(vpath.read_bytes()).hexdigest(),
+         "--upload", "success", "--config", str(CONFIG),
+         "--final-diff", str(tmp_path / "final.diff"),
+         "--pr-number", "0", "--head-sha", HEAD, "--branch-sha", BRANCH_SHA,
+         "--branch", "if/staging", "--output", str(out), "--events-out", str(events),
+         *_novel_args(tmp_path)],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 1, r.stderr
+    reasons = json.loads(out.read_text())["reasons"]
+    assert any("SecurityCritical" in x for x in reasons), reasons
+
+
+@pytest.mark.parametrize(
+    "line", ["<<<<<<< HEAD", "<<<<<<<", "||||||| base", "=======", ">>>>>>> upstream"]
+)
+def test_conflict_marker_lines_are_recognised(line: str) -> None:
+    import importlib.util as iu
+
+    spec = iu.spec_from_file_location("rrv", TOOL)
+    assert spec and spec.loader
+    mod = iu.module_from_spec(spec)
+    sys.modules["rrv"] = mod
+    spec.loader.exec_module(mod)
+    assert mod._CONFLICT_MARKER.match(line)
+    assert not mod._CONFLICT_MARKER.match("======= x")

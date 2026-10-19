@@ -15,9 +15,12 @@ of these hold:
   - no review_hard_fail_patterns entry matches a scanned line of --final-diff.
     For a cherry-pick that is every added and removed line of
     BASE_SHA..BRANCH_SHA (the upstream part was already scanned at review).
-    For a sync it is the added lines of the diff from git's automatic merge
-    (with conflict markers) to the result, which is what the resolution
-    itself wrote; the rest is upstream release/10.0 (--added-only).
+    For a sync it is the diff from git's automatic merge (with conflict
+    markers) to the result, which is what the resolution changed; the rest
+    is upstream release/10.0. Its added and removed lines are scanned, but
+    not removed conflict-marker lines (--skip-conflict-markers). So a
+    resolution that drops a fork [SecurityCritical] or Demand() line from a
+    conflict region is caught.
   - the novel-lines report from the prepare job (no secrets, no model)
     matches the SHA-256 that job recorded as a job output, and its
     novel_count is at most conflict_resolution.max_novel_lines (default 50).
@@ -163,19 +166,28 @@ def verdict_problems(verdict: dict[str, Any], threshold: float) -> list[str]:
     return problems
 
 
-def _added_lines(diff_text: str) -> list[str]:
-    return [
-        line[1:]
-        for line in diff_text.splitlines()
-        if line.startswith("+") and not line.startswith("+++")
-    ]
+# Lines git writes into a conflicted file: <<<<<<< ours, ||||||| base,
+# =======, >>>>>>> theirs. The resolution removes them, so they are not scanned.
+_CONFLICT_MARKER = re.compile(r"^(<{7}|\|{7}|>{7})( |$)|^={7}$")
+
+
+def _lines_to_scan(diff_text: str, skip_conflict_markers: bool) -> list[str]:
+    lines = _changed_lines(diff_text)
+    if not skip_conflict_markers:
+        return lines
+    removed_markers = {
+        line[1:] for line in diff_text.splitlines()
+        if line.startswith("-") and not line.startswith("---")
+        and _CONFLICT_MARKER.match(line[1:])
+    }
+    return [line for line in lines if line not in removed_markers]
 
 
 def hard_fail_hits(
-    diff_text: str, patterns: list[str], added_only: bool = False
+    diff_text: str, patterns: list[str], skip_conflict_markers: bool = False
 ) -> list[dict[str, str]]:
     """Return the first scanned line of the diff that each pattern matches."""
-    lines = _added_lines(diff_text) if added_only else _changed_lines(diff_text)
+    lines = _lines_to_scan(diff_text, skip_conflict_markers)
     hits: list[dict[str, str]] = []
     for pattern in patterns:
         regex = re.compile(pattern)
@@ -391,8 +403,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--upload", default="")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--final-diff", type=Path, required=True)
-    parser.add_argument("--added-only", action="store_true",
-                        help="Scan only added lines of --final-diff (sync)")
+    parser.add_argument("--skip-conflict-markers", action="store_true",
+                        help="Do not scan removed conflict-marker lines (sync)")
     parser.add_argument("--novel-lines", type=Path)
     parser.add_argument("--novel-sha256", default="",
                         help="SHA-256 of --novel-lines, from the prepare job's output")
@@ -452,7 +464,7 @@ def main(argv: list[str] | None = None) -> int:
         if novel is not None:
             novel_reasons = novel_cap_problems(novel, cap)
 
-    hits = hard_fail_hits(diff_text, patterns, added_only=args.added_only)
+    hits = hard_fail_hits(diff_text, patterns, skip_conflict_markers=args.skip_conflict_markers)
     reasons = decide(verdict, errors, hits, threshold) + novel_reasons
     attempt = prior + 1
     events = [build_review_error(args, t, why) for t, why in errors]

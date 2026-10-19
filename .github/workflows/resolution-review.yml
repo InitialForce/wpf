@@ -267,7 +267,7 @@ jobs:
         run: |
           MODEL=$(python3 -c "import yaml; print(yaml.safe_load(open('.if-fork/config.yaml'))['claude_models']['resolution_review'])")
           SCAN_ARGS=()
-          if [ "$KIND" = sync ]; then SCAN_ARGS=(--added-only); fi
+          if [ "$KIND" = sync ]; then SCAN_ARGS=(--skip-conflict-markers); fi
           echo "$TRIES_JSON" | jq --arg tmp "$RUNNER_TEMP" '[range(1; 4) as $n | .["try-\($n)"] as $t | {
               try: $n, result: ($t.result // ""),
               verdict: "\($tmp)/try-\($n)/verdict/resolution.json",
