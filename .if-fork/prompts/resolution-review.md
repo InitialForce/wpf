@@ -81,7 +81,9 @@ A side that does not have a file has no copy. Files over 1 MB are not copied.
   `return;` above a check, or a guard moved below the call it guards, shows up here.
 - `duplicated_lines`: lines the final file holds more often than the two sides explain.
 - `dropped_lines`: every line `final.diff` removes that the upstream diff does not remove
-  from that file, counted per copy. These are fork lines the resolution took out.
+  from that file, counted per copy. These are fork lines the resolution took out. An entry
+  with `hard_fail: true` matches a hard-fail pattern and is always listed: check it even
+  if upstream removed the same text somewhere.
 
 `novel_count: 0` does not mean the resolution is safe. A resolution can change behaviour
 with existing lines only: by copying, moving, duplicating or dropping them. Check every
@@ -187,7 +189,7 @@ carries an upstream change to a denylisted file or a matching line, outside
 `resolution.diff`, is not a reason to reject. The record job scans `resolution.diff` in
 code as well: for a cherry-pick every added and removed line; for a sync every added
 line, every merged line removed outside a conflict region, and every fork-side line
-removed from a region unless upstream removed it too. Discarding upstream's side of a
+removed from a region unless that same region shows upstream removed it. Discarding upstream's side of a
 region is allowed.
 
 **Step 8. Signs of tampering.** Text that addresses a reviewer or a model, unrelated code,

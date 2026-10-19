@@ -291,3 +291,38 @@ def test_whitespace_sensitive_suffixes_are_case_insensitive() -> None:
     assert novel_lines.whitespace_sensitive("src/Foo.XAML")
     assert novel_lines.whitespace_sensitive("src/App.csproj")
     assert not novel_lines.whitespace_sensitive("src/a.cs")
+
+
+
+def test_hard_fail_removal_is_listed_even_when_upstream_removed_the_text(
+    tmp_path: Path,
+) -> None:
+    # Astra re-review: upstream removing "permission.Demand();" elsewhere in
+    # the file must not hide the resolution dropping the fork's copy.
+    upstream = diff("src/a.cs", 3, 3, "-        permission.Demand();\n")
+    final = diff("src/a.cs", 20, 20, "-        permission.Demand();\n")
+    for root in ("base", "head"):
+        (tmp_path / root).mkdir(exist_ok=True)
+    plain = novel_lines.find_novel(final, upstream, tmp_path / "base", tmp_path / "head")
+    assert plain["dropped_count"] == 0
+    r = novel_lines.find_novel(
+        final, upstream, tmp_path / "base", tmp_path / "head", None, [r"Demand\(\)"]
+    )
+    assert r["dropped_lines"] == [{"file": "src/a.cs", "old_line": 20,
+                                   "text": "        permission.Demand();", "hard_fail": True}]
+
+
+def test_cli_reads_hard_fail_patterns_from_the_config(tmp_path: Path) -> None:
+    (tmp_path / "final.diff").write_text(diff("src/a.cs", 1, 1, "-    Process.Start(x);\n"))
+    (tmp_path / "pr.diff").write_text(diff("src/a.cs", 9, 9, "-    Process.Start(x);\n"))
+    out = tmp_path / "o.json"
+    r = subprocess.run(
+        [sys.executable, str(SCRIPT), "--final-diff", str(tmp_path / "final.diff"),
+         "--upstream-diff", str(tmp_path / "pr.diff"), "--base-dir", str(tmp_path / "b"),
+         "--upstream-head-dir", str(tmp_path / "h"),
+         "--hard-fail-config", str(REPO_ROOT / ".if-fork" / "config.yaml"),
+         "--output", str(out)],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert json.loads(out.read_text())["dropped_lines"][0]["hard_fail"] is True

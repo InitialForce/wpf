@@ -145,6 +145,10 @@ jobs:
         with:
           python-version: "3.12"
 
+      # novel-lines.py reads the hard-fail patterns from if/main's config.
+      - name: Install Python dependencies
+        run: pip install --quiet pyyaml
+
       - name: Write the review input
         id: input
         working-directory: work
@@ -233,7 +237,7 @@ jobs:
           python3 "$TRUSTED/tools/novel-lines.py" \
             --final-diff "$OUT/final.diff" --upstream-diff "$OUT/upstream.diff" \
             --base-dir "$OUT/base" --upstream-head-dir "$OUT/upstream-head" \
-            --final-dir "$OUT/final" \
+            --final-dir "$OUT/final" --hard-fail-config "$TRUSTED/.if-fork/config.yaml" \
             --output "$OUT/novel-lines.json"
           echo "novel_sha256=$(sha256sum "$OUT/novel-lines.json" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 

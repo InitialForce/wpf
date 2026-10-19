@@ -148,6 +148,7 @@ def test_prepare_holds_no_secrets(workflow: dict, reviewer: dict) -> None:
     assert 'git diff --no-color --no-ext-diff --no-renames "$BASE_SHA" "$BRANCH_SHA"' in run
     assert 'python3 "$TRUSTED/tools/novel-lines.py"' in run
     assert '--final-dir "$OUT/final"' in run
+    assert '--hard-fail-config "$TRUSTED/.if-fork/config.yaml"' in run
     # Astra 3: the reviewer gets the same resolution scope the record job scans.
     assert 'python3 "$TRUSTED/tools/resolution-scope.py" --kind "$KIND"' in run
     # record checks the report against this job output before the novel cap.
@@ -230,7 +231,6 @@ def test_record_checks_origin_and_records_before_publishing(workflow: dict) -> N
     assert '"$BRANCH_SHA $PARENTS"' in scan
     # A sync scans what the resolution wrote: result against git's own merge.
     assert 'python3 tools/resolution-scope.py --kind "$KIND"' in scan
-    assert 'cp "$RUNNER_TEMP/scope/resolution.diff" "$RUNNER_TEMP/scan.diff"' in scan
     decide = _step(job, "decide")
     # Results and hashes come from the tries' job outputs.
     assert decide["env"]["TRIES_JSON"] == "${{ toJSON(needs) }}"
@@ -241,9 +241,10 @@ def test_record_checks_origin_and_records_before_publishing(workflow: dict) -> N
         assert field in run, field
     assert "python tools/record-resolution-verdict.py" in run
     assert "--ledger .if-fork/patch-ledger.jsonl" in run
-    assert 'SCAN_ARGS=(--sync-upstream-diff "$RUNNER_TEMP/upstream.diff")' in run
+    assert "SCAN_ARGS" not in run  # the tool picks the sync scan from --kind
     scan_run = _step(job, "scan")["run"]
-    assert 'git diff --no-color --no-ext-diff --no-renames "$MB" "$UPSTREAM_SHA"' in scan_run
+    assert "--full-context" in scan_run
+    assert 'cp "$RUNNER_TEMP/scope/resolution-full.diff" "$RUNNER_TEMP/scan.diff"' in scan_run
     assert '--branch-sha "$BRANCH_SHA"' in run and '--head-sha "$UPSTREAM_SHA"' in run
     assert names.index("Record in ledger") < names.index("Publish the decision")
     ledger = _step(job, "Record in ledger")["run"]

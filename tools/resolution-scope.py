@@ -18,6 +18,13 @@ Usage:
       --branch-sha SHA --out DIR
 
 Writes DIR/resolution.diff and DIR/resolution-files.txt (one path per line).
+With --full-context it also writes DIR/resolution-full.diff: the same diff
+with whole files as context, which the record job's hard-fail scan needs to
+see every side of every conflict region.
+
+The merge uses diff3 conflict markers, so each region shows the base side
+between ||||||| and =======. The scan uses it to tell a fork line upstream
+removed in that region from one the fork added.
 Run it in a clone that has all three commits. Exit codes: 0 written,
 1 bad input or a git failure.
 """
@@ -46,7 +53,8 @@ def scope_start(kind: str, base: str, upstream: str) -> str:
     if kind == "cherry-pick":
         return base
     # Exit 1 means the merge has conflicts, which is the case here.
-    out = _git("merge-tree", "--write-tree", base, upstream, ok=(0, 1))
+    out = _git("-c", "merge.conflictStyle=diff3", "merge-tree", "--write-tree", base, upstream,
+               ok=(0, 1))
     auto = out.splitlines()[0] if out else ""
     if not SHA_RE.match(auto):
         raise RuntimeError("could not recreate git's own merge")
@@ -60,6 +68,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--upstream-sha", required=True)
     parser.add_argument("--branch-sha", required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--full-context", action="store_true",
+                        help="Also write resolution-full.diff with whole files as context")
     args = parser.parse_args(argv)
     for sha in (args.base_sha, args.upstream_sha, args.branch_sha):
         if not SHA_RE.match(sha):
@@ -69,12 +79,17 @@ def main(argv: list[str] | None = None) -> int:
         start = scope_start(args.kind, args.base_sha, args.upstream_sha)
         diff = _git(*DIFF, start, args.branch_sha)
         files = _git(*DIFF, "--name-only", start, args.branch_sha)
+        full = ""
+        if args.full_context:
+            full = _git(*DIFF, "--unified=100000000", start, args.branch_sha)
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "resolution.diff").write_text(diff, encoding="utf-8")
     (args.out / "resolution-files.txt").write_text(files, encoding="utf-8")
+    if args.full_context:
+        (args.out / "resolution-full.diff").write_text(full, encoding="utf-8")
     print(f"{len(files.splitlines())} files in the resolution scope")
     return 0
 

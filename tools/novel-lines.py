@@ -31,7 +31,10 @@ lists cover that, using the final file (<final dir>/<path>):
 
 The report also lists "dropped" lines: lines the final diff removes that the
 upstream diff does not remove for that path, counted, so one upstream
-removal excuses one removal of the same text. These lists are for the
+removal excuses one removal of the same text. A removed line matching a
+review_hard_fail_patterns entry (--hard-fail-config) is always listed, with
+"hard_fail": true: matching by text cannot show that upstream removed that
+particular copy. These lists are for the
 reviewer; only novel_count has a code cap. Zero novel lines does not mean a
 resolution is safe.
 
@@ -210,8 +213,10 @@ def find_novel(
     base_dir: Path,
     head_dir: Path,
     final_dir: Path | None = None,
+    hard_fail_patterns: list[str] | None = None,
 ) -> dict[str, object]:
     """Build the novel-lines report (see the module docstring)."""
+    hard_fail = [re.compile(p) for p in hard_fail_patterns or []]
     up_added: dict[str, Counter[str]] = {}
     up_removed: dict[str, Counter[str]] = {}
     for f in parse_diff(upstream_diff):
@@ -255,7 +260,13 @@ def find_novel(
             key = line_key(f.path, text)
             if not key:
                 continue
-            if excused[key] > 0:
+            # A removed line that matches a hard-fail pattern is always listed:
+            # an upstream removal of the same text elsewhere in the file says
+            # nothing about this copy.
+            if any(r.search(text) for r in hard_fail):
+                dropped.append({"file": f.path, "old_line": number, "text": text,
+                                "hard_fail": True})
+            elif excused[key] > 0:
                 excused[key] -= 1
             else:
                 dropped.append({"file": f.path, "old_line": number, "text": text})
@@ -281,6 +292,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--upstream-diff", type=Path, required=True)
     parser.add_argument("--base-dir", type=Path, required=True)
     parser.add_argument("--upstream-head-dir", type=Path, required=True)
+    parser.add_argument("--hard-fail-config", type=Path,
+                        help="config.yaml whose review_hard_fail_patterns are never "
+                             "excused in the dropped list")
     parser.add_argument("--final-dir", type=Path,
                         help="BRANCH_SHA version of each changed file; without it the "
                              "reordered and duplicated lists stay empty")
@@ -296,9 +310,20 @@ def main(argv: list[str] | None = None) -> int:
     if not final_diff.strip():
         print(json.dumps({"error": "final diff is empty"}), file=sys.stderr)
         return 1
+    patterns: list[str] = []
+    if args.hard_fail_config is not None:
+        import yaml  # only needed with --hard-fail-config
+
+        try:
+            config = yaml.safe_load(args.hard_fail_config.read_text(encoding="utf-8"))
+            patterns = [str(p) for p in config.get("review_hard_fail_patterns", [])]
+        except (OSError, yaml.YAMLError, AttributeError) as exc:
+            print(json.dumps({"error": f"cannot read patterns: {exc}"}), file=sys.stderr)
+            return 1
 
     report = find_novel(
-        final_diff, upstream_diff, args.base_dir, args.upstream_head_dir, args.final_dir
+        final_diff, upstream_diff, args.base_dir, args.upstream_head_dir, args.final_dir,
+        patterns
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

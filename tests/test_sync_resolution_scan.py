@@ -1,10 +1,11 @@
 """Regression tests for the sync resolution hard-fail scan, on real git merges.
 
-The record job scans git's automatic merge -> the result (`scan.diff`) with
-upstream's own diff for context (record-resolution-verdict.py
---sync-upstream-diff). A resolution may discard upstream's or the base's side
-of a conflict region, but it must not silently drop fork protections, inside
-or outside the conflict region (Opus M3, Astra 1).
+The record job scans git's own merge (diff3 markers) -> the result, with
+full context (tools/resolution-scope.py --full-context). A resolution may
+discard upstream's or the base's side of a conflict region, but it must not
+silently drop fork protections, inside or outside the conflict region (Opus
+M3, Astra 1). A dropped fork line is excused only when its own region shows
+upstream removed it (Astra re-review).
 """
 
 from __future__ import annotations
@@ -18,11 +19,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).parent.parent
 TOOL = REPO_ROOT / "tools" / "record-resolution-verdict.py"
+SCOPE = REPO_ROOT / "tools" / "resolution-scope.py"
 CONFIG = REPO_ROOT / ".if-fork" / "config.yaml"
 PATTERNS = yaml.safe_load(CONFIG.read_text())["review_hard_fail_patterns"]
 REVIEWER = "claude-fable-5-1-resolution-review"
@@ -49,8 +50,7 @@ BASE = """class A
 """
 
 
-def _git(repo: Path, *args: str) -> str:
-    env = {
+ENV = {
         **os.environ,
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": os.devnull,
@@ -59,7 +59,10 @@ def _git(repo: Path, *args: str) -> str:
         "GIT_COMMITTER_NAME": "t",
         "GIT_COMMITTER_EMAIL": "t@x",
     }
-    r = subprocess.run(["git", *args], cwd=repo, env=env, capture_output=True, text=True)
+
+
+def _git(repo: Path, *args: str) -> str:
+    r = subprocess.run(["git", *args], cwd=repo, env=ENV, capture_output=True, text=True)
     assert r.returncode in (0, 1), r.stderr
     return r.stdout
 
@@ -80,14 +83,21 @@ def _scan(tmp_path: Path, base: str, fork: str, upstream: str, result: str) -> l
     up = _commit(repo, upstream, "upstream")
     _git(repo, "checkout", "-q", "-b", "fork", mb)
     fork_sha = _commit(repo, fork, "fork")
-    auto = _git(repo, "merge-tree", "--write-tree", fork_sha, up).splitlines()[0]
-    assert "<<<<<<<" in _git(repo, "show", f"{auto}:a.cs"), "the fixture must conflict"
-    branch = _commit(repo, result, "resolution")
-    scan = _git(repo, "diff", "--no-color", "--no-renames", auto, branch)
-    up_diff = _git(repo, "diff", "--no-color", "--no-renames", mb, up)
+    _git(repo, "checkout", "-q", "-b", "merge", fork_sha)
+    _git(repo, "merge", "-q", "--no-commit", up)
+    assert "<<<<<<<" in (repo / "a.cs").read_text(), "the fixture must conflict"
+    branch = _commit(repo, result, "resolution")  # a merge of fork and upstream
+    # The record job's own scope tool, as resolution-review.yml runs it.
+    r = subprocess.run(
+        [sys.executable, str(SCOPE), "--kind", "sync", "--base-sha", fork_sha,
+         "--upstream-sha", up, "--branch-sha", branch, "--out", str(tmp_path / "scope"),
+         "--full-context"],
+        cwd=repo, env=ENV, capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    scan = (tmp_path / "scope" / "resolution-full.diff").read_text()
     (tmp_path / "scan.diff").write_text(scan)
-    (tmp_path / "upstream.diff").write_text(up_diff)
-    return [h["pattern"] for h in rrv.hard_fail_hits(scan, PATTERNS, up_diff)]
+    return [h["pattern"] for h in rrv.hard_fail_hits(scan, PATTERNS, sync=True)]
 
 
 FORK = BASE.replace("int x = 1;", "int x = 2;")
@@ -156,8 +166,6 @@ def test_record_tool_rejects_the_outside_drop_end_to_end(tmp_path: Path) -> None
             str(TOOL),
             "--kind",
             "sync",
-            "--sync-upstream-diff",
-            str(tmp_path / "upstream.diff"),
             "--verdict",
             str(verdict),
             "--reviewer-id",
@@ -194,37 +202,48 @@ def test_record_tool_rejects_the_outside_drop_end_to_end(tmp_path: Path) -> None
     assert any("Demand" in x for x in json.loads(out.read_text())["reasons"])
 
 
-@pytest.mark.parametrize("kind_args", [["--kind", "sync"], ["--sync-upstream-diff", "x"]])
-def test_sync_and_its_upstream_diff_go_together(tmp_path: Path, kind_args: list[str]) -> None:
-    r = subprocess.run(
-        [
-            sys.executable,
-            str(TOOL),
-            *kind_args,
-            "--verdict",
-            "v",
-            "--reviewer-id",
-            "r",
-            "--config",
-            str(CONFIG),
-            "--final-diff",
-            "f",
-            "--novel-lines",
-            "n",
-            "--pr-number",
-            "0" if "sync" in kind_args else "7",
-            "--head-sha",
-            "a" * 40,
-            "--branch-sha",
-            "c" * 40,
-            "--branch",
-            "b",
-            "--output",
-            str(tmp_path / "o"),
-            "--events-out",
-            str(tmp_path / "e"),
-        ],
-        capture_output=True,
-        text=True,
+ASTRA_BASE = """class A
+{
+    void MethodA()
+    {
+        permission.Demand();
+        A1();
+    }
+
+    void MethodB()
+    {
+        int y = 1;
+    }
+}
+"""
+
+
+def test_upstream_removal_elsewhere_does_not_excuse_a_dropped_fork_demand(
+    tmp_path: Path,
+) -> None:
+    # Astra re-review, exact scenario: upstream removes Demand() from
+    # MethodA; the fork adds a Demand() in MethodB, where the conflict is.
+    # The resolution drops B's Demand(). A's removal must not excuse it.
+    upstream = ASTRA_BASE.replace("        permission.Demand();\n        A1();", "        A1();")
+    upstream = upstream.replace("int y = 1;", "int y = 3;")
+    fork = ASTRA_BASE.replace(
+        "        int y = 1;", "        permission.Demand();\n        int y = 2;"
     )
-    assert r.returncode == 3
+    result = upstream
+    assert r"Demand\(\)" in _scan(tmp_path, ASTRA_BASE, fork, upstream, result)
+
+
+def test_the_merge_uses_diff3_markers(tmp_path: Path) -> None:
+    # The excuse needs each region's base side; without it nothing is excused.
+    fork = BASE.replace("    int x = 1;", "    [SecurityCritical]\n    int x = 2;")
+    upstream = BASE.replace("int x = 1;", "int x = 3;")
+    _scan(tmp_path, BASE, fork, upstream, upstream)
+    assert "-|||||||" in (tmp_path / "scan.diff").read_text()
+
+
+def test_a_region_without_a_base_side_excuses_nothing() -> None:
+    diff = (
+        "diff --git a/a.cs b/a.cs\n--- a/a.cs\n+++ b/a.cs\n@@ -1,4 +1,1 @@\n"
+        "-<<<<<<< ours\n-    [SecurityCritical]\n-=======\n->>>>>>> theirs\n"
+    )
+    assert rrv.hard_fail_hits(diff, PATTERNS, sync=True)

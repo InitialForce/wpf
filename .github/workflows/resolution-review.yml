@@ -253,16 +253,12 @@ jobs:
           [ "$(git rev-list --parents -n 1 "$BRANCH_SHA")" = "$BRANCH_SHA $PARENTS" ] \
             || { echo "::error::$BRANCH_SHA does not have the parents $PARENTS"; exit 1; }
           # The same scope the reviewer was given (tools/resolution-scope.py).
+          # Full context, so a sync scan sees every side of each conflict
+          # region; a dropped fork line is excused only by its own region.
           python3 tools/resolution-scope.py --kind "$KIND" --base-sha "$BASE_SHA" \
-            --upstream-sha "$UPSTREAM_SHA" --branch-sha "$BRANCH_SHA" --out "$RUNNER_TEMP/scope"
-          cp "$RUNNER_TEMP/scope/resolution.diff" "$RUNNER_TEMP/scan.diff"
-          if [ "$KIND" = sync ]; then
-            # Upstream's own change: a fork line in a conflict region that
-            # upstream removed too may be dropped; any other dropped fork
-            # line is scanned.
-            MB=$(git merge-base "$BASE_SHA" "$UPSTREAM_SHA")
-            git diff --no-color --no-ext-diff --no-renames "$MB" "$UPSTREAM_SHA" > "$RUNNER_TEMP/upstream.diff"
-          fi
+            --upstream-sha "$UPSTREAM_SHA" --branch-sha "$BRANCH_SHA" --out "$RUNNER_TEMP/scope" \
+            --full-context
+          cp "$RUNNER_TEMP/scope/resolution-full.diff" "$RUNNER_TEMP/scan.diff"
 
       # Exits 0 approved, 1 rejected, 3 error. The reviewer ID comes from the
       # config here, not from the review job, so a review job that never ran
@@ -277,8 +273,6 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           MODEL=$(python3 -c "import yaml; print(yaml.safe_load(open('.if-fork/config.yaml'))['claude_models']['resolution_review'])")
-          SCAN_ARGS=()
-          if [ "$KIND" = sync ]; then SCAN_ARGS=(--sync-upstream-diff "$RUNNER_TEMP/upstream.diff"); fi
           echo "$TRIES_JSON" | jq --arg tmp "$RUNNER_TEMP" '[range(1; 4) as $n | .["try-\($n)"] as $t | {
               try: $n, result: ($t.result // ""),
               verdict: "\($tmp)/try-\($n)/verdict/resolution.json",
@@ -294,7 +288,6 @@ jobs:
             --reviewer-id "$MODEL-resolution-review" \
             --config .if-fork/config.yaml \
             --final-diff "$RUNNER_TEMP/scan.diff" \
-            "${SCAN_ARGS[@]}" \
             --ledger .if-fork/patch-ledger.jsonl \
             --pr-number "$PR_NUMBER" \
             --head-sha "$UPSTREAM_SHA" \

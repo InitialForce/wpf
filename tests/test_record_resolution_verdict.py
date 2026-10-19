@@ -308,12 +308,6 @@ def test_max_attempts_from_the_command_line(tmp_path: Path) -> None:
     assert d["next_action"] == "give_up"
 
 
-def _empty_upstream(tmp_path: Path) -> Path:
-    path = tmp_path / "upstream.diff"
-    path.write_text("")
-    return path
-
-
 def _novel_args(tmp_path: Path, count: int = 0) -> list[str]:
     npath = tmp_path / "novel.json"
     npath.write_text(json.dumps({"novel_count": count, "dropped_count": 0}))
@@ -331,7 +325,6 @@ def test_sync_is_recorded_with_pr_0_and_upstream_sha(tmp_path: Path) -> None:
     out, events = tmp_path / "d.json", tmp_path / "e.jsonl"
     r = subprocess.run(
         [sys.executable, str(TOOL), "--kind", "sync",
-         "--sync-upstream-diff", str(_empty_upstream(tmp_path)),
          "--verdict", str(vpath), "--reviewer-id", REVIEWER,
          "--verdict-sha256", hashlib.sha256(vpath.read_bytes()).hexdigest(),
          "--upload", "success", "--config", str(CONFIG),
@@ -354,7 +347,6 @@ def test_sync_added_line_with_hard_fail_is_rejected(tmp_path: Path) -> None:
     out, events = tmp_path / "d.json", tmp_path / "e.jsonl"
     r = subprocess.run(
         [sys.executable, str(TOOL), "--kind", "sync",
-         "--sync-upstream-diff", str(_empty_upstream(tmp_path)),
          "--verdict", str(vpath), "--reviewer-id", REVIEWER,
          "--verdict-sha256", hashlib.sha256(vpath.read_bytes()).hexdigest(),
          "--upload", "success", "--config", str(CONFIG),
@@ -517,7 +509,6 @@ def test_sync_dropping_a_fork_security_line_is_rejected(tmp_path: Path) -> None:
     out, events = tmp_path / "d.json", tmp_path / "e.jsonl"
     r = subprocess.run(
         [sys.executable, str(TOOL), "--kind", "sync",
-         "--sync-upstream-diff", str(_empty_upstream(tmp_path)),
          "--verdict", str(vpath), "--reviewer-id", REVIEWER,
          "--verdict-sha256", hashlib.sha256(vpath.read_bytes()).hexdigest(),
          "--upload", "success", "--config", str(CONFIG),
