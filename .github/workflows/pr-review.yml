@@ -722,7 +722,7 @@ jobs:
             --push
 
       # approved     → repository_dispatch pr-ingestion-requested {pr_number, head_sha}
-      # escalated    → one review-disagreement issue per PR (needs-human, automated)
+      # escalated    → one review-disagreement notice issue per PR (automated)
       # rejected     → nothing more (already recorded above)
       # review_error → nothing more; pr-discovery retries the review
       - name: Hand off (ingestion dispatch or escalation issue)
