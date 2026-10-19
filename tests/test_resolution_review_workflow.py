@@ -148,6 +148,8 @@ def test_prepare_holds_no_secrets(workflow: dict, reviewer: dict) -> None:
     assert 'git diff --no-color --no-ext-diff --no-renames "$BASE_SHA" "$BRANCH_SHA"' in run
     assert 'python3 "$TRUSTED/tools/novel-lines.py"' in run
     assert '--final-dir "$OUT/final"' in run
+    # Astra 3: the reviewer gets the same resolution scope the record job scans.
+    assert 'python3 "$TRUSTED/tools/resolution-scope.py" --kind "$KIND"' in run
     # record checks the report against this job output before the novel cap.
     assert 'echo "novel_sha256=$(sha256sum "$OUT/novel-lines.json"' in run
     assert job["outputs"]["novel_sha256"] == "${{ steps.input.outputs.novel_sha256 }}"
@@ -227,8 +229,8 @@ def test_record_checks_origin_and_records_before_publishing(workflow: dict) -> N
     scan = _step(job, "Compute the diff to scan")["run"]
     assert '"$BRANCH_SHA $PARENTS"' in scan
     # A sync scans what the resolution wrote: result against git's own merge.
-    assert 'git merge-tree --write-tree "$BASE_SHA" "$UPSTREAM_SHA"' in scan
-    assert 'git diff --no-color --no-ext-diff --no-renames "$AUTO" "$BRANCH_SHA"' in scan
+    assert 'python3 tools/resolution-scope.py --kind "$KIND"' in scan
+    assert 'cp "$RUNNER_TEMP/scope/resolution.diff" "$RUNNER_TEMP/scan.diff"' in scan
     decide = _step(job, "decide")
     # Results and hashes come from the tries' job outputs.
     assert decide["env"]["TRIES_JSON"] == "${{ toJSON(needs) }}"

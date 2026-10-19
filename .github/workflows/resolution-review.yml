@@ -252,17 +252,16 @@ jobs:
           if [ "$KIND" = sync ]; then PARENTS="$BASE_SHA $UPSTREAM_SHA"; else PARENTS="$BASE_SHA"; fi
           [ "$(git rev-list --parents -n 1 "$BRANCH_SHA")" = "$BRANCH_SHA $PARENTS" ] \
             || { echo "::error::$BRANCH_SHA does not have the parents $PARENTS"; exit 1; }
+          # The same scope the reviewer was given (tools/resolution-scope.py).
+          python3 tools/resolution-scope.py --kind "$KIND" --base-sha "$BASE_SHA" \
+            --upstream-sha "$UPSTREAM_SHA" --branch-sha "$BRANCH_SHA" --out "$RUNNER_TEMP/scope"
+          cp "$RUNNER_TEMP/scope/resolution.diff" "$RUNNER_TEMP/scan.diff"
           if [ "$KIND" = sync ]; then
-            AUTO=$(git merge-tree --write-tree "$BASE_SHA" "$UPSTREAM_SHA" | head -n1 || true)
-            [[ "$AUTO" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Could not recreate the merge"; exit 1; }
-            git diff --no-color --no-ext-diff --no-renames "$AUTO" "$BRANCH_SHA" > "$RUNNER_TEMP/scan.diff"
             # Upstream's own change: a fork line in a conflict region that
             # upstream removed too may be dropped; any other dropped fork
             # line is scanned.
             MB=$(git merge-base "$BASE_SHA" "$UPSTREAM_SHA")
             git diff --no-color --no-ext-diff --no-renames "$MB" "$UPSTREAM_SHA" > "$RUNNER_TEMP/upstream.diff"
-          else
-            git diff --no-color --no-ext-diff --no-renames "$BASE_SHA" "$BRANCH_SHA" > "$RUNNER_TEMP/scan.diff"
           fi
 
       # Exits 0 approved, 1 rejected, 3 error. The reviewer ID comes from the
