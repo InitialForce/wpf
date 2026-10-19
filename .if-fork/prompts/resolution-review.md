@@ -68,7 +68,8 @@ upstream side, the pinned `if/main` commit (`BASE_SHA`), the commit you review
 A side that does not have a file has no copy. Files over 1 MB are not copied.
 
 `novel-lines.json` was computed by code, not by a model. Every check is per file:
-- `novel_lines`: every added line of `final.diff` whose text (whitespace trimmed) is in
+- `novel_lines`: every added line of `final.diff` whose text (whitespace trimmed, but
+  leading whitespace kept in YAML, Python and makefiles, where it has meaning) is in
   none of: the upstream diff's added lines for the same file, the `BASE_SHA` file, the
   upstream head file. These lines exist only because of the resolution. `novel_count` is
   the exact total. More than `conflict_resolution.max_novel_lines` is rejected by code.
@@ -77,7 +78,7 @@ A side that does not have a file has no copy. Files over 1 MB are not copied.
   `return;` above a check, or a guard moved below the call it guards, shows up here.
 - `duplicated_lines`: lines the final file holds more often than the two sides explain.
 - `dropped_lines`: every line `final.diff` removes that the upstream diff does not remove
-  from that file. These are fork lines the resolution took out.
+  from that file, counted per copy. These are fork lines the resolution took out.
 
 `novel_count: 0` does not mean the resolution is safe. A resolution can change behaviour
 with existing lines only: by copying, moving, duplicating or dropping them. Check every

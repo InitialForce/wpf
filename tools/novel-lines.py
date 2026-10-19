@@ -6,9 +6,11 @@ Claude resolved should only hold lines from the upstream change or from the
 fork. Any other added line is "novel": the reviewer must justify each one,
 and the report gives it a list that does not depend on a model.
 
-All checks are per file. An added line of the final diff
-(BASE_SHA..BRANCH_SHA) is novel when its text, with surrounding whitespace
-removed, is not empty and appears in none of:
+All checks are per file, and lines are compared by line_key: surrounding
+whitespace removed, except leading whitespace in files where it has meaning
+(YAML, Python, makefiles). An added line of the final diff
+(BASE_SHA..BRANCH_SHA) is novel when its text is not empty and appears in
+none of:
   - the added lines of the upstream diff for the same path
   - the BASE_SHA version of the same file (<base dir>/<path>)
   - the upstream head version of the same file (<upstream head dir>/<path>)
@@ -27,7 +29,8 @@ lists cover that, using the final file (<final dir>/<path>):
     head file.
 
 The report also lists "dropped" lines: lines the final diff removes that the
-upstream diff does not remove for that path. These lists are for the
+upstream diff does not remove for that path, counted, so one upstream
+removal excuses one removal of the same text. These lists are for the
 reviewer; only novel_count has a code cap. Zero novel lines does not mean a
 resolution is safe.
 
@@ -146,8 +149,23 @@ def parse_diff(text: str) -> list[FileDiff]:
     return files
 
 
+# Leading whitespace has meaning in these files (YAML and Python nesting,
+# make recipes), so only trailing whitespace is ignored there.
+_WHITESPACE_SENSITIVE_SUFFIXES = (".py", ".yml", ".yaml", ".mk", ".make", ".tsv")
+_WHITESPACE_SENSITIVE_NAMES = ("Makefile", "GNUmakefile")
+
+
+def line_key(path: str, text: str) -> str:
+    """The text a line is compared by: trimmed, or right-trimmed only when
+    leading whitespace matters in that kind of file."""
+    name = path.rsplit("/", 1)[-1]
+    if name in _WHITESPACE_SENSITIVE_NAMES or name.endswith(_WHITESPACE_SENSITIVE_SUFFIXES):
+        return text.rstrip()
+    return text.strip()
+
+
 def _read_lines(root: Path | None, rel: str) -> list[str]:
-    """Trimmed lines of root/rel, or [] when it is missing or outside root."""
+    """Compared lines (line_key) of root/rel, or [] when missing or outside root."""
     if root is None:
         return []
     try:
@@ -158,7 +176,7 @@ def _read_lines(root: Path | None, rel: str) -> list[str]:
         text = target.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
-    return [line.strip() for line in text.splitlines()]
+    return [line_key(rel, line) for line in text.splitlines()]
 
 
 def _matched(final: list[str], side: list[str]) -> set[int]:
@@ -181,8 +199,10 @@ def find_novel(
     up_added: dict[str, Counter[str]] = {}
     up_removed: dict[str, Counter[str]] = {}
     for f in parse_diff(upstream_diff):
-        up_added.setdefault(f.path, Counter()).update(t.strip() for _, t in f.added)
-        up_removed.setdefault(f.path, Counter()).update(t.strip() for _, t in f.removed)
+        up_added.setdefault(f.path, Counter()).update(line_key(f.path, t) for _, t in f.added)
+        up_removed.setdefault(f.path, Counter()).update(
+            line_key(f.path, t) for _, t in f.removed
+        )
 
     novel: list[dict[str, object]] = []
     reordered: list[dict[str, object]] = []
@@ -198,7 +218,7 @@ def find_novel(
         known = set(added_here) | set(base) | set(head)
         aligned = _matched(final, base) | _matched(final, head) if final else set()
         for number, text in f.added:
-            key = text.strip()
+            key = line_key(f.path, text)
             if not key:
                 continue
             if key not in known:
@@ -212,9 +232,16 @@ def find_novel(
                 if count > max(expected, head_count[key]) and key in known:
                     duplicated.append({"file": f.path, "text": key, "final_count": count,
                                        "expected_count": max(expected, head_count[key])})
+        # Counted: upstream removing a line once from this file excuses one
+        # removal of it, not every copy.
+        excused = Counter(removed_here)
         for number, text in f.removed:
-            key = text.strip()
-            if key and key not in removed_here:
+            key = line_key(f.path, text)
+            if not key:
+                continue
+            if excused[key] > 0:
+                excused[key] -= 1
+            else:
                 dropped.append({"file": f.path, "old_line": number, "text": text})
 
     lists = (novel, reordered, duplicated, dropped)

@@ -205,3 +205,60 @@ def test_without_final_dir_the_position_lists_stay_empty(tmp_path: Path) -> None
     final = diff("src/a.cs", 1, 1, "+    Run();\n")
     r = report(tmp_path, final, {"src/a.cs": BASE_FILE}, {})
     assert r["reordered_count"] == 0 and r["duplicated_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Astra 2: occurrence counts, per-file removals, whitespace-sensitive files
+# ---------------------------------------------------------------------------
+
+
+def test_identical_removal_in_an_unrelated_file_does_not_excuse(tmp_path: Path) -> None:
+    upstream = diff("src/other.cs", 1, 1, "-    Demand();\n")
+    final = diff("src/a.cs", 1, 1, "-    Demand();\n")
+    r = report(tmp_path, final, {}, {}, upstream=upstream)
+    assert [d["text"] for d in r["dropped_lines"]] == ["    Demand();"]
+
+
+def test_one_upstream_removal_excuses_one_copy_only(tmp_path: Path) -> None:
+    upstream = diff("src/a.cs", 1, 1, "-    Demand();\n")
+    final = diff("src/a.cs", 1, 1, "-    Demand();\n ctx\n-    Demand();\n")
+    r = report(tmp_path, final, {}, {}, upstream=upstream)
+    assert r["dropped_count"] == 1 and r["dropped_lines"][0]["old_line"] == 3
+
+
+def test_copied_conditional_return_is_reported(tmp_path: Path) -> None:
+    # Astra's example: "if (value != null)" and "return true;" copied from
+    # another method in front of the permission check.
+    base = (
+        "bool Other(object value)\n{\n    if (value != null)\n        return true;\n"
+        "    return false;\n}\nbool Check(object value)\n{\n"
+        "    return CheckPermission(value);\n}\n"
+    )
+    final_file = base.replace(
+        "{\n    return CheckPermission(value);",
+        "{\n    if (value != null)\n        return true;\n    return CheckPermission(value);",
+    )
+    final = diff(
+        "src/a.cs", 7, 7,
+        " bool Check(object value)\n {\n+    if (value != null)\n+        return true;\n",
+    )
+    r = report(tmp_path, final, {"src/a.cs": base}, {"src/a.cs": base}, {"src/a.cs": final_file})
+    assert r["novel_count"] == 0
+    assert [x["text"].strip() for x in r["reordered_lines"]] == [
+        "if (value != null)", "return true;"
+    ]
+    assert {x["text"] for x in r["duplicated_lines"]} == {"if (value != null)", "return true;"}
+
+
+def test_indentation_change_in_yaml_is_novel(tmp_path: Path) -> None:
+    # Moving a key one level changes its meaning in YAML.
+    base = "jobs:\n  build:\n    permissions: read-all\n"
+    final = diff("ci/x.yml", 3, 3, "-    permissions: read-all\n+  permissions: read-all\n")
+    r = report(tmp_path, final, {"ci/x.yml": base}, {"ci/x.yml": base})
+    assert [n["text"] for n in r["novel_lines"]] == ["  permissions: read-all"]
+
+
+def test_indentation_change_in_csharp_is_not_novel(tmp_path: Path) -> None:
+    base = "class A\n{\n    int x;\n}\n"
+    final = diff("src/a.cs", 3, 3, "-    int x;\n+        int x;\n")
+    assert report(tmp_path, final, {"src/a.cs": base}, {"src/a.cs": base})["novel_count"] == 0
