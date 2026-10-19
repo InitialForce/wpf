@@ -165,7 +165,9 @@ def test_escalated_dry_run_prints_issue(
     pr = ESCALATED_VERDICT["pr_number"]
     assert f"review-disagreement: PR #{pr}" in out
     assert "review-disagreement" in out
-    assert "needs-human" in out
+    # A notice: nothing waits on a person.
+    assert "needs-human" not in out
+    assert "Nothing needs to be done" in out
 
 
 # ===========================================================================
@@ -192,7 +194,8 @@ def test_escalated_live_calls_urlopen(tmp_path: Path) -> None:
     pr = ESCALATED_VERDICT["pr_number"]
     assert f"PR #{pr}" in body["title"]
     assert "review-disagreement" in body["labels"]
-    assert "needs-human" in body["labels"]
+    assert body["labels"] == ["review-disagreement", "automated"]
+    assert "needs a human" not in body["body"]
     assert "automated" in body["labels"]
     assert f"<!-- if-fork:review-escalation pr={pr} -->" in body["body"]
 

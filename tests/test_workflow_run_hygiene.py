@@ -20,6 +20,7 @@ PIPELINE = [
     "claude-on-failure.yml",
     "nightly-rebase.yml",
     "pr-ingestion.yml",
+    "resolution-review.yml",
     "upstream-release-poll.yml",
     "upstream-stable-adoption.yml",
     "weekly-differential.yml",

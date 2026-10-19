@@ -11,16 +11,31 @@
 #   - Checker code and policy (check-denylist.py, check-commit-denylist.py,
 #     config.yaml) always come from a separate checkout of if/main
 #     ("trusted/"), never from the candidate tree.
-#   - Claude only runs in resolve-conflicts, a job with contents:read, no App
-#     token, no GPG key and no persisted credentials. Claude loads only the
-#     action's own user settings (no project settings, hooks or MCP servers
-#     from the candidate tree), has no shell, reads the work tree and edits
-#     only the conflicted files. tools/prepare-resolver.sh refuses to start
+#   - Claude runs only in resolve-conflicts and resolution-review.yml's review
+#     job, jobs with
+#     contents:read, no App token, no GPG key and no persisted credentials.
+#     Both load only the action's own user settings (no project settings,
+#     hooks or MCP servers from the candidate tree) and have no shell. In
+#     resolve-conflicts Claude reads the work tree and edits only the
+#     conflicted files. tools/prepare-resolver.sh refuses to start
 #     it when the tree holds agent configuration. It hands back only the
 #     conflicted files, as an artifact. The finalize job recreates the
 #     conflict itself, takes only those paths from the artifact, checks them,
 #     and only then signs and pushes.
 #   - Nothing is pushed before the whole branch diff passes file_denylist.
+#   - A resolution Claude wrote is reviewed before anything merges it.
+#     resolution-review.yml pins the approved upstream diff, the pushed
+#     branch diff and a novel-lines report (tools/novel-lines.py) in a job
+#     with no secrets, has Fable review it with the pr-review.yml reviewer
+#     limits, and records resolution_approved or resolution_rejected for the
+#     exact branch commit in a trusted job. automerge-verify.sh merges a
+#     Conflict-Resolved-By cherry-pick only with resolution_approved for its
+#     head SHA.
+#   - No step waits for a person. Approved: open the PR. Rejected with an
+#     attempt left (conflict_resolution.max_resolution_attempts, counted in
+#     the ledger): dispatch a fresh run, which resolves again from scratch.
+#     Rejected on the last attempt: close the PR, delete the branch and
+#     record escalated (reason resolution_rejected).
 #   - cherry-pick records the if/main commit it starts from (main_sha).
 #     resolve-conflicts and finalize branch from exactly that commit, so a
 #     change that lands on if/main meanwhile cannot be overwritten by a
@@ -29,7 +44,8 @@
 #
 # Flow: gate -> pre-flight (already in the fork?) -> approval check (the
 # exact pair must be approved in the ledger) -> cherry-pick (deterministic) ->
-# [resolve-conflicts -> finalize] -> open or reuse the PR to if/main.
+# [resolve-conflicts -> finalize -> resolution-review -> retry or give up]
+# -> open or reuse the PR to if/main.
 # build.yml runs on that PR; automerge.yml merges it when it passes.
 name: PR Ingestion (Cherry-Pick)
 
@@ -508,6 +524,12 @@ jobs:
       BASE_SHA: ${{ needs.cherry-pick.outputs.main_sha }}
     outputs:
       pushed: ${{ steps.finish.outputs.pushed }}
+      # The exact commit pushed, which the resolution review checks and the
+      # ledger approval names.
+      branch_sha: ${{ steps.finish.outputs.sha }}
+      # Conflicted paths, space-separated. prepare-resolver.sh already refused
+      # any path with characters outside A-Z a-z 0-9 . _ / + -.
+      conflict_files: ${{ steps.overlay.outputs.conflicts }}
 
     steps:
       - name: Validate payload
@@ -578,7 +600,10 @@ jobs:
             echo "reason=cherry_pick_conflict" >> "$GITHUB_OUTPUT"; exit 0
           fi
           GIT_EDITOR=true git cherry-pick --continue
-          echo "ok=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "ok=true"
+            echo "conflicts=$(tr '\n' ' ' < "$OUT/conflicts.txt")"
+          } >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ needs.cherry-pick.outputs.branch }}
@@ -591,12 +616,14 @@ jobs:
         run: |
           bash "$TRUSTED/tools/finish-ingestion-branch.sh"
           echo "pushed=$(cat "$OUT/pushed" 2>/dev/null || echo false)" >> "$GITHUB_OUTPUT"
+          if [ -f "$OUT/sha" ]; then echo "sha=$(cat "$OUT/sha")" >> "$GITHUB_OUTPUT"; fi
           if [ -f "$OUT/reason" ]; then echo "reason=$(cat "$OUT/reason")" >> "$GITHUB_OUTPUT"; fi
         env:
           BRANCH: ${{ needs.cherry-pick.outputs.branch }}
           OUT: ${{ runner.temp }}/finish
           TRUSTED: ${{ github.workspace }}/trusted
-          # Adds the Conflict-Resolved-By trailer: automerge refuses it.
+          # Adds the Conflict-Resolved-By trailer. automerge merges such a
+          # commit only with a resolution_approved ledger event for it.
           CONFLICT_RESOLVED: "true"
 
       - name: Escalate when the resolution was not accepted
@@ -608,14 +635,163 @@ jobs:
           TRUSTED: ${{ github.workspace }}/trusted
 
   # -------------------------------------------------------------------------
-  # Job 7: open-pr — open (or reuse) the PR to if/main, emit ledger event
+  # Job 7: resolution-review. Fable reviews the resolution Claude wrote
+  # (resolution-review.yml: prepare with no secrets, review with the
+  # pr-review.yml limits, record in a trusted job). It records
+  # resolution_approved or resolution_rejected for the exact branch commit
+  # and returns next_action: approved, retry or give_up.
+  # -------------------------------------------------------------------------
+  resolution-review:
+    name: Resolution review
+    needs: [gate, cherry-pick, finalize]
+    if: needs.gate.outputs.proceed == 'true' && needs.finalize.outputs.pushed == 'true'
+    uses: ./.github/workflows/resolution-review.yml
+    secrets: inherit
+    with:
+      kind: cherry-pick
+      pr_number: ${{ inputs.pr_number || github.event.client_payload.pr_number }}
+      upstream_sha: ${{ inputs.head_sha || github.event.client_payload.head_sha }}
+      base_sha: ${{ needs.cherry-pick.outputs.main_sha }}
+      branch_sha: ${{ needs.finalize.outputs.branch_sha }}
+      branch: ${{ needs.cherry-pick.outputs.branch }}
+      conflict_files: ${{ needs.finalize.outputs.conflict_files }}
+
+  # -------------------------------------------------------------------------
+  # Job 8: retry-resolution. The review rejected the resolution and an
+  # attempt is left: ask for a fresh ingestion run, which resolves the
+  # conflict again from scratch in new jobs and reviews the new commit. The
+  # ledger counts the attempts (tools/record-resolution-verdict.py).
+  # -------------------------------------------------------------------------
+  retry-resolution:
+    name: Resolve again from scratch
+    needs: [gate, finalize, resolution-review]
+    if: >-
+      always() && needs.gate.outputs.proceed == 'true' &&
+      needs.finalize.outputs.pushed == 'true' &&
+      needs.resolution-review.outputs.next_action == 'retry'
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+
+    steps:
+      - name: Validate payload
+        run: |
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] && [[ "$PINNED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::Invalid pr_number or head_sha"; exit 1; }
+
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      # The new run waits for this one (same concurrency group).
+      - name: Dispatch a fresh ingestion run
+        run: |
+          jq -n --argjson pr "$PR_NUMBER" --arg sha "$PINNED_HEAD_SHA" \
+            '{event_type: "pr-ingestion-requested", client_payload: {pr_number: $pr, head_sha: $sha}}' \
+            | gh api "repos/$GITHUB_REPOSITORY/dispatches" --input -
+          echo "::notice::Resolution attempt $ATTEMPT was rejected ($REASON). A fresh run resolves upstream #$PR_NUMBER again."
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ATTEMPT: ${{ needs.resolution-review.outputs.attempt }}
+          REASON: ${{ needs.resolution-review.outputs.reason }}
+
+  # -------------------------------------------------------------------------
+  # Job 9: give-up-resolution. The last attempt was rejected too: close the
+  # PR, delete the branch and record escalated (reason resolution_rejected),
+  # which ends the change for this head. Discovery does not queue it again.
+  # -------------------------------------------------------------------------
+  give-up-resolution:
+    name: Give up on this change
+    needs: [gate, cherry-pick, finalize, resolution-review]
+    if: >-
+      always() && needs.gate.outputs.proceed == 'true' &&
+      needs.finalize.outputs.pushed == 'true' &&
+      needs.resolution-review.outputs.next_action == 'give_up'
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+    env:
+      BRANCH: ${{ needs.cherry-pick.outputs.branch }}
+
+    steps:
+      - name: Validate payload
+        run: |
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] && [[ "$PINNED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            && [[ "$BRANCH" == "claude/cherry-pick-pr-$PR_NUMBER" ]] \
+            || { echo "::error::Invalid pr_number, head_sha or branch"; exit 1; }
+
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          ref: if/main
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Import bot GPG key
+        uses: ./.github/actions/import-bot-gpg
+        with:
+          gpg-private-key: ${{ secrets.GH_BOT_GPG_KEY }}
+          gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
+          gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
+
+      - name: Close the PR and delete the branch
+        run: |
+          set -euo pipefail
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          PR_NUM=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --head "$BRANCH" \
+                     --base if/main --json number --jq '.[0].number // empty')
+          if [ -n "$PR_NUM" ]; then
+            gh pr close "$PR_NUM" --repo "$GITHUB_REPOSITORY" --comment "The resolution review rejected Claude's conflict resolution $ATTEMPT times ($REASON). The pipeline gave up on upstream #$PR_NUMBER at \`$PINNED_HEAD_SHA\` and recorded it as escalated. Run: $RUN_URL"
+          fi
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$BRANCH" \
+            || echo "::warning::Could not delete $BRANCH (already gone?)."
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ATTEMPT: ${{ needs.resolution-review.outputs.attempt }}
+          REASON: ${{ needs.resolution-review.outputs.reason }}
+
+      - name: Record escalated
+        run: |
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          jq -n --argjson pr "$PR_NUMBER" --arg sha "$PINNED_HEAD_SHA" --arg run "$RUN_URL" \
+            --arg attempts "$ATTEMPT" --arg why "$REASON" \
+            '{event: "escalated", pr_number: $pr, head_sha: $sha,
+              details: {reason: "resolution_rejected", attempts: $attempts,
+                        last_reasons: $why, run_url: $run}}' > "$RUNNER_TEMP/events.jsonl"
+          python tools/ledger-event.py --events-file "$RUNNER_TEMP/events.jsonl" \
+            --actor pr-ingestion --push
+          echo "::warning::Upstream #$PR_NUMBER at $PINNED_HEAD_SHA: resolution rejected $ATTEMPT times. Escalated and closed."
+        env:
+          GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
+          GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ATTEMPT: ${{ needs.resolution-review.outputs.attempt }}
+          REASON: ${{ needs.resolution-review.outputs.reason }}
+
+  # -------------------------------------------------------------------------
+  # Job 10: open-pr — open (or reuse) the PR to if/main, emit ledger event
   # -------------------------------------------------------------------------
   open-pr:
     name: Open internal PR
-    needs: [gate, cherry-pick, finalize]
+    needs: [gate, cherry-pick, finalize, resolution-review]
+    # A clean cherry-pick, or a resolution the review approved. A rejected
+    # resolution never gets a PR of its own.
     if: >-
       always() && needs.gate.outputs.proceed == 'true' &&
-      (needs.cherry-pick.outputs.pushed == 'true' || needs.finalize.outputs.pushed == 'true')
+      (needs.cherry-pick.outputs.pushed == 'true' ||
+       (needs.finalize.outputs.pushed == 'true' &&
+        needs.resolution-review.outputs.next_action == 'approved'))
     runs-on: ubuntu-latest
     environment: bot-credentials
     outputs:
@@ -657,7 +833,8 @@ jobs:
           set -euo pipefail
           RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           if [ "$CONFLICT_RESOLVED" = true ]; then
-            MERGE_NOTE="**A person must merge this PR.** The cherry-pick conflicted with the fork, and Claude wrote the resolution (commit trailer \`Conflict-Resolved-By: claude\`). Nobody has reviewed that resolution: the two reviews covered the upstream diff only. \`automerge.yml\` will not merge this PR. Review the resolved files against the upstream PR, then merge it by hand when \`Build\` passes."
+            [ "$RESOLUTION_APPROVED" = true ] || { echo "::error::Resolution not approved"; exit 1; }
+            MERGE_NOTE="The cherry-pick conflicted with the fork, and Claude wrote the resolution (commit trailer \`Conflict-Resolved-By: claude\`). A separate review of that resolution (\`resolution-review.md\`, attempt $RESOLUTION_ATTEMPT) approved commit \`$BRANCH_SHA\`, and the ledger records it as \`resolution_approved\`. When \`Build\` passes, \`automerge.yml\` merges this PR. A new push to the branch needs a new review."
           else
             MERGE_NOTE="The \`Build\` workflow runs on this PR. When it passes, \`automerge.yml\` merges this PR (unless \`IF_AUTOMERGE_FROZEN=true\`)."
           fi
@@ -685,7 +862,9 @@ jobs:
           fi
           gh pr edit "$PR_NUM" --repo "$GITHUB_REPOSITORY" --add-label automated \
             || echo "::warning::Could not add label 'automated' to PR #$PR_NUM; automerge.yml will skip it."
-          bash tools/human-merge-label.sh "$PR_NUM" "$CONFLICT_RESOLVED"
+          # The automatic path never needs a person; clear a label left from
+          # before.
+          bash tools/human-merge-label.sh "$PR_NUM" false
           echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
           echo "::notice::Internal PR #$PR_NUM"
         env:
@@ -693,6 +872,9 @@ jobs:
           BRANCH: ${{ needs.cherry-pick.outputs.branch }}
           UPSTREAM_TITLE: ${{ needs.cherry-pick.outputs.title }}
           CONFLICT_RESOLVED: ${{ needs.finalize.outputs.pushed == 'true' }}
+          BRANCH_SHA: ${{ needs.finalize.outputs.branch_sha }}
+          RESOLUTION_APPROVED: ${{ needs.resolution-review.outputs.next_action == 'approved' }}
+          RESOLUTION_ATTEMPT: ${{ needs.resolution-review.outputs.attempt }}
 
       - name: Emit cherry_picked ledger event
         run: |

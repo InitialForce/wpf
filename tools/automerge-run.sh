@@ -18,7 +18,17 @@
 #     call is not caught here; the next Build of if/main is.
 #   - behind: ask the workflow that made the branch to rebuild it, once per
 #     PR head (a marker comment records the request)
+#   - unreviewed: the head holds a Claude conflict resolution that no
+#     resolution review has decided on (for example a PR from before the
+#     review existed, or a run that stopped early). Ask for a rebuild the
+#     same way, once per head; the rebuilt commit goes through the review.
 #   - refuse: say why, once per PR head (marker comment)
+#   Rebuilds (behind and unreviewed) are capped at MAX_REBUILDS_PER_DAY per
+#   PR in 24 hours, counted from the rebuild marker comments. Each rebuild
+#   makes a new head, so the once-per-head marker alone would not stop a
+#   rebuild that keeps failing to get a decision; the cap bounds how often
+#   the resolver and Fable run for one change. One PR is one change: a
+#   cherry-pick PR per upstream PR, and the single sync PR.
 #
 # Environment:
 #   GH_TOKEN, GITHUB_REPOSITORY  App token and repository
@@ -35,6 +45,7 @@ set -uo pipefail
 
 mkdir -p "$OUT"
 FAILED=0
+MAX_REBUILDS_PER_DAY=3
 
 comment_once() { # <pr> <marker> <body>
   local pr="$1" marker="$2" body="$3"
@@ -99,12 +110,22 @@ process() { # <pr> <head sha> <head branch>
       gh pr merge "$pr" --repo "$GITHUB_REPOSITORY" --merge --match-head-commit "$sha" || return 1
       echo "::notice::Merged PR #$pr at $sha onto if/main $verified."
       ;;
-    behind)
-      echo "::notice::PR #$pr is behind if/main: $reason"
+    behind|unreviewed)
+      echo "::notice::PR #$pr is $result: $reason"
       [ "$PROCEED" = true ] || return 0
       if gh api "repos/$GITHUB_REPOSITORY/issues/$pr/comments" --paginate --jq '.[].body' \
            | grep -qF -- "<!-- automerge-rebuild:$sha -->"; then
         echo "::notice::Rebuild of PR #$pr at $sha was already requested."
+        return 0
+      fi
+      since=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+      recent=$(gh api "repos/$GITHUB_REPOSITORY/issues/$pr/comments" --paginate \
+        --jq '.[] | select(.body | contains("<!-- automerge-rebuild:")) | .created_at' \
+        | awk -v since="$since" '$0 >= since' | wc -l) || return 1
+      if [ "$recent" -ge "$MAX_REBUILDS_PER_DAY" ]; then
+        echo "::warning::PR #$pr already had $recent rebuilds in 24 hours. Not rebuilding it again now."
+        comment_once "$pr" "<!-- automerge-rebuild-capped:$sha -->" \
+          "automerge did not rebuild this PR at \`$sha\` ($result): it was already rebuilt $recent times in the last 24 hours, the most it does for one change. A later run rebuilds it once the oldest of those requests is more than 24 hours old." || return 1
         return 0
       fi
       if [ "$branch" = if/staging ]; then
@@ -115,9 +136,12 @@ process() { # <pr> <head sha> <head branch>
           '{event_type: "pr-ingestion-requested", client_payload: {pr_number: $pr, head_sha: $sha}}' \
           | gh api "repos/$GITHUB_REPOSITORY/dispatches" --input - || return 1
       fi
-      comment_once "$pr" "<!-- automerge-rebuild:$sha -->" \
-        "if/main has moved on since this branch was made, so automerge asked for it to be rebuilt on the new if/main. The new build merges on its own when it passes." \
-        || return 1
+      if [ "$result" = behind ]; then
+        note="if/main has moved on since this branch was made, so automerge asked for it to be rebuilt on the new if/main. The new build merges on its own when it passes."
+      else
+        note="This head holds a conflict resolution that no resolution review has decided on, so automerge asked for the branch to be rebuilt. The rebuilt commit is reviewed, and merges on its own when the review approves it and the build passes."
+      fi
+      comment_once "$pr" "<!-- automerge-rebuild:$sha -->" "$note" || return 1
       ;;
     refuse)
       echo "::notice::Not merging PR #$pr: $reason"

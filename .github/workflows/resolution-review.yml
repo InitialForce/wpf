@@ -1,0 +1,365 @@
+# .github/workflows/resolution-review.yml
+#
+# Reviews one conflict resolution that Claude wrote, before it may merge.
+# Called by pr-ingestion.yml (kind cherry-pick) and nightly-rebase.yml (kind
+# sync) after their trusted finalize job pushed a commit with the trailer
+# Conflict-Resolved-By: claude.
+#
+# Jobs:
+#   try-1, try-2, try-3  review tries (resolution-reviewer.yml: prepare with
+#            no secrets, then the Fable review with the pr-review.yml
+#            reviewer limits). try-2 and try-3 run only when the try before
+#            left no verdict, after 120 and 600 seconds. So the same branch
+#            commit gets at most three tries.
+#   record   trusted (bot-credentials, if/main's tools). Checks each try's
+#            verdict and novel-lines report against that try's job-output
+#            hashes, computes the diff to scan itself, applies the code rules
+#            (including the conflict_resolution.max_novel_lines cap) and the
+#            attempt limit (tools/record-resolution-verdict.py). It records
+#            resolution_review_error for each try that left no valid verdict
+#            (not an attempt), then resolution_approved or resolution_rejected
+#            for the exact branch commit. No valid verdict in any try is a
+#            rejection.
+#
+# Outputs: decision (approved | rejected), next_action (approved | retry |
+# give_up), attempt, reason. The caller opens the PR on approved, starts a
+# fresh resolver run on retry, and gives the change up on give_up.
+name: Resolution Review
+
+on:
+  workflow_call:
+    inputs:
+      kind:
+        description: "cherry-pick or sync"
+        type: string
+        required: true
+      pr_number:
+        description: "Upstream PR number (cherry-pick) or 0 (sync)"
+        type: string
+        required: true
+      upstream_sha:
+        description: "Approved upstream PR head (cherry-pick) or upstream release/10.0 SHA (sync)"
+        type: string
+        required: true
+      base_sha:
+        description: "The pinned if/main commit the resolution was made on"
+        type: string
+        required: true
+      branch_sha:
+        description: "The commit finalize pushed, which is reviewed"
+        type: string
+        required: true
+      branch:
+        description: "claude/cherry-pick-pr-<N> or if/staging"
+        type: string
+        required: true
+      conflict_files:
+        description: "Conflicted paths, space-separated"
+        type: string
+        required: true
+    outputs:
+      decision:
+        value: ${{ jobs.record.outputs.decision }}
+      next_action:
+        value: ${{ jobs.record.outputs.next_action }}
+      attempt:
+        value: ${{ jobs.record.outputs.attempt }}
+      reason:
+        value: ${{ jobs.record.outputs.reason }}
+
+permissions:
+  contents: read
+
+# Inputs reach shell only through these, and every job validates them first.
+env:
+  KIND: ${{ inputs.kind }}
+  PR_NUMBER: ${{ inputs.pr_number }}
+  UPSTREAM_SHA: ${{ inputs.upstream_sha }}
+  BASE_SHA: ${{ inputs.base_sha }}
+  BRANCH_SHA: ${{ inputs.branch_sha }}
+  BRANCH: ${{ inputs.branch }}
+  CONFLICT_FILES: ${{ inputs.conflict_files }}
+
+jobs:
+  # -------------------------------------------------------------------------
+  # try-1..try-3: one review try each (resolution-reviewer.yml). A retry
+  # runs only when the try before left no verdict.
+  # -------------------------------------------------------------------------
+  try-1:
+    name: Review try 1
+    uses: ./.github/workflows/resolution-reviewer.yml
+    secrets: inherit
+    with:
+      kind: ${{ inputs.kind }}
+      pr_number: ${{ inputs.pr_number }}
+      upstream_sha: ${{ inputs.upstream_sha }}
+      base_sha: ${{ inputs.base_sha }}
+      branch_sha: ${{ inputs.branch_sha }}
+      branch: ${{ inputs.branch }}
+      conflict_files: ${{ inputs.conflict_files }}
+      try: "1"
+      delay_seconds: "0"
+
+  try-2:
+    name: Review try 2
+    needs: try-1
+    if: ${{ !cancelled() && needs.try-1.outputs.done != 'true' }}
+    uses: ./.github/workflows/resolution-reviewer.yml
+    secrets: inherit
+    with:
+      kind: ${{ inputs.kind }}
+      pr_number: ${{ inputs.pr_number }}
+      upstream_sha: ${{ inputs.upstream_sha }}
+      base_sha: ${{ inputs.base_sha }}
+      branch_sha: ${{ inputs.branch_sha }}
+      branch: ${{ inputs.branch }}
+      conflict_files: ${{ inputs.conflict_files }}
+      try: "2"
+      delay_seconds: "120"
+
+  try-3:
+    name: Review try 3
+    needs: try-2
+    if: ${{ !cancelled() && needs.try-2.outputs.done != 'true' }}
+    uses: ./.github/workflows/resolution-reviewer.yml
+    secrets: inherit
+    with:
+      kind: ${{ inputs.kind }}
+      pr_number: ${{ inputs.pr_number }}
+      upstream_sha: ${{ inputs.upstream_sha }}
+      base_sha: ${{ inputs.base_sha }}
+      branch_sha: ${{ inputs.branch_sha }}
+      branch: ${{ inputs.branch }}
+      conflict_files: ${{ inputs.conflict_files }}
+      try: "3"
+      delay_seconds: "600"
+
+  # -------------------------------------------------------------------------
+  # record: trusted. Check the tries' verdicts, apply the rules and the
+  # attempt limit, record the outcome for the exact commit. Runs when a
+  # review try failed too, but not when the run was cancelled: a cancelled
+  # run is no verdict and must not use up an attempt.
+  # -------------------------------------------------------------------------
+  record:
+    name: Record the resolution review
+    needs: [try-1, try-2, try-3]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+    outputs:
+      decision: ${{ steps.decide.outputs.decision || steps.failed.outputs.decision }}
+      next_action: ${{ steps.record.outputs.next_action }}
+      attempt: ${{ steps.record.outputs.attempt }}
+      reason: ${{ steps.record.outputs.reason }}
+
+    steps:
+      - name: Validate inputs
+        run: |
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] && [[ "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            && [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] && [[ "$BRANCH_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            && { { [ "$KIND" = cherry-pick ] && [ "$BRANCH" = "claude/cherry-pick-pr-$PR_NUMBER" ]; } \
+                 || { [ "$KIND" = sync ] && [ "$PR_NUMBER" = 0 ] && [ "$BRANCH" = if/staging ]; }; } \
+            || { echo "::error::Invalid kind, pr_number, SHAs or branch"; exit 1; }
+
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          ref: if/main
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install pyyaml
+
+      - name: Import bot GPG key
+        uses: ./.github/actions/import-bot-gpg
+        with:
+          gpg-private-key: ${{ secrets.GH_BOT_GPG_KEY }}
+          gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
+          gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
+
+      # Exact artifact names; a pattern could let another artifact stand in.
+      # A try that did not run or failed has none, which the tool reads as
+      # no verdict. The novel-lines report's counts go into the ledger and
+      # its novel_count is checked against conflict_resolution.max_novel_lines.
+      - name: Download try 1's verdict
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: resolution-verdict-1.json
+          path: ${{ runner.temp }}/try-1/verdict/
+
+      - name: Download try 1's review input
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: resolution-review-input-1
+          path: ${{ runner.temp }}/try-1/input/
+
+      - name: Download try 2's verdict
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: resolution-verdict-2.json
+          path: ${{ runner.temp }}/try-2/verdict/
+
+      - name: Download try 2's review input
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: resolution-review-input-2
+          path: ${{ runner.temp }}/try-2/input/
+
+      - name: Download try 3's verdict
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: resolution-verdict-3.json
+          path: ${{ runner.temp }}/try-3/verdict/
+
+      - name: Download try 3's review input
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: resolution-review-input-3
+          path: ${{ runner.temp }}/try-3/input/
+
+      # The hard-fail scan runs on a diff computed here from the pushed
+      # commit, never on the artifact. A cherry-pick scans the whole branch
+      # diff. A sync scans what the resolution wrote: the result against
+      # git's own merge (which keeps conflict markers in the conflicted
+      # files), since the rest is upstream release/10.0.
+      # This step and the next may fail without failing the job: the step
+      # after them records the failure as a rejection, so the attempt count
+      # moves and an unreviewed head is not rebuilt without end.
+      - name: Compute the diff to scan
+        id: scan
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          git fetch --quiet --no-tags origin "$BRANCH_SHA"
+          if [ "$KIND" = sync ]; then PARENTS="$BASE_SHA $UPSTREAM_SHA"; else PARENTS="$BASE_SHA"; fi
+          [ "$(git rev-list --parents -n 1 "$BRANCH_SHA")" = "$BRANCH_SHA $PARENTS" ] \
+            || { echo "::error::$BRANCH_SHA does not have the parents $PARENTS"; exit 1; }
+          # The same scope the reviewer was given (tools/resolution-scope.py).
+          # Full context, so a sync scan sees every side of each conflict
+          # region; a dropped fork line is excused only by its own region.
+          python3 tools/resolution-scope.py --kind "$KIND" --base-sha "$BASE_SHA" \
+            --upstream-sha "$UPSTREAM_SHA" --branch-sha "$BRANCH_SHA" --out "$RUNNER_TEMP/scope" \
+            --full-context
+          cp "$RUNNER_TEMP/scope/resolution-full.diff" "$RUNNER_TEMP/scan.diff"
+
+      # Exits 0 approved, 1 rejected, 3 error. The reviewer ID comes from the
+      # config here, not from the review job, so a review job that never ran
+      # cannot leave the check empty. The hashes and results come from the
+      # tries' job outputs, which no other job can set.
+      - name: Apply the rules
+        id: decide
+        if: steps.scan.outcome == 'success'
+        continue-on-error: true
+        env:
+          TRIES_JSON: ${{ toJSON(needs) }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          MODEL=$(python3 -c "import yaml; print(yaml.safe_load(open('.if-fork/config.yaml'))['claude_models']['resolution_review'])")
+          echo "$TRIES_JSON" | jq --arg tmp "$RUNNER_TEMP" '[range(1; 4) as $n | .["try-\($n)"] as $t | {
+              try: $n, result: ($t.result // ""),
+              verdict: "\($tmp)/try-\($n)/verdict/resolution.json",
+              verdict_sha256: ($t.outputs.verdict_sha256 // ""),
+              upload: ($t.outputs.upload // ""),
+              novel_lines: "\($tmp)/try-\($n)/input/novel-lines.json",
+              novel_sha256: ($t.outputs.novel_sha256 // "")}]' > "$RUNNER_TEMP/tries.json"
+          cat "$RUNNER_TEMP/tries.json"
+          set +e
+          python tools/record-resolution-verdict.py \
+            --kind "$KIND" \
+            --tries "$RUNNER_TEMP/tries.json" \
+            --reviewer-id "$MODEL-resolution-review" \
+            --config .if-fork/config.yaml \
+            --final-diff "$RUNNER_TEMP/scan.diff" \
+            --ledger .if-fork/patch-ledger.jsonl \
+            --pr-number "$PR_NUMBER" \
+            --head-sha "$UPSTREAM_SHA" \
+            --branch-sha "$BRANCH_SHA" \
+            --branch "$BRANCH" \
+            --run-url "$RUN_URL" \
+            --output "$RUNNER_TEMP/decision.json" \
+            --events-out "$RUNNER_TEMP/resolution-events.jsonl"
+          rc=$?
+          set -e
+          case "$rc" in
+            0) echo "decision=approved" >> "$GITHUB_OUTPUT" ;;
+            1) echo "decision=rejected" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::record-resolution-verdict.py failed (exit $rc)"; exit 1 ;;
+          esac
+
+      # No decision (the scan or the rules step failed): record a review
+      # error and a rejection for the pair and this commit. Defaults apply
+      # when the config cannot be read.
+      - name: Record a failed decision as a rejection
+        id: failed
+        if: steps.decide.outcome != 'success'
+        env:
+          FAILED_STEP: ${{ steps.scan.outcome != 'success' && 'Compute the diff to scan' || 'Apply the rules' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          MODEL=$(python3 -c "import yaml; print(yaml.safe_load(open('.if-fork/config.yaml'))['claude_models']['resolution_review'])" 2>/dev/null || true)
+          set +e
+          python tools/record-resolution-verdict.py \
+            --kind "$KIND" \
+            --failed-step "$FAILED_STEP" \
+            --reviewer-id "${MODEL:-unknown}-resolution-review" \
+            --config .if-fork/config.yaml \
+            --ledger .if-fork/patch-ledger.jsonl \
+            --pr-number "$PR_NUMBER" \
+            --head-sha "$UPSTREAM_SHA" \
+            --branch-sha "$BRANCH_SHA" \
+            --branch "$BRANCH" \
+            --run-url "$RUN_URL" \
+            --output "$RUNNER_TEMP/decision.json" \
+            --events-out "$RUNNER_TEMP/resolution-events.jsonl"
+          rc=$?
+          set -e
+          [ "$rc" -eq 1 ] || { echo "::error::record-resolution-verdict.py --failed-step failed (exit $rc)"; exit 1; }
+          echo "decision=rejected" >> "$GITHUB_OUTPUT"
+
+      - name: Record in ledger
+        env:
+          GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
+          GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          DECISION: ${{ steps.decide.outputs.decision || steps.failed.outputs.decision }}
+        run: |
+          python tools/ledger-event.py \
+            --events-file "$RUNNER_TEMP/resolution-events.jsonl" \
+            --actor resolution-review \
+            --message "ledger: resolution $KIND pr#$PR_NUMBER $DECISION" \
+            --push
+
+      # Only after the ledger commit is pushed: the caller acts on
+      # next_action, and automerge reads the ledger.
+      - name: Publish the decision
+        id: record
+        run: |
+          NEXT=$(jq -r .next_action "$RUNNER_TEMP/decision.json")
+          ATTEMPT=$(jq -r .attempt "$RUNNER_TEMP/decision.json")
+          REASON=$(jq -r '.reasons | join("; ")' "$RUNNER_TEMP/decision.json" | tr -d '\r\n' | head -c 500)
+          case "$NEXT" in approved|retry|give_up) ;; *) echo "::error::Unexpected next action"; exit 1 ;; esac
+          [[ "$ATTEMPT" =~ ^[0-9]+$ ]] || { echo "::error::Unexpected attempt"; exit 1; }
+          {
+            echo "next_action=$NEXT"
+            echo "attempt=$ATTEMPT"
+            echo "reason=$REASON"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::Resolution of $KIND $BRANCH at $BRANCH_SHA, attempt $ATTEMPT: $NEXT. $REASON"

@@ -29,6 +29,13 @@
 #     files, as an artifact.
 #   - finalize recreates the merge itself, takes only the conflicted paths
 #     from the artifact, refuses stray files, and only then signs and pushes.
+#   - A merge with a Claude resolution is reviewed before anything merges it
+#     (resolution-review.yml, the same review pr-ingestion uses). Approved:
+#     open or update the sync PR. Rejected with an attempt left: dispatch
+#     this workflow again with force, which merges and resolves from scratch.
+#     Rejected on the last attempt: close the sync PR and record
+#     rebase_failed (reason resolution_rejected), so the SHA is skipped until
+#     upstream moves. No step waits for a person.
 #   - sync records the if/main commit it starts from (main_sha).
 #     resolve-conflicts and finalize merge onto exactly that commit, so a
 #     change that lands on if/main meanwhile cannot be overwritten by a
@@ -130,7 +137,18 @@ jobs:
           git remote add upstream https://github.com/dotnet/wpf.git 2>/dev/null || true
           git fetch --no-tags upstream release/10.0
           git fetch origin "$MAIN_BRANCH" "$STAGING_BRANCH" 2>/dev/null || git fetch origin "$MAIN_BRANCH"
-          UPSTREAM_SHA=$(git rev-parse upstream/release/10.0)
+          # A resolution retry pins the upstream SHA it was rejected for, so
+          # the attempt count (per upstream SHA) cannot restart when
+          # release/10.0 moves between runs. It must still be on release/10.0.
+          if [ -n "$PINNED_UPSTREAM" ]; then
+            [[ "$PINNED_UPSTREAM" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Invalid upstream_sha in the payload"; exit 1; }
+            git fetch --no-tags upstream "$PINNED_UPSTREAM"
+            git merge-base --is-ancestor "$PINNED_UPSTREAM" upstream/release/10.0 \
+              || { echo "::error::$PINNED_UPSTREAM is not on upstream release/10.0"; exit 1; }
+            UPSTREAM_SHA="$PINNED_UPSTREAM"
+          else
+            UPSTREAM_SHA=$(git rev-parse upstream/release/10.0)
+          fi
           export UPSTREAM_SHA
           echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
           echo "main_sha=$(git rev-parse "origin/$MAIN_BRANCH")" >> "$GITHUB_OUTPUT"
@@ -151,14 +169,22 @@ jobs:
              && git rev-parse --verify -q "origin/$STAGING_BRANCH" >/dev/null \
              && git merge-base --is-ancestor "$UPSTREAM_SHA" "origin/$STAGING_BRANCH"; then
             # The open PR has this upstream commit. Rebuild only when if/main
-            # moved on (beyond ledger commits) and automerge could merge the
-            # result: a scheduled run then does what a force dispatch from
-            # automerge would have, even if it replaced that pending run.
-            # A PR with Claude's resolution waits for a person instead.
+            # moved on (beyond ledger commits): a scheduled run then does what
+            # a force dispatch from automerge would have, even if it replaced
+            # that pending run. A rebuilt resolution gets a new review.
             BEHIND=$(git diff --name-only "origin/$STAGING_BRANCH...origin/$MAIN_BRANCH" \
                      | grep -vxF .if-fork/patch-ledger.jsonl || true)
+            # A Claude resolution counts as proposed only once the review
+            # approved that exact commit. One whose review never finished is
+            # rebuilt and reviewed again.
+            REVIEWED=true
             AGENT=$(git log -1 --format='%(trailers:key=Conflict-Resolved-By,valueonly)' "origin/$STAGING_BRANCH")
-            if [ -z "$BEHIND" ] || [ -n "$AGENT" ]; then
+            if [ -n "$AGENT" ] && ! python3 "$TRUSTED/tools/check-approval.py" \
+                 --ledger .if-fork/patch-ledger.jsonl --pr-number 0 --head-sha "$UPSTREAM_SHA" \
+                 --resolution-branch-sha "$(git rev-parse "origin/$STAGING_BRANCH")" --resolution-only; then
+              REVIEWED=false
+            fi
+            if [ -z "$BEHIND" ] && [ "$REVIEWED" = true ]; then
               echo "result=already-proposed" >> "$GITHUB_OUTPUT"
               echo "::notice::PR #$OPEN_PR already proposes upstream $UPSTREAM_SHA. Nothing to do."
               exit 0
@@ -197,7 +223,9 @@ jobs:
           echo "result=merge" >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ github.token }}
+          TRUSTED: ${{ github.workspace }}/trusted
           FORCE: ${{ (github.event_name == 'workflow_dispatch' && inputs.force_rebase) || (github.event_name == 'repository_dispatch' && github.event.client_payload.force == true) }}
+          PINNED_UPSTREAM: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.upstream_sha || '' }}
 
       - name: Close sync PR made redundant by if/main
         if: steps.plan.outputs.result == 'up-to-date' && steps.plan.outputs.open_pr != ''
@@ -394,6 +422,15 @@ jobs:
     outputs:
       pushed: ${{ steps.push.outputs.pushed }}
       reason: ${{ steps.check.outputs.reason }}
+      # fork_owned_paths or path_policy_error when the path rules refused
+      # the merge; recorded as the rebase_failed reason.
+      cause: ${{ steps.check.outputs.cause }}
+      # The merge commit pushed to if/staging, which the review checks and
+      # the ledger approval names.
+      branch_sha: ${{ steps.push.outputs.sha }}
+      # Conflicted paths, space-separated. prepare-resolver.sh already
+      # refused any path with characters outside A-Z a-z 0-9 . _ / + -.
+      conflict_files: ${{ steps.check.outputs.conflicts }}
 
     steps:
       - name: Validate SHAs
@@ -468,6 +505,7 @@ jobs:
             if ! bash "$TRUSTED/tools/conflict-handoff.sh" apply "$OUT/conflicts.txt" "$RUNNER_TEMP/resolution"; then
               echo "reason=Claude's resolution was missing, kept conflict markers or was a symlink." >> "$GITHUB_OUTPUT"; exit 0
             fi
+            echo "conflicts=$(tr '\n' ' ' < "$OUT/conflicts.txt")" >> "$GITHUB_OUTPUT"
           fi
 
           # Upstream workflows never run in the fork: drop any workflow file
@@ -484,6 +522,20 @@ jobs:
             echo "reason=The merge result touched files upstream did not change: $(echo "$STRAY" | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
+          # The path rules automerge-verify.sh applies to the sync PR
+          # (tools/path-policy.py): no fork-owned path, even one upstream
+          # changed. A merge automerge would refuse is never pushed.
+          git diff --cached --name-only "$BASE_SHA" > "$RUNNER_TEMP/changed.txt"
+          if ! python3 "$TRUSTED/tools/path-policy.py" --kind sync \
+                 --changed-files "$RUNNER_TEMP/changed.txt" > "$RUNNER_TEMP/path-policy.json"; then
+            cat "$RUNNER_TEMP/path-policy.json"
+            CAUSE=$(jq -r .reason "$RUNNER_TEMP/path-policy.json")
+            [ "$CAUSE" = fork_owned_paths ] || CAUSE=path_policy_error
+            echo "cause=$CAUSE" >> "$GITHUB_OUTPUT"
+            echo "reason=The merge changes fork-owned files, which automerge never merges: $(jq -r '.fork_owned // [] | join(" ")' "$RUNNER_TEMP/path-policy.json")" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           echo "ok=true" >> "$GITHUB_OUTPUT"
         env:
           HAS_CONFLICTS: ${{ needs.sync.outputs.has_conflicts }}
@@ -496,8 +548,8 @@ jobs:
         run: |
           set -euo pipefail
           SHORT=$(git rev-parse --short "$UPSTREAM_SHA")
-          # Claude's resolution is not reviewed by anyone, so the trailer
-          # makes automerge leave this merge to a person.
+          # The trailer marks Claude's resolution: automerge merges it only
+          # with a resolution_approved ledger event for this exact commit.
           TRAILERS=()
           if [ "$HAS_CONFLICTS" = true ]; then TRAILERS=(--trailer "Conflict-Resolved-By: claude"); fi
           if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
@@ -510,18 +562,121 @@ jobs:
           fi
           OLD=$(git rev-parse -q --verify "origin/$STAGING_BRANCH" || true)
           git push --force-with-lease="refs/heads/$STAGING_BRANCH:$OLD" origin "HEAD:refs/heads/$STAGING_BRANCH"
-          echo "pushed=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "pushed=true"
+            echo "sha=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
         env:
           HAS_CONFLICTS: ${{ needs.sync.outputs.has_conflicts }}
 
+  # -------------------------------------------------------------------------
+  # resolution-review: Fable reviews a merge Claude resolved (the same
+  # resolution-review.yml pr-ingestion uses). Recorded with pr_number 0 and
+  # the upstream SHA; returns next_action approved, retry or give_up.
+  # -------------------------------------------------------------------------
+  resolution-review:
+    name: Resolution review
+    needs: [gate, sync, finalize]
+    if: >-
+      always() && needs.gate.outputs.proceed == 'true' &&
+      needs.finalize.outputs.pushed == 'true' && needs.sync.outputs.has_conflicts == 'true'
+    uses: ./.github/workflows/resolution-review.yml
+    secrets: inherit
+    with:
+      kind: sync
+      pr_number: "0"
+      upstream_sha: ${{ needs.sync.outputs.upstream_sha }}
+      base_sha: ${{ needs.sync.outputs.main_sha }}
+      branch_sha: ${{ needs.finalize.outputs.branch_sha }}
+      branch: if/staging
+      conflict_files: ${{ needs.finalize.outputs.conflict_files }}
+
+  # -------------------------------------------------------------------------
+  # retry-resolution: rejected with an attempt left. Run this workflow again
+  # with force and the same upstream SHA: it merges exactly that commit and
+  # resolves from scratch in new jobs, and the new merge commit gets a new
+  # review. The ledger counts the attempts per upstream SHA.
+  # -------------------------------------------------------------------------
+  retry-resolution:
+    name: Resolve again from scratch
+    needs: [gate, sync, resolution-review]
+    if: >-
+      always() && needs.gate.outputs.proceed == 'true' &&
+      needs.resolution-review.outputs.next_action == 'retry'
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+    env:
+      UPSTREAM_SHA: ${{ needs.sync.outputs.upstream_sha }}
+
+    steps:
+      - name: Validate upstream SHA
+        run: '[[ "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Invalid upstream SHA"; exit 1; }'
+
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      # The new run waits for this one (same concurrency group).
+      - name: Dispatch a fresh sync run
+        run: |
+          jq -n --arg sha "$UPSTREAM_SHA" \
+            '{event_type: "nightly-rebase", client_payload: {force: true, upstream_sha: $sha}}' \
+            | gh api "repos/$GITHUB_REPOSITORY/dispatches" --input -
+          echo "::notice::Resolution attempt $ATTEMPT for upstream $UPSTREAM_SHA was rejected ($REASON). A fresh run merges and resolves again."
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ATTEMPT: ${{ needs.resolution-review.outputs.attempt }}
+          REASON: ${{ needs.resolution-review.outputs.reason }}
+
+  # -------------------------------------------------------------------------
+  # open-pr: keep one sync PR open for a clean merge or an approved
+  # resolution.
+  # -------------------------------------------------------------------------
+  open-pr:
+    name: Open or update the sync PR
+    needs: [gate, sync, finalize, resolution-review]
+    if: >-
+      always() && needs.gate.outputs.proceed == 'true' &&
+      needs.finalize.outputs.pushed == 'true' &&
+      (needs.sync.outputs.has_conflicts == 'false' ||
+       needs.resolution-review.outputs.next_action == 'approved')
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+    env:
+      UPSTREAM_SHA: ${{ needs.sync.outputs.upstream_sha }}
+      BRANCH_SHA: ${{ needs.finalize.outputs.branch_sha }}
+
+    steps:
+      - name: Validate SHAs
+        run: |
+          [[ "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]] && [[ "$BRANCH_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::Invalid upstream or branch SHA"; exit 1; }
+
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Check out if/main (trusted tools)
+        uses: actions/checkout@v4
+        with:
+          ref: if/main
+          path: trusted
+          persist-credentials: false
+
       - name: Open or update the sync PR
-        if: steps.push.outputs.pushed == 'true'
         run: |
           set -euo pipefail
-          SHORT=$(git rev-parse --short "$UPSTREAM_SHA")
+          SHORT="${UPSTREAM_SHA:0:12}"
           RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           if [ "$HAS_CONFLICTS" = true ]; then
-            MERGE_NOTE="**A person must merge this PR.** The merge conflicted with the fork in $(sed 's/.*/`&`/' "$RUNNER_TEMP/merge/conflicts.txt" | paste -sd ' '), and Claude wrote the resolution (commit trailer \`Conflict-Resolved-By: claude\`). Nobody has reviewed that resolution. \`automerge.yml\` will not merge this PR. Review the resolved files, then merge it by hand with a merge commit when \`Build\` passes."
+            [ "$NEXT_ACTION" = approved ] || { echo "::error::Resolution not approved"; exit 1; }
+            MERGE_NOTE="The merge conflicted with the fork, and Claude wrote the resolution (commit trailer \`Conflict-Resolved-By: claude\`). A separate review of that resolution (\`resolution-review.md\`, attempt $ATTEMPT) approved merge commit \`$BRANCH_SHA\`, and the ledger records it as \`resolution_approved\`. When \`Build\` passes, \`automerge.yml\` merges this PR with a merge commit (unless \`IF_AUTOMERGE_FROZEN=true\`). A new push to \`if/staging\` needs a new review."
           else
             MERGE_NOTE="The \`Build\` workflow runs on this PR. When it passes, \`automerge.yml\` merges this PR with a merge commit (unless \`IF_AUTOMERGE_FROZEN=true\`)."
           fi
@@ -551,16 +706,19 @@ jobs:
           # Label separately so a missing label cannot fail PR creation.
           gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label automated \
             || echo "::warning::Could not add label 'automated' to PR #$PR; automerge.yml will skip it."
-          bash "$TRUSTED/tools/human-merge-label.sh" "$PR" "$HAS_CONFLICTS"
+          # The automatic path never needs a person; clear a label left from
+          # before.
+          bash "$TRUSTED/tools/human-merge-label.sh" "$PR" false
           echo "::notice::Sync PR: #$PR"
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           OPEN_PR: ${{ needs.sync.outputs.open_pr }}
           HAS_CONFLICTS: ${{ needs.sync.outputs.has_conflicts }}
+          NEXT_ACTION: ${{ needs.resolution-review.outputs.next_action }}
+          ATTEMPT: ${{ needs.resolution-review.outputs.attempt }}
           TRUSTED: ${{ github.workspace }}/trusted
 
       - name: Close blocked-sync issue after a successful sync
-        if: steps.push.outputs.pushed == 'true'
         run: bash "$TRUSTED/tools/nightly-close-blocked.sh"
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -568,17 +726,23 @@ jobs:
 
   # -------------------------------------------------------------------------
   # report-blocked: one issue and one rebase_failed ledger event per SHA.
+  # Also the end of a resolution the review rejected on the last attempt:
+  # the sync PR is closed and rebase_failed (reason resolution_rejected)
+  # makes the next runs skip this SHA until upstream moves.
   # -------------------------------------------------------------------------
   report-blocked:
     name: Report blocked sync
-    needs: [gate, sync, resolve-conflicts, finalize]
+    needs: [gate, sync, resolve-conflicts, finalize, resolution-review]
     if: >-
       always() && needs.gate.outputs.proceed == 'true' &&
-      needs.sync.outputs.result == 'merge' && needs.finalize.outputs.pushed != 'true'
+      needs.sync.outputs.result == 'merge' &&
+      (needs.finalize.outputs.pushed != 'true' ||
+       needs.resolution-review.outputs.next_action == 'give_up')
     runs-on: ubuntu-latest
     environment: bot-credentials
     env:
       UPSTREAM_SHA: ${{ needs.sync.outputs.upstream_sha }}
+      NEXT_ACTION: ${{ needs.resolution-review.outputs.next_action }}
 
     steps:
       - name: Validate upstream SHA
@@ -615,11 +779,31 @@ jobs:
           name: nightly-merge-resolution
           path: ${{ runner.temp }}/resolution
 
+      - name: Close the sync PR for a rejected resolution
+        if: env.NEXT_ACTION == 'give_up'
+        run: |
+          set -euo pipefail
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          PR=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open \
+            --head "$STAGING_BRANCH" --base "$MAIN_BRANCH" --json number --jq '.[0].number // empty')
+          if [ -n "$PR" ]; then
+            gh pr close "$PR" --repo "$GITHUB_REPOSITORY" --comment "The resolution review rejected Claude's resolution of upstream \`$UPSTREAM_SHA\` $ATTEMPT times ($REVIEW_REASON). This SHA is recorded as rebase_failed; the next sync starts when upstream moves. Run: $RUN_URL"
+          fi
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ATTEMPT: ${{ needs.resolution-review.outputs.attempt }}
+          REVIEW_REASON: ${{ needs.resolution-review.outputs.reason }}
+
       - name: Open or update the blocked-sync issue and record rebase_failed
         run: |
           set -euo pipefail
           RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           REASON="${DENYLIST_REPORT:-$FINALIZE_REASON}"
+          CAUSE="${FINALIZE_CAUSE:-merge_blocked}"
+          if [ "$NEXT_ACTION" = give_up ]; then
+            CAUSE=resolution_rejected
+            REASON="The resolution review rejected Claude's resolution $ATTEMPT times. Last reasons: $REVIEW_REASON"
+          fi
           if [ -z "$REASON" ]; then
             REASON="The conflict-resolution or finalize job did not finish (resolve-conflicts: $RESOLVE_RESULT, finalize: $FINALIZE_RESULT)."
           fi
@@ -630,7 +814,7 @@ jobs:
             echo "- Run: $RUN_URL"
             echo "- Reason: $REASON"
             echo
-            echo "To fix: merge \`$UPSTREAM_SHA\` into a branch from \`if/main\` by hand, push it as \`if/staging\`, and open a PR to \`if/main\`. The next nightly run closes this issue once \`if/main\` contains the upstream SHA. To make the bot try this SHA again, run Nightly Rebase with \`force_rebase\`."
+            echo "Nothing needs to be done by hand. The nightly job skips this SHA and starts a new sync when upstream \`release/10.0\` moves, and it closes this issue once \`if/main\` contains upstream. To retry this SHA now, run Nightly Rebase with \`force_rebase\`."
             if [ -s "$RUNNER_TEMP/resolution/escalation.md" ]; then
               echo
               echo "### Claude's escalation report"
@@ -660,12 +844,15 @@ jobs:
             --pr-number 0 \
             --head-sha "$UPSTREAM_SHA" \
             --actor nightly-rebase \
-            --details-json "{\"upstream_sha\":\"$UPSTREAM_SHA\",\"run_url\":\"$RUN_URL\"}" \
+            --details-json "{\"upstream_sha\":\"$UPSTREAM_SHA\",\"reason\":\"$CAUSE\",\"run_url\":\"$RUN_URL\"}" \
             --push
           echo "::warning::Upstream sync blocked. See the '$BLOCKED_ISSUE_TITLE' issue."
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           DENYLIST_REPORT: ${{ needs.sync.outputs.denylist_report }}
           FINALIZE_REASON: ${{ needs.finalize.outputs.reason }}
+          FINALIZE_CAUSE: ${{ needs.finalize.outputs.cause }}
           RESOLVE_RESULT: ${{ needs.resolve-conflicts.result }}
           FINALIZE_RESULT: ${{ needs.finalize.result }}
+          ATTEMPT: ${{ needs.resolution-review.outputs.attempt }}
+          REVIEW_REASON: ${{ needs.resolution-review.outputs.reason }}

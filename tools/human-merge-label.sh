@@ -3,9 +3,11 @@
 # merge, or clear the mark.
 #
 # true adds the needs-human-merge label (and creates the label when the
-# repository does not have it yet); false removes it. automerge.yml does not
-# read the label: it refuses such PRs by their Conflict-Resolved-By trailer.
-# The label is for people.
+# repository does not have it yet); false removes it. The pipeline itself
+# only ever removes it: no automatic path waits for a person. Use true by
+# hand for a branch a person pushed or edited. automerge.yml does not read
+# the label: it decides from the commit (the Conflict-Resolved-By trailer and
+# a resolution_approved ledger event for that exact commit).
 #
 # Environment: GH_TOKEN, GITHUB_REPOSITORY.
 set -euo pipefail

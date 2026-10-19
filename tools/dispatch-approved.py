@@ -16,12 +16,13 @@ Behaviour
                                  client_payload: {pr_number, head_sha,
                                                   review_1_summary, review_2_summary}
 
-- ``verdict == "escalated"``  → One open issue per upstream PR. If an open
-                                 issue with the PR's marker exists, add a comment;
-                                 otherwise POST /repos/<repo>/issues
+- ``verdict == "escalated"``  → One open notice issue per upstream PR. If an
+                                 open issue with the PR's marker exists, add a
+                                 comment; otherwise POST /repos/<repo>/issues
                                  title: "review-disagreement: PR #<N>"
-                                 labels: ["review-disagreement", "needs-human",
-                                          "automated"]
+                                 labels: ["review-disagreement", "automated"]
+                                 Nothing is applied and nothing waits on a person:
+                                 a new upstream head starts a new review.
 
 - ``verdict == "review_error"`` → Nothing. pr-discovery retries the review.
 
@@ -108,7 +109,8 @@ def _github_get(*, url: str, token: str) -> Any:
 # Verdict handlers
 # ---------------------------------------------------------------------------
 
-ESCALATION_LABELS = ["review-disagreement", "needs-human", "automated"]
+# The issue is a notice: it asks for no action, so it carries no needs-human label.
+ESCALATION_LABELS = ["review-disagreement", "automated"]
 
 
 def _escalation_marker(pr_number: int) -> str:
@@ -210,16 +212,20 @@ def _handle_escalated(
     title = f"review-disagreement: PR #{pr_number}"
     body_lines = [
         _escalation_marker(pr_number),
-        f"## Upstream PR #{pr_number} needs a human decision",
+        f"## Upstream PR #{pr_number} was not applied (notice)",
         "",
         f"https://github.com/dotnet/wpf/pull/{pr_number}",
         "",
-        "The automatic review did not approve or reject this PR. The reviewers",
+        "The automatic review did not approve this head of the PR. The reviewers",
         "disagreed, one asked for a human, a safe verdict was below the tier's",
         "confidence threshold, a deterministic check (hard-fail pattern or",
         "denylisted file) fired, or the review failed three times (a reviewer",
         "left no valid verdict, or the review input could not be prepared).",
-        "The reason below says which. Nothing is applied until a human decides.",
+        "The reason below says which.",
+        "",
+        "Nothing needs to be done. The pipeline does not apply this head of the",
+        "PR. When upstream pushes a new commit to the PR, discovery reviews it",
+        "again.",
         "",
         *details_lines,
     ]

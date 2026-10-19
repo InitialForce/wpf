@@ -19,7 +19,7 @@ Both reviewers run the same model, `claude-fable-5-1` (`claude_models.review_1` 
 **Mitigation:**
 - The two reviewers have different prompts (`pr-review-1.md`, `pr-review-2.md`) and run as separate jobs. Each verdict is accepted only from its own job's artifact.
 - `tools/merge-verdicts.py` applies the hard-fail patterns, `file_denylist` and the tier confidence floor deterministically to the pinned diff after the reviews. A hit turns `approved` into `escalated`, whatever the reviewers said.
-- A conflict resolution written by Claude after review is never merged without a person (RISK-017).
+- A conflict resolution written by Claude after review merges only when a separate Fable review approved that exact commit (RISK-017).
 - Roslyn analyzer (deterministic third gate): not built.
 
 **Owner:** Øystein Krog
@@ -40,7 +40,7 @@ An attacker who can open a PR on `dotnet/wpf` can put instructions in the PR bod
 - Hard-fail patterns in `review_hard_fail_patterns` (`[DllImport`, `unsafe`, `extern`, `base64`, URLs outside github.com and microsoft.com, `[SecurityCritical]`, `[LinkDemand]`, `Demand()`, `Process.Start`, `AppContext.TryGetSwitch`, `Assembly.Load*`, `BinaryFormatter`, `XmlSerializer.Deserialize`) are checked by `merge-verdicts.py` on the diff, not by the model. A match escalates.
 - Every Claude step loads only trusted settings (`--setting-sources user`, `--strict-mcp-config`, hooks off), has no shell, and has reads of `/proc` and the runner's `_temp` folder denied. Tool rules limit writes to the step's output files.
 - No Claude job holds the App token, the GPG key or a stored git credential. They do hold `ANTHROPIC_API_KEY`.
-- Conflict resolutions go to a person before merge (RISK-017).
+- A conflict resolution merges only after a separate Fable review approves it, with a code-built list of novel lines the reviewer must justify and the hard-fail scan rerun on a diff the trusted job computes (RISK-017).
 
 **Residual risk:** Read deny rules are applied by Claude Code on a best-effort basis to Grep and Glob; nobody has tested on GitHub whether `/proc/self/environ` is out of reach in every tool. A leaked `ANTHROPIC_API_KEY` costs money but gives no write access to the repository.
 
@@ -206,11 +206,11 @@ The `RuntimePackAsset` override target fires at `AfterTargets="Build;CopyFilesTo
 **Severity:** med
 **Status:** monitoring
 
-As the fork carries more patches, more upstream changes conflict with them, both in the nightly merge of upstream `release/10.0` and in new cherry-picks. Each conflict that Claude resolves now needs a person to review and merge (RISK-017), so the person's load grows with the stack.
+As the fork carries more patches, more upstream changes conflict with them, both in the nightly merge of upstream `release/10.0` and in new cherry-picks. Each conflict costs up to two resolver runs and two Fable reviews (RISK-017). A change whose resolution is rejected twice is dropped: a cherry-pick is escalated, and a sync SHA waits for upstream to move. More conflicts mean more cost and more dropped changes.
 
 **Mitigation:**
 - The ingestion pre-flight check (`tools/cherry-pick-pre-flight.sh`) skips a PR that upstream already contains.
-- A blocked nightly sync is retried only when upstream moves or a person asks, so a stuck conflict costs one Claude run, not one a night.
+- A blocked nightly sync is retried only when upstream moves or someone runs it with `force_rebase`, so a stuck conflict costs at most two resolver runs per upstream SHA, not two a night.
 - Not in place: a stack-size cap, a scheduled keep-or-retire review of old patches, `rerere`.
 
 **Owner:** Øystein Krog
@@ -306,22 +306,24 @@ The `perf` job in `build.yml` runs no benchmark. The release perf gate runs `tes
 
 ---
 
-## RISK-017: Unreviewed conflict resolutions by Claude
+## RISK-017: Conflict resolutions written by Claude
 
 **Severity:** high
-**Status:** mitigated by a human gate
+**Status:** mitigated by an independent Fable review bound to the commit, for cherry-picks and sync PRs
 
-The two reviews cover the upstream diff. When the cherry-pick or the nightly merge conflicts, Claude writes the conflicted files, and its input includes the conflict hunks, which come from upstream. Nothing checks that content automatically.
+The two reviews cover the upstream diff. When the cherry-pick or the nightly merge conflicts, Claude writes the conflicted files, and its input includes the conflict hunks, which come from upstream. That content was not part of what the two reviewers approved.
 
 **Mitigation:**
-- The trusted `finalize` job marks such commits with the trailer `Conflict-Resolved-By: claude`. `automerge.yml` refuses that trailer, and for the sync PR any file that differs from git's own merge. The PR gets the label `needs-human-merge`, and a person reviews and merges it.
+- The trusted `finalize` job marks such commits with the trailer `Conflict-Resolved-By: claude`.
+- `resolution-review.yml`, called by `pr-ingestion.yml` and `nightly-rebase.yml`, runs a separate Fable review of the resolution (`resolution-review.md`) with the PR reviewers' limits: no shell, no credentials beyond a read-only token, Read on its input only, Write on its verdict only. Its input includes a novel-lines report built by code (`tools/novel-lines.py`): every added line found in neither the upstream change nor the fork's file. The reviewer must justify each one. A trusted job checks that the verdict came from the review job (upload, hash, reviewer ID) and requires confidence of at least `conflict_resolution.review_min_confidence`. It also reruns the hard-fail patterns on a diff it computes itself. For a cherry-pick that is the whole branch diff; for a sync it is what the resolution changed against git's own merge: every line it added; every merged line it removed outside a conflict region; and every fork-side line it removed from a conflict region, unless that same conflict region shows upstream removed it (its base side has the line, its upstream side does not, and the fork side has it exactly as often as the base side; an upstream removal elsewhere in the file excuses nothing). Discarding upstream's side of a region is allowed. So dropping a fork security line, inside or outside the conflict region, is caught. It rejects more than `conflict_resolution.max_novel_lines` (50) novel lines whatever the reviewer says, using the count from the `prepare` job (no model, no secrets), checked against that job's hash. A review try without a valid verdict is recorded as `resolution_review_error` and retried, at most three tries per commit, and then counts as rejected. It records `resolution_approved` or `resolution_rejected` with the exact commit SHA. `automerge.yml` merges a resolution only with `resolution_approved` for its head SHA, so any new push needs a new review. Every other check (bot signature, approved upstream pair, `src/` and `eng/` only for a cherry-pick, denylists, Build, up to date with `if/main`) still applies. For the sync PR, every file that differs from git's own merge must be one git could not merge.
+- A rejection never merges anything. The resolver runs once more from scratch, and after the second rejection the change is dropped (`escalated` for a cherry-pick, `rebase_failed` for a sync).
 - Claude cannot touch denylisted or fork-owned files: those conflicts escalate before Claude starts.
 
-**Residual risk:** the person may approve without reading the resolution closely. The runbook ("Merge a PR that needs a person") says what to compare.
+**Residual risk:** the reviewer is a model and reads content the upstream author controls, so a carefully written resolution could convince it. The novel-lines report only catches added lines with new text. A resolution that reorders lines, drops lines, or reuses a line from elsewhere in the same file produces no novel line. Dropped lines are listed for the reviewer, but no code rule acts on them. No person reads an approved resolution before it ships. Nothing has run on GitHub yet. The runbook ("Check or override a resolution review") says how to inspect one and how to block it.
 
 **Owner:** Øystein Krog
 
-**Related:** operator-runbook.md "Merge a PR that needs a person"
+**Related:** operator-runbook.md "Check or override a resolution review"
 
 ---
 

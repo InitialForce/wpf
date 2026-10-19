@@ -20,6 +20,10 @@
 #   behind   every check passed, but if/main has moved on (beyond ledger
 #            commits); $OUT/upstream_pr and $OUT/upstream_head are set for a
 #            cherry-pick branch so the caller can re-dispatch ingestion
+#   unreviewed  the head carries Conflict-Resolved-By and the ledger has no
+#            resolution review event for it at all (neither approved nor
+#            rejected); the caller asks for a rebuild, which is reviewed.
+#            upstream_pr and upstream_head are set as for behind
 #   refuse   a check failed; $OUT/reason says which
 # Always exits 0 unless the inputs are malformed.
 set -euo pipefail
@@ -53,22 +57,43 @@ bot_signed() {
     | awk -v f="$KEY_FPR" '$2 == "VALIDSIG" && ($3 == f || $NF == f) {ok = 1} END {exit !ok}'
 }
 
-# Nobody reviews what the conflict agent writes, so a person merges it.
-HUMAN_MERGE="a person must review and merge it (needs-human-merge)"
+# A conflict resolution written by Claude merges by itself only when the
+# Fable resolution review approved that exact commit (resolution_approved in
+# the if/main ledger with branch_sha = the PR head). A resolution with no such
+# approval, or one made by anyone else, is refused. One that was never
+# reviewed at all is "unreviewed", so automerge asks for a rebuild.
+NOT_APPROVED="no resolution review approved this exact commit"
+resolution_refused() { # <what>: unreviewed when no decision exists, else refuse
+  if [ "$(jq -r .reason "$OUT/resolution.json")" = "no resolution review approved commit $HEAD_SHA" ]; then
+    echo unreviewed > "$OUT/result"
+    echo "Claude resolved a conflict in this $1 and no resolution review has decided on commit $HEAD_SHA" > "$OUT/reason"
+    echo "PR #$PR is unreviewed: $(cat "$OUT/reason")"
+    exit 0
+  fi
+  refuse "Claude resolved a conflict in this $1 and $NOT_APPROVED ($(jq -r .reason "$OUT/resolution.json"))"
+}
 agent_resolved() {
   [ -n "$(git log -1 --format='%(trailers:key=Conflict-Resolved-By,valueonly)' "$1")" ]
 }
 
 # --- Protected paths and the file denylist ---------------------------------
 git diff --name-only "$MAIN...HEAD" > "$OUT/changed.txt"
-# Fork-owned paths: the pipeline's own workflows, code, policy, ledger, bot
-# key, tests and packaging. Upstream dotnet/wpf has none of them (it has
-# .github/, but the fork deleted upstream's workflows), so neither a
-# cherry-pick nor the sync PR may change them without a person. Same list as
-# the fork-owned part of file_denylist in .if-fork/config.yaml.
-FORK_OWNED='^(\.github/|\.if-fork/|tools/|tests/|test/|docs/|perf/|data/|packaging/InitialForce\.[^/]*/|FORK\.md$|NOTICE\.md$|pyproject\.toml$|(.*/)?\.claude/|(.*/)?(CLAUDE\.md|CLAUDE\.local\.md|AGENTS\.md|\.mcp\.json)$)'
-PROTECTED=$(grep -E "$FORK_OWNED" "$OUT/changed.txt" || true)
-[ -z "$PROTECTED" ] || refuse "touches fork-owned files that need a human merge: $(echo "$PROTECTED" | tr '\n' ' ')"
+# Path rules shared with ingestion and the nightly sync (tools/path-policy.py):
+# no fork-owned path for either kind, and for a cherry-pick only src/ and
+# eng/ (eng/ is still subject to file_denylist below). Ingestion runs the
+# same check before it pushes, so a refusal here means the rule changed or a
+# person pushed to the branch.
+path_policy() {
+  python3 "$TRUSTED/tools/path-policy.py" --kind "$1" \
+    --changed-files "$OUT/changed.txt" > "$OUT/path-policy.json" && return 0
+  local hit
+  hit=$(jq -r '(.fork_owned // []) + (.outside_allowlist // []) | join(" ")' "$OUT/path-policy.json")
+  case "$(jq -r .reason "$OUT/path-policy.json")" in
+    fork_owned_paths) refuse "touches fork-owned files: $hit" ;;
+    paths_outside_allowlist) refuse "changes files outside src/ and eng/: $hit" ;;
+    *) refuse "path policy check failed: $(jq -r .reason "$OUT/path-policy.json")" ;;
+  esac
+}
 
 deny() {
   python3 "$TRUSTED/tools/check-denylist.py" --config "$TRUSTED/.if-fork/config.yaml" \
@@ -82,26 +107,32 @@ case "$HEAD_BRANCH" in
     [[ "$BRANCH_PR" =~ ^[0-9]+$ ]] || refuse "bad branch name $HEAD_BRANCH"
     [ "$(git rev-list --count "$MAIN..HEAD")" -eq 1 ] || refuse "cherry-pick PR must have exactly one commit"
     bot_signed HEAD || refuse "commit $HEAD_SHA is not signed by the bot key"
-    agent_resolved HEAD && refuse "Claude resolved a conflict in this cherry-pick; $HUMAN_MERGE"
     UP_URL=$(git log -1 --format='%(trailers:key=Upstream-PR,valueonly)' HEAD | head -n1)
     UP_HEAD=$(git log -1 --format='%(trailers:key=Upstream-PR-Head,valueonly)' HEAD | head -n1)
     [ "$UP_URL" = "https://github.com/dotnet/wpf/pull/$BRANCH_PR" ] \
       || refuse "Upstream-PR trailer does not match branch $HEAD_BRANCH"
     [[ "$UP_HEAD" =~ ^[0-9a-f]{40}$ ]] || refuse "missing or bad Upstream-PR-Head trailer"
-    # Allowlist: a cherry-pick merges by itself only when it stays inside
-    # upstream's source and build folders (eng/ is still subject to
-    # file_denylist below). Anything else goes to a person.
-    OUTSIDE=$(grep -vE '^(src|eng)/' "$OUT/changed.txt" || true)
-    [ -z "$OUTSIDE" ] || refuse "changes files outside src/ and eng/, which need a human merge: $(echo "$OUTSIDE" | tr '\n' ' ')"
+    path_policy cherry-pick
     git show "$MAIN:.if-fork/patch-ledger.jsonl" > "$OUT/ledger.jsonl"
     python3 "$TRUSTED/tools/check-approval.py" --ledger "$OUT/ledger.jsonl" \
       --pr-number "$BRANCH_PR" --head-sha "$UP_HEAD" > "$OUT/approval.json" \
       || refuse "upstream #$BRANCH_PR at $UP_HEAD has no approved verdict in the ledger"
+    # Claude resolved a conflict: the if/main ledger must hold a
+    # resolution_approved event for this upstream pair whose branch_sha is
+    # this very commit, with no later resolution_rejected for it. Any new
+    # push changes the SHA, so an approval never carries over.
+    if agent_resolved HEAD; then
+      python3 "$TRUSTED/tools/check-approval.py" --ledger "$OUT/ledger.jsonl" \
+        --pr-number "$BRANCH_PR" --head-sha "$UP_HEAD" --resolution-branch-sha "$HEAD_SHA" \
+        > "$OUT/resolution.json" || RESOLUTION_REFUSED=1
+    fi
     deny "$OUT/changed.txt"
     echo "$BRANCH_PR" > "$OUT/upstream_pr"
     echo "$UP_HEAD" > "$OUT/upstream_head"
+    [ -z "${RESOLUTION_REFUSED:-}" ] || resolution_refused cherry-pick
     ;;
   if/staging)
+    path_policy sync
     UPSTREAM=upstream/release/10.0
     [ "$(git rev-list --parents -n 1 HEAD | wc -w)" -eq 3 ] || refuse "sync PR head is not a merge commit"
     bot_signed HEAD || refuse "merge commit $HEAD_SHA is not signed by the bot key"
@@ -111,17 +142,29 @@ case "$HEAD_BRANCH" in
     [ -z "$OTHER" ] || refuse "commits that are neither upstream nor bot-signed: $(echo "$OTHER" | tr '\n' ' ')"
     # Files where the result differs from git's own merge are the conflict
     # resolutions. Kept fork deletions (absent from if/main and the result)
-    # are not changes.
-    AUTO=$(git merge-tree --write-tree HEAD^1 HEAD^2 | head -n1 || true)
+    # are not changes. merge-tree lists the conflicted files after the tree.
+    git merge-tree --write-tree --name-only --no-messages HEAD^1 HEAD^2 > "$OUT/auto.txt" || true
+    AUTO=$(head -n1 "$OUT/auto.txt")
     [[ "$AUTO" =~ ^[0-9a-f]{40}$ ]] || refuse "could not recreate the merge"
+    tail -n +2 "$OUT/auto.txt" | sed '/^$/d' | sort -u > "$OUT/conflicted.txt"
     git diff --name-only "$AUTO" HEAD | while read -r f; do
       if git cat-file -e "HEAD:$f" 2>/dev/null || git cat-file -e "HEAD^1:$f" 2>/dev/null; then
         echo "$f"
       fi
     done > "$OUT/resolved.txt"
     deny "$OUT/resolved.txt"
-    if agent_resolved HEAD || [ -s "$OUT/resolved.txt" ]; then
-      refuse "the sync merge holds conflict resolutions ($(tr '\n' ' ' < "$OUT/resolved.txt")); $HUMAN_MERGE"
+    if [ -s "$OUT/resolved.txt" ] || agent_resolved HEAD; then
+      # Only Claude's trailer can be approved, and only for the files git
+      # could not merge: every other file must equal git's own merge.
+      agent_resolved HEAD \
+        || refuse "the sync merge differs from git's own merge in $(tr '\n' ' ' < "$OUT/resolved.txt")without a Conflict-Resolved-By trailer"
+      EXTRA=$(sort -u "$OUT/resolved.txt" | comm -23 - "$OUT/conflicted.txt")
+      [ -z "$EXTRA" ] || refuse "the sync merge changes files git merged cleanly: $(echo "$EXTRA" | tr '\n' ' ')"
+      git show "$MAIN:.if-fork/patch-ledger.jsonl" > "$OUT/ledger.jsonl"
+      python3 "$TRUSTED/tools/check-approval.py" --ledger "$OUT/ledger.jsonl" \
+        --pr-number 0 --head-sha "$(git rev-parse HEAD^2)" --resolution-branch-sha "$HEAD_SHA" \
+        --resolution-only > "$OUT/resolution.json" \
+        || resolution_refused "sync merge"
     fi
     ;;
   *)

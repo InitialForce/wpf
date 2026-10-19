@@ -8,9 +8,10 @@ Structural assertions (>= 18):
   1.  YAML parses cleanly
   2.  repository_dispatch trigger with correct type
   3.  workflow_dispatch trigger with pr_number and head_sha inputs
-  4.  All 7 jobs present
+  4.  All 10 jobs present
   5.  Needs chain is correct (gate → pre-flight → sha-smuggling-check → cherry-pick
-      → [resolve-conflicts → finalize] → open-pr). Build runs in build.yml on the PR.
+      → [resolve-conflicts → finalize → resolution-review → retry-resolution or
+      give-up-resolution] → open-pr). Build runs in build.yml on the PR.
   6.  sha-smuggling-check is NOT a direct dependency of cherry-pick (it must come BEFORE)
   7.  SHA-smuggling check job exists and references ledger-event.py
   8.  tools/cherry-pick-pre-flight.sh is referenced
@@ -50,6 +51,9 @@ EXPECTED_JOBS = {
     "cherry-pick",
     "resolve-conflicts",
     "finalize",
+    "resolution-review",
+    "retry-resolution",
+    "give-up-resolution",
     "open-pr",
 }
 
@@ -61,7 +65,10 @@ EXPECTED_NEEDS: dict[str, set[str]] = {
     "cherry-pick": {"sha-smuggling-check"},
     "resolve-conflicts": {"cherry-pick"},
     "finalize": {"resolve-conflicts"},
-    "open-pr": {"cherry-pick", "finalize"},
+    "resolution-review": {"finalize"},
+    "retry-resolution": {"resolution-review"},
+    "give-up-resolution": {"resolution-review"},
+    "open-pr": {"cherry-pick", "finalize", "resolution-review"},
 }
 
 # Jobs that must guard on the gate proceed output (all downstream jobs)
@@ -71,6 +78,9 @@ PROCEED_GUARDED_JOBS = {
     "cherry-pick",
     "resolve-conflicts",
     "finalize",
+    "resolution-review",
+    "retry-resolution",
+    "give-up-resolution",
     "open-pr",
 }
 
@@ -176,7 +186,10 @@ def test_all_jobs_present(workflow: dict) -> None:
     ("cherry-pick", {"sha-smuggling-check"}),
     ("resolve-conflicts", {"cherry-pick"}),
     ("finalize", {"cherry-pick", "resolve-conflicts"}),
-    ("open-pr", {"cherry-pick", "finalize"}),
+    ("resolution-review", {"cherry-pick", "finalize"}),
+    ("retry-resolution", {"finalize", "resolution-review"}),
+    ("give-up-resolution", {"cherry-pick", "finalize", "resolution-review"}),
+    ("open-pr", {"cherry-pick", "finalize", "resolution-review"}),
 ])
 def test_needs_chain(workflow: dict, job_name: str, expected_needs: set) -> None:
     """Each job must declare the correct needs dependencies."""
@@ -340,7 +353,7 @@ def test_finish_runs_denylist_on_branch_diff_before_push() -> None:
 # Security: payload validation and no expressions in shell (items 3 and 6)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("job_name", sorted(EXPECTED_JOBS - {"gate"}))
+@pytest.mark.parametrize("job_name", sorted(EXPECTED_JOBS - {"gate", "resolution-review"}))
 def test_every_job_validates_payload_first(workflow: dict, job_name: str) -> None:
     first = workflow["jobs"][job_name]["steps"][0]
     assert first["name"] == "Validate payload"
@@ -576,7 +589,7 @@ def test_scripts_refuse_a_missing_base_sha() -> None:
         assert '[[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]' in script.read_text(), script.name
 
 
-def test_agent_resolution_is_marked_for_a_person(workflow: dict) -> None:
+def test_agent_resolution_is_marked_and_reviewed(workflow: dict) -> None:
     finish = next(s for s in workflow["jobs"]["finalize"]["steps"] if s.get("id") == "finish")
     assert finish["env"]["CONFLICT_RESOLVED"] == "true"
     # The clean path in cherry-pick must not set it.
@@ -584,7 +597,70 @@ def test_agent_resolution_is_marked_for_a_person(workflow: dict) -> None:
         s for s in workflow["jobs"]["cherry-pick"]["steps"] if s.get("id") == "finish"
     )
     assert "CONFLICT_RESOLVED" not in pick_finish["env"]
-    open_pr = next(s for s in workflow["jobs"]["open-pr"]["steps"] if s.get("id") == "open-pr")
-    assert open_pr["env"]["CONFLICT_RESOLVED"] == "${{ needs.finalize.outputs.pushed == 'true' }}"
-    assert 'bash tools/human-merge-label.sh "$PR_NUM" "$CONFLICT_RESOLVED"' in open_pr["run"]
-    assert "A person must merge this PR" in open_pr["run"]
+
+
+def test_finalize_hands_on_the_pushed_commit(workflow: dict) -> None:
+    job = workflow["jobs"]["finalize"]
+    assert job["outputs"]["branch_sha"] == "${{ steps.finish.outputs.sha }}"
+    assert job["outputs"]["conflict_files"] == "${{ steps.overlay.outputs.conflicts }}"
+    text = FINISH_SCRIPT.read_text()
+    assert 'git rev-parse HEAD > "$OUT/sha"' in text
+    assert text.index("git push") < text.index('> "$OUT/sha"')
+
+
+def test_resolution_review_is_called_for_a_pushed_resolution(workflow: dict) -> None:
+    job = workflow["jobs"]["resolution-review"]
+    assert job["uses"] == "./.github/workflows/resolution-review.yml"
+    assert job["secrets"] == "inherit"
+    assert "needs.finalize.outputs.pushed == 'true'" in job["if"]
+    w = job["with"]
+    assert w["kind"] == "cherry-pick"
+    assert w["base_sha"] == "${{ needs.cherry-pick.outputs.main_sha }}"
+    assert w["branch_sha"] == "${{ needs.finalize.outputs.branch_sha }}"
+    assert w["branch"] == "${{ needs.cherry-pick.outputs.branch }}"
+    assert w["upstream_sha"] == "${{ inputs.head_sha || github.event.client_payload.head_sha }}"
+
+
+def test_open_pr_only_for_a_clean_pick_or_an_approved_resolution(workflow: dict) -> None:
+    job = workflow["jobs"]["open-pr"]
+    cond = job["if"]
+    assert "needs.cherry-pick.outputs.pushed == 'true'" in cond
+    assert "needs.resolution-review.outputs.next_action == 'approved'" in cond
+    step = next(s for s in job["steps"] if s.get("id") == "open-pr")
+    assert step["env"]["RESOLUTION_APPROVED"] == (
+        "${{ needs.resolution-review.outputs.next_action == 'approved' }}"
+    )
+    # No needs-human-merge in the automatic path; a stale label is cleared.
+    assert 'bash tools/human-merge-label.sh "$PR_NUM" false' in step["run"]
+    assert "A person must merge" not in step["run"]
+
+
+def test_a_rejection_with_an_attempt_left_dispatches_a_fresh_run(workflow: dict) -> None:
+    job = workflow["jobs"]["retry-resolution"]
+    assert "needs.resolution-review.outputs.next_action == 'retry'" in job["if"]
+    assert job["environment"] == "bot-credentials"
+    run = next(s["run"] for s in job["steps"] if s.get("name") == "Dispatch a fresh ingestion run")
+    assert '"pr-ingestion-requested"' in run
+    assert "pr_number: $pr, head_sha: $sha" in run
+
+
+def test_the_last_rejection_closes_the_pr_and_escalates(workflow: dict) -> None:
+    job = workflow["jobs"]["give-up-resolution"]
+    assert "needs.resolution-review.outputs.next_action == 'give_up'" in job["if"]
+    steps = {s.get("name"): s for s in job["steps"]}
+    close = steps["Close the PR and delete the branch"]["run"]
+    assert "gh pr close" in close
+    assert 'gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$BRANCH"' in close
+    record = steps["Record escalated"]["run"]
+    assert 'event: "escalated"' in record and 'reason: "resolution_rejected"' in record
+    assert "--events-file" in record and "--push" in record
+    assert '[[ "$BRANCH" == "claude/cherry-pick-pr-$PR_NUMBER" ]]' in job["steps"][0]["run"]
+
+
+def test_discovery_and_approval_stop_after_escalated() -> None:
+    # The escalated event ends the pair: check-approval refuses it, and
+    # discovery treats it as reviewed and as an ingestion outcome.
+    approval = (REPO_ROOT / "tools" / "check-approval.py").read_text()
+    assert 'OUTCOME_EVENTS = {"approved", "rejected", "escalated"}' in approval
+    discover = (REPO_ROOT / "tools" / "discover-prs.py").read_text()
+    assert 'REVIEWED_EVENTS = frozenset(["merged_verdict", "escalated"])' in discover

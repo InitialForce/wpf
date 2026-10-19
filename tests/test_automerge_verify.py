@@ -176,16 +176,109 @@ def test_cherry_pick_ok(tmp_path, env, origin, trusted, bot_key) -> None:
     assert verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1]) == ("ok", "")
 
 
-def test_conflict_resolved_cherry_pick_needs_a_person(
+RESOLVED_MSG = (
+    "pick\n\nUpstream-PR: https://github.com/dotnet/wpf/pull/77\n"
+    f"Upstream-PR-Head: {UPSTREAM_HEAD}\nConflict-Resolved-By: claude\n"
+)
+
+
+def resolution(event: str, branch_sha: str, pr: int = 77, head: str = UPSTREAM_HEAD) -> str:
+    return json.dumps({
+        "event": event, "pr_number": pr, "head_sha": head,
+        "details": {"branch_sha": branch_sha},
+    }) + "\n"
+
+
+def record(origin: Path, env: dict[str, str], *events: str) -> None:
+    """Append resolution review events to the if/main ledger (a ledger-only commit)."""
+    text = (origin / ".if-fork" / "patch-ledger.jsonl").read_text() + "".join(events)
+    commit(origin, env, {".if-fork/patch-ledger.jsonl": text}, "ledger: resolution")
+
+
+def test_conflict_resolved_cherry_pick_without_review_is_unreviewed(
     tmp_path, env, origin, trusted, bot_key
 ) -> None:
-    msg = (
-        "pick\n\nUpstream-PR: https://github.com/dotnet/wpf/pull/77\n"
-        f"Upstream-PR-Head: {UPSTREAM_HEAD}\nConflict-Resolved-By: claude\n"
-    )
-    sha = make_pick(origin, env, {"src/b.cs": "b\n"}, msg=msg)
+    sha = make_pick(origin, env, {"src/b.cs": "b\n"}, msg=RESOLVED_MSG)
     result, reason = verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])
-    assert result == "refuse" and "needs-human-merge" in reason
+    assert result == "unreviewed" and "no resolution review has decided" in reason
+    assert sha in reason
+    # The caller needs these to ask ingestion for a rebuild.
+    assert (tmp_path / "out" / "upstream_head").read_text().strip() == UPSTREAM_HEAD
+
+
+def test_conflict_resolved_cherry_pick_with_approved_review_is_ok(
+    tmp_path, env, origin, trusted, bot_key
+) -> None:
+    sha = make_pick(origin, env, {"src/b.cs": "b\n"}, msg=RESOLVED_MSG)
+    record(origin, env, resolution("resolution_approved", sha))
+    assert verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1]) == ("ok", "")
+
+
+def test_resolution_approval_is_stale_after_a_new_push(
+    tmp_path, env, origin, trusted, bot_key
+) -> None:
+    old = make_pick(origin, env, {"src/b.cs": "b\n"}, msg=RESOLVED_MSG)
+    record(origin, env, resolution("resolution_approved", old))
+    # The branch is pushed again with other content: a new commit, never reviewed.
+    run(origin, env, "git", "branch", "-D", BRANCH)
+    new = make_pick(origin, env, {"src/b.cs": "changed\n"}, msg=RESOLVED_MSG)
+    assert new != old
+    result, reason = verify(tmp_path, env, origin, trusted, new, BRANCH, bot_key[1])
+    assert result == "unreviewed" and "no resolution review has decided" in reason
+
+
+def test_rejected_resolution_needs_a_person(tmp_path, env, origin, trusted, bot_key) -> None:
+    sha = make_pick(origin, env, {"src/b.cs": "b\n"}, msg=RESOLVED_MSG)
+    record(origin, env, resolution("resolution_rejected", sha))
+    result, reason = verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])
+    assert result == "refuse" and "was rejected" in reason
+
+
+def test_rejection_after_approval_needs_a_person(
+    tmp_path, env, origin, trusted, bot_key
+) -> None:
+    sha = make_pick(origin, env, {"src/b.cs": "b\n"}, msg=RESOLVED_MSG)
+    record(
+        origin, env,
+        resolution("resolution_approved", sha), resolution("resolution_rejected", sha),
+    )
+    result, reason = verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])
+    assert result == "refuse" and "was rejected" in reason
+
+
+@pytest.mark.parametrize("pr,head", [(78, UPSTREAM_HEAD), (77, "c" * 40)])
+def test_resolution_approval_for_another_pair_is_unreviewed(
+    tmp_path, env, origin, trusted, bot_key, pr, head
+) -> None:
+    sha = make_pick(origin, env, {"src/b.cs": "b\n"}, msg=RESOLVED_MSG)
+    record(origin, env, resolution("resolution_approved", sha, pr=pr, head=head))
+    result, reason = verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])
+    assert result == "unreviewed" and "no resolution review has decided" in reason
+
+
+def test_approved_resolution_still_needs_every_other_check(
+    tmp_path, env, origin, trusted, bot_key
+) -> None:
+    sha = make_pick(origin, env, {"eng/Versions.props": "<Project />\n"}, msg=RESOLVED_MSG)
+    record(origin, env, resolution("resolution_approved", sha))
+    result, reason = verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])
+    assert result == "refuse" and "denylisted" in reason
+
+
+def test_approved_resolution_unsigned_is_refused(tmp_path, env, origin, trusted, bot_key) -> None:
+    sha = make_pick(origin, env, {"src/b.cs": "b\n"}, msg=RESOLVED_MSG, sign=False)
+    record(origin, env, resolution("resolution_approved", sha))
+    result, reason = verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])
+    assert result == "refuse" and "not signed" in reason
+
+
+def test_approved_resolution_behind_if_main_is_rebuilt(
+    tmp_path, env, origin, trusted, bot_key
+) -> None:
+    sha = make_pick(origin, env, {"src/b.cs": "b\n"}, msg=RESOLVED_MSG)
+    record(origin, env, resolution("resolution_approved", sha))
+    commit(origin, env, {"src/c.cs": "c\n"}, "other change")
+    assert verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])[0] == "behind"
 
 
 def test_wrong_fingerprint_refused(tmp_path, env, origin, trusted) -> None:
@@ -227,7 +320,7 @@ def test_denylisted_file_refused(tmp_path, env, origin, trusted, bot_key) -> Non
 def test_protected_path_refused(tmp_path, env, origin, trusted, bot_key) -> None:
     sha = make_pick(origin, env, {".github/workflows/x.yml": "on: push\n"})
     result, reason = verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])
-    assert result == "refuse" and "human merge" in reason
+    assert result == "refuse" and "fork-owned" in reason
 
 
 @pytest.mark.parametrize(
@@ -330,29 +423,93 @@ def test_staging_ok(tmp_path, env, origin, trusted, bot_key) -> None:
     assert result == ("ok", "")
 
 
-def test_staging_with_a_conflict_resolution_needs_a_person(
+TRAILER = "\n\nConflict-Resolved-By: claude"
+
+
+def approve_sync(origin: Path, env: dict[str, str], sha: str) -> None:
+    upstream_sha = run(origin, env, "git", "rev-parse", f"{sha}^2")
+    record(origin, env, resolution("resolution_approved", sha, pr=0, head=upstream_sha))
+
+
+def test_staging_resolution_without_trailer_is_refused(
     tmp_path, env, origin, trusted, bot_key
 ) -> None:
-    # Even without the trailer: content that differs from git's own merge is
-    # a resolution nobody reviewed.
+    # Content that differs from git's own merge without Claude's trailer was
+    # made by someone the review never saw.
     sha, up = staging(tmp_path, env, origin, {"src/a.cs": "fork+upstream\n"})
     result, reason = verify(
         tmp_path, env, origin, trusted, sha, "if/staging", bot_key[1], upstream=up
     )
-    assert result == "refuse" and "needs-human-merge" in reason and "src/a.cs" in reason
+    assert result == "refuse" and "without a Conflict-Resolved-By trailer" in reason
+    assert "src/a.cs" in reason
 
 
-def test_staging_with_conflict_trailer_needs_a_person(
+def test_staging_resolution_without_review_is_unreviewed(
     tmp_path, env, origin, trusted, bot_key
 ) -> None:
-    sha, up = staging(
-        tmp_path, env, origin, {}, fork_file="src/f.cs",
-        trailer="\n\nConflict-Resolved-By: claude",
-    )
+    sha, up = staging(tmp_path, env, origin, {"src/a.cs": "fork+upstream\n"}, trailer=TRAILER)
     result, reason = verify(
         tmp_path, env, origin, trusted, sha, "if/staging", bot_key[1], upstream=up
     )
-    assert result == "refuse" and "needs-human-merge" in reason
+    assert result == "unreviewed" and "no resolution review has decided" in reason
+
+
+def test_staging_resolution_with_approval_is_ok(
+    tmp_path, env, origin, trusted, bot_key
+) -> None:
+    sha, up = staging(tmp_path, env, origin, {"src/a.cs": "fork+upstream\n"}, trailer=TRAILER)
+    approve_sync(origin, env, sha)
+    result = verify(tmp_path, env, origin, trusted, sha, "if/staging", bot_key[1], upstream=up)
+    assert result == ("ok", "")
+
+
+def test_staging_trailer_on_a_clean_merge_is_unreviewed(
+    tmp_path, env, origin, trusted, bot_key
+) -> None:
+    sha, up = staging(tmp_path, env, origin, {}, fork_file="src/f.cs", trailer=TRAILER)
+    result, reason = verify(
+        tmp_path, env, origin, trusted, sha, "if/staging", bot_key[1], upstream=up
+    )
+    assert result == "unreviewed" and "no resolution review has decided" in reason
+
+
+def test_staging_approval_for_another_commit_is_unreviewed(
+    tmp_path, env, origin, trusted, bot_key
+) -> None:
+    sha, up = staging(tmp_path, env, origin, {"src/a.cs": "fork+upstream\n"}, trailer=TRAILER)
+    upstream_sha = run(origin, env, "git", "rev-parse", f"{sha}^2")
+    record(origin, env, resolution("resolution_approved", "f" * 40, pr=0, head=upstream_sha))
+    result, reason = verify(
+        tmp_path, env, origin, trusted, sha, "if/staging", bot_key[1], upstream=up
+    )
+    assert result == "unreviewed" and "no resolution review has decided" in reason
+
+
+def test_staging_rejected_resolution_is_refused(
+    tmp_path, env, origin, trusted, bot_key
+) -> None:
+    sha, up = staging(tmp_path, env, origin, {"src/a.cs": "fork+upstream\n"}, trailer=TRAILER)
+    approve_sync(origin, env, sha)
+    record(origin, env, resolution("resolution_rejected", sha, pr=0, head="0" * 40))
+    result, reason = verify(
+        tmp_path, env, origin, trusted, sha, "if/staging", bot_key[1], upstream=up
+    )
+    assert result == "refuse" and "was rejected" in reason
+
+
+def test_staging_approved_resolution_may_not_touch_cleanly_merged_files(
+    tmp_path, env, origin, trusted, bot_key
+) -> None:
+    # src/u.cs comes from upstream and merges cleanly; the result must equal it.
+    sha, up = staging(
+        tmp_path, env, origin, {"src/a.cs": "x\n", "src/u.cs": "changed\n"},
+        trailer=TRAILER, upstream_extra={"src/u.cs": "u\n"},
+    )
+    approve_sync(origin, env, sha)
+    result, reason = verify(
+        tmp_path, env, origin, trusted, sha, "if/staging", bot_key[1], upstream=up
+    )
+    assert result == "refuse" and "merged cleanly" in reason and "src/u.cs" in reason
 
 
 def test_staging_refuses_non_upstream_commit(tmp_path, env, origin, trusted, bot_key) -> None:
