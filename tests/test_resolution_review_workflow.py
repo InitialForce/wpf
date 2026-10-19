@@ -247,3 +247,25 @@ def test_record_checks_origin_and_records_before_publishing(workflow: dict) -> N
     publish = _step(job, "Publish the decision")["run"]
     assert "approved|retry|give_up" in publish
     assert job["outputs"]["next_action"] == "${{ steps.record.outputs.next_action }}"
+
+
+def test_a_failed_decision_is_recorded_as_a_rejection(workflow: dict) -> None:
+    # Opus M1: when the scan or the rules step fails, the job still records
+    # an outcome, so the attempt count moves and no rebuild loop starts.
+    job = workflow["jobs"]["record"]
+    scan, decide = _step(job, "scan"), _step(job, "decide")
+    assert scan["continue-on-error"] is True and decide["continue-on-error"] is True
+    assert decide["if"] == "steps.scan.outcome == 'success'"
+    failed = _step(job, "failed")
+    assert failed["if"] == "steps.decide.outcome != 'success'"
+    assert '--failed-step "$FAILED_STEP"' in failed["run"]
+    assert '--ledger .if-fork/patch-ledger.jsonl' in failed["run"]
+    names = [s.get("name") for s in job["steps"]]
+    assert names.index(failed["name"]) < names.index("Record in ledger")
+    ledger = _step(job, "Record in ledger")
+    assert ledger["env"]["DECISION"] == (
+        "${{ steps.decide.outputs.decision || steps.failed.outputs.decision }}"
+    )
+    assert job["outputs"]["decision"] == (
+        "${{ steps.decide.outputs.decision || steps.failed.outputs.decision }}"
+    )

@@ -65,6 +65,21 @@ tries.json is a list of {"try": n, "result": job result, "verdict": path,
 of --tries, one try can be given with --verdict, --verdict-sha256, --upload,
 --novel-lines and --novel-sha256.
 
+Review errors are also counted per change, across runs: the
+resolution_review_error events for the pair since its last
+resolution_approved. Every rebuild makes a new branch commit, so a count per
+commit would never stop. When the change reaches MAX_REVIEW_ERRORS (3) with
+no valid verdict, the next action is give_up even if an attempt is left.
+
+An empty diff to scan is a rejection, not an error.
+
+--failed-step NAME records a record job that failed before it decided: a
+resolution_review_error and a resolution_rejected event for the pair and the
+branch commit (an attempt), so the caller sees retry or give_up and an
+unreviewed head cannot be rebuilt without end. It needs no verdict, diff or
+novel-lines input, and falls back to the default limits when the config
+cannot be read.
+
 Exit codes: 0 approved, 1 rejected, 3 bad arguments or unreadable policy input.
 """
 
@@ -91,6 +106,7 @@ VALID_VERDICTS = frozenset(["approve", "reject"])
 KINDS = ("cherry-pick", "sync")
 DEFAULT_MAX_ATTEMPTS = 2
 DEFAULT_MAX_NOVEL_LINES = 50
+MAX_REVIEW_ERRORS = 3
 
 
 @dataclass(frozen=True)
@@ -240,6 +256,23 @@ def prior_rejections(ledger_text: str, pr_number: int, head_sha: str) -> int:
         if entry.get("event") == "resolution_approved":
             count = 0
         elif entry.get("event") == "resolution_rejected":
+            count += 1
+    return count
+
+
+def prior_review_errors(ledger_text: str, pr_number: int, head_sha: str) -> int:
+    """resolution_review_error events for the pair since its last resolution_approved."""
+    count = 0
+    for line in ledger_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        entry = json.loads(line)
+        if entry.get("pr_number") != pr_number or entry.get("head_sha") != head_sha:
+            continue
+        if entry.get("event") == "resolution_approved":
+            count = 0
+        elif entry.get("event") == "resolution_review_error":
             count += 1
     return count
 
@@ -402,7 +435,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--verdict-sha256", default="")
     parser.add_argument("--upload", default="")
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--final-diff", type=Path, required=True)
+    parser.add_argument("--final-diff", type=Path)
+    parser.add_argument("--failed-step", default="",
+                        help="Record that the record job failed at this step (see above)")
     parser.add_argument("--skip-conflict-markers", action="store_true",
                         help="Do not scan removed conflict-marker lines (sync)")
     parser.add_argument("--novel-lines", type=Path)
@@ -428,11 +463,72 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("a sync resolution is recorded with --pr-number 0")
     if args.kind == "cherry-pick" and args.pr_number <= 0:
         parser.error("a cherry-pick needs the upstream PR number")
+    if not args.failed_step and args.final_diff is None:
+        parser.error("--final-diff is required")
     return args
+
+
+def write_outputs(
+    args: argparse.Namespace, decision: dict[str, Any], events: list[dict[str, Any]]
+) -> None:
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(decision, indent=2) + "\n", encoding="utf-8")
+    args.events_out.write_text(
+        "".join(json.dumps(e, sort_keys=True) + "\n" for e in events), encoding="utf-8"
+    )
+    print(json.dumps(decision, indent=2))
+
+
+def record_failure(args: argparse.Namespace) -> int:
+    """--failed-step: the record job failed before it decided."""
+    max_attempts = args.max_attempts or DEFAULT_MAX_ATTEMPTS
+    try:
+        config = yaml.safe_load(args.config.read_text(encoding="utf-8"))
+        max_attempts = int(
+            args.max_attempts
+            or config["conflict_resolution"].get("max_resolution_attempts", DEFAULT_MAX_ATTEMPTS)
+        )
+    except (OSError, yaml.YAMLError, KeyError, TypeError, ValueError, AttributeError):
+        pass
+    try:
+        ledger_text = args.ledger.read_text(encoding="utf-8") if args.ledger else ""
+        prior = prior_rejections(ledger_text, args.pr_number, args.head_sha)
+        prior_errors = prior_review_errors(ledger_text, args.pr_number, args.head_sha)
+    except (OSError, json.JSONDecodeError) as exc:
+        die(f"cannot read the ledger: {exc}")
+        raise  # unreachable
+    step = re.sub(r"[^A-Za-z0-9 ._-]", "", args.failed_step)[:100]
+    reasons = [f"the record job failed at step '{step}' before it decided"]
+    attempt = prior + 1
+    error_event = build_review_error(
+        args, Try(0, "failure", Path(), "", "", Path(), ""), reasons
+    )
+    event = build_event(args, None, reasons, [], None, attempt, None, 1)
+    action = next_action(True, attempt, max_attempts)
+    if prior_errors + 1 >= MAX_REVIEW_ERRORS:
+        action = "give_up"
+    decision = {
+        "decision": "rejected",
+        "next_action": action,
+        "attempt": attempt,
+        "max_attempts": max_attempts,
+        "kind": args.kind,
+        "pr_number": args.pr_number,
+        "head_sha": args.head_sha,
+        "branch_sha": args.branch_sha,
+        "review_try": None,
+        "review_errors": 1,
+        "review_errors_for_change": prior_errors + 1,
+        "reasons": reasons,
+    }
+    write_outputs(args, decision, [error_event, event])
+    return EXIT_REJECTED
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.failed_step:
+        return record_failure(args)
     try:
         config = yaml.safe_load(args.config.read_text(encoding="utf-8"))
         threshold = float(config["conflict_resolution"]["review_min_confidence"])
@@ -446,13 +542,12 @@ def main(argv: list[str] | None = None) -> int:
             cap = int(config["conflict_resolution"].get("max_novel_lines", DEFAULT_MAX_NOVEL_LINES))
         args.max_novel_lines = cap
         prior = prior_rejections(ledger_text, args.pr_number, args.head_sha)
+        prior_errors = prior_review_errors(ledger_text, args.pr_number, args.head_sha)
         patterns = list(config.get("review_hard_fail_patterns", []))
         diff_text = args.final_diff.read_text(encoding="utf-8", errors="replace")
     except (OSError, yaml.YAMLError, KeyError, TypeError, ValueError) as exc:
         die(f"cannot read policy inputs: {exc}")
         raise  # unreachable
-    if not diff_text.strip():
-        die("final diff is empty")
 
     tries = load_tries(args)
     chosen, verdict, errors = first_valid_try(tries, args.reviewer_id)
@@ -466,16 +561,22 @@ def main(argv: list[str] | None = None) -> int:
 
     hits = hard_fail_hits(diff_text, patterns, skip_conflict_markers=args.skip_conflict_markers)
     reasons = decide(verdict, errors, hits, threshold) + novel_reasons
+    if not diff_text.strip():
+        reasons.append("the diff to scan is empty")
     attempt = prior + 1
+    change_errors = prior_errors + len(errors)
     events = [build_review_error(args, t, why) for t, why in errors]
     events.append(build_event(
         args, verdict, reasons, hits, novel, attempt,
         chosen.number if chosen else None, len(errors),
     ))
 
+    action = next_action(bool(reasons), attempt, max_attempts)
+    if verdict is None and change_errors >= MAX_REVIEW_ERRORS:
+        action = "give_up"  # the review keeps failing for this change
     decision = {
         "decision": "rejected" if reasons else "approved",
-        "next_action": next_action(bool(reasons), attempt, max_attempts),
+        "next_action": action,
         "attempt": attempt,
         "max_attempts": max_attempts,
         "kind": args.kind,
@@ -484,14 +585,10 @@ def main(argv: list[str] | None = None) -> int:
         "branch_sha": args.branch_sha,
         "review_try": chosen.number if chosen else None,
         "review_errors": len(errors),
+        "review_errors_for_change": change_errors,
         "reasons": reasons,
     }
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(decision, indent=2) + "\n", encoding="utf-8")
-    args.events_out.write_text(
-        "".join(json.dumps(e, sort_keys=True) + "\n" for e in events), encoding="utf-8"
-    )
-    print(json.dumps(decision, indent=2))
+    write_outputs(args, decision, events)
     return EXIT_REJECTED if reasons else EXIT_APPROVED
 
 

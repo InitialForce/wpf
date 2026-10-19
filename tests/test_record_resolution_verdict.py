@@ -165,8 +165,12 @@ def test_bad_arguments_exit_3(tmp_path: Path) -> None:
     assert r.returncode == 3
 
 
-def test_empty_final_diff_exits_3(tmp_path: Path) -> None:
-    assert _run(tmp_path, _verdict(), diff="")[0] == 3
+def test_empty_final_diff_is_a_rejection(tmp_path: Path) -> None:
+    # Opus M1: exit 3 left no ledger event, so an unreviewed head was rebuilt
+    # without end. An empty scan diff is now a recorded rejection.
+    rc, decision, event = _run(tmp_path, _verdict(), diff="")
+    assert rc == 1 and decision["reasons"] == ["the diff to scan is empty"]
+    assert event is not None and event["event"] == "resolution_rejected"
 
 
 def test_config_without_threshold_exits_3(tmp_path: Path) -> None:
@@ -532,3 +536,74 @@ def test_conflict_marker_lines_are_recognised(line: str) -> None:
     spec.loader.exec_module(mod)
     assert mod._CONFLICT_MARKER.match(line)
     assert not mod._CONFLICT_MARKER.match("======= x")
+
+
+# ---------------------------------------------------------------------------
+# Opus M1: a failed record job is still recorded, and review errors count
+# per change (pair), not per branch commit.
+# ---------------------------------------------------------------------------
+
+
+def _run_failed(tmp_path: Path, led: Path, config: Path = CONFIG) -> dict[str, Any]:
+    out, events = tmp_path / "decision.json", tmp_path / "events.jsonl"
+    r = subprocess.run(
+        [sys.executable, str(TOOL), "--failed-step", "Apply the rules; $(x)",
+         "--reviewer-id", REVIEWER, "--config", str(config), "--ledger", str(led),
+         "--pr-number", "77", "--head-sha", HEAD, "--branch-sha", BRANCH_SHA,
+         "--branch", "claude/cherry-pick-pr-77",
+         "--output", str(out), "--events-out", str(events)],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 1, r.stderr
+    lines = [json.loads(x) for x in events.read_text().splitlines()]
+    return {**json.loads(out.read_text()), "events": lines}
+
+
+def test_failed_record_job_records_an_error_and_a_rejection(tmp_path: Path) -> None:
+    d = _run_failed(tmp_path, _ledger(tmp_path, []))
+    assert (d["decision"], d["attempt"], d["next_action"]) == ("rejected", 1, "retry")
+    assert [e["event"] for e in d["events"]] == [
+        "resolution_review_error", "resolution_rejected"
+    ]
+    assert d["events"][1]["details"]["branch_sha"] == BRANCH_SHA
+    # The step name is data from the workflow; only plain characters are kept.
+    assert d["reasons"] == [
+        "the record job failed at step 'Apply the rules x' before it decided"
+    ]
+
+
+def test_failed_record_job_works_without_a_readable_config(tmp_path: Path) -> None:
+    led = _ledger(tmp_path, [("resolution_rejected", 77, HEAD)])
+    d = _run_failed(tmp_path, led, config=tmp_path / "missing.yaml")
+    assert (d["attempt"], d["max_attempts"], d["next_action"]) == (2, 2, "give_up")
+
+
+def test_review_errors_count_per_change_across_commits(tmp_path: Path) -> None:
+    # Two errors from earlier runs (other branch commits) plus one now is 3:
+    # give up even though an attempt is left.
+    led = _ledger(tmp_path, [
+        ("resolution_review_error", 77, HEAD), ("resolution_review_error", 77, HEAD),
+    ])
+    rc, d, _ = _run_tries(tmp_path, [
+        _try(tmp_path, 1, None, result="failure"),
+        _try(tmp_path, 2, None, result="skipped"),
+    ], "--ledger", str(led))
+    assert rc == 1 and d["attempt"] == 1 and d["next_action"] == "give_up"
+    assert d["review_errors_for_change"] == 3
+
+
+def test_review_error_count_resets_after_an_approval(tmp_path: Path) -> None:
+    led = _ledger(tmp_path, [
+        ("resolution_review_error", 77, HEAD), ("resolution_review_error", 77, HEAD),
+        ("resolution_approved", 77, HEAD),
+    ])
+    _, d, _ = _run_tries(tmp_path, [_try(tmp_path, 1, None, result="failure")],
+                         "--ledger", str(led))
+    assert d["review_errors_for_change"] == 1 and d["next_action"] == "retry"
+
+
+def test_a_valid_verdict_is_not_cut_short_by_old_errors(tmp_path: Path) -> None:
+    led = _ledger(tmp_path, [("resolution_review_error", 77, HEAD)] * 5)
+    rc, d, _ = _run_tries(tmp_path, [_try(tmp_path, 1, _verdict(verdict="reject"))],
+                          "--ledger", str(led))
+    assert rc == 1 and d["next_action"] == "retry"

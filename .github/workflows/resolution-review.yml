@@ -147,7 +147,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: bot-credentials
     outputs:
-      decision: ${{ steps.decide.outputs.decision }}
+      decision: ${{ steps.decide.outputs.decision || steps.failed.outputs.decision }}
       next_action: ${{ steps.record.outputs.next_action }}
       attempt: ${{ steps.record.outputs.attempt }}
       reason: ${{ steps.record.outputs.reason }}
@@ -240,7 +240,12 @@ jobs:
       # diff. A sync scans what the resolution wrote: the result against
       # git's own merge (which keeps conflict markers in the conflicted
       # files), since the rest is upstream release/10.0.
+      # This step and the next may fail without failing the job: the step
+      # after them records the failure as a rejection, so the attempt count
+      # moves and an unreviewed head is not rebuilt without end.
       - name: Compute the diff to scan
+        id: scan
+        continue-on-error: true
         run: |
           set -euo pipefail
           git fetch --quiet --no-tags origin "$BRANCH_SHA"
@@ -261,6 +266,8 @@ jobs:
       # tries' job outputs, which no other job can set.
       - name: Apply the rules
         id: decide
+        if: steps.scan.outcome == 'success'
+        continue-on-error: true
         env:
           TRIES_JSON: ${{ toJSON(needs) }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -300,12 +307,42 @@ jobs:
             *) echo "::error::record-resolution-verdict.py failed (exit $rc)"; exit 1 ;;
           esac
 
+      # No decision (the scan or the rules step failed): record a review
+      # error and a rejection for the pair and this commit. Defaults apply
+      # when the config cannot be read.
+      - name: Record a failed decision as a rejection
+        id: failed
+        if: steps.decide.outcome != 'success'
+        env:
+          FAILED_STEP: ${{ steps.scan.outcome != 'success' && 'Compute the diff to scan' || 'Apply the rules' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          MODEL=$(python3 -c "import yaml; print(yaml.safe_load(open('.if-fork/config.yaml'))['claude_models']['resolution_review'])" 2>/dev/null || true)
+          set +e
+          python tools/record-resolution-verdict.py \
+            --kind "$KIND" \
+            --failed-step "$FAILED_STEP" \
+            --reviewer-id "${MODEL:-unknown}-resolution-review" \
+            --config .if-fork/config.yaml \
+            --ledger .if-fork/patch-ledger.jsonl \
+            --pr-number "$PR_NUMBER" \
+            --head-sha "$UPSTREAM_SHA" \
+            --branch-sha "$BRANCH_SHA" \
+            --branch "$BRANCH" \
+            --run-url "$RUN_URL" \
+            --output "$RUNNER_TEMP/decision.json" \
+            --events-out "$RUNNER_TEMP/resolution-events.jsonl"
+          rc=$?
+          set -e
+          [ "$rc" -eq 1 ] || { echo "::error::record-resolution-verdict.py --failed-step failed (exit $rc)"; exit 1; }
+          echo "decision=rejected" >> "$GITHUB_OUTPUT"
+
       - name: Record in ledger
         env:
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          DECISION: ${{ steps.decide.outputs.decision }}
+          DECISION: ${{ steps.decide.outputs.decision || steps.failed.outputs.decision }}
         run: |
           python tools/ledger-event.py \
             --events-file "$RUNNER_TEMP/resolution-events.jsonl" \
