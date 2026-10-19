@@ -410,6 +410,9 @@ jobs:
     outputs:
       pushed: ${{ steps.push.outputs.pushed }}
       reason: ${{ steps.check.outputs.reason }}
+      # fork_owned_paths or path_policy_error when the path rules refused
+      # the merge; recorded as the rebase_failed reason.
+      cause: ${{ steps.check.outputs.cause }}
       # The merge commit pushed to if/staging, which the review checks and
       # the ledger approval names.
       branch_sha: ${{ steps.push.outputs.sha }}
@@ -505,6 +508,20 @@ jobs:
           if [ -n "$STRAY" ]; then
             echo "::error::Merge touches files upstream did not change: $STRAY"
             echo "reason=The merge result touched files upstream did not change: $(echo "$STRAY" | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # The path rules automerge-verify.sh applies to the sync PR
+          # (tools/path-policy.py): no fork-owned path, even one upstream
+          # changed. A merge automerge would refuse is never pushed.
+          git diff --cached --name-only "$BASE_SHA" > "$RUNNER_TEMP/changed.txt"
+          if ! python3 "$TRUSTED/tools/path-policy.py" --kind sync \
+                 --changed-files "$RUNNER_TEMP/changed.txt" > "$RUNNER_TEMP/path-policy.json"; then
+            cat "$RUNNER_TEMP/path-policy.json"
+            CAUSE=$(jq -r .reason "$RUNNER_TEMP/path-policy.json")
+            [ "$CAUSE" = fork_owned_paths ] || CAUSE=path_policy_error
+            echo "cause=$CAUSE" >> "$GITHUB_OUTPUT"
+            echo "reason=The merge changes fork-owned files, which automerge never merges: $(jq -r '.fork_owned // [] | join(" ")' "$RUNNER_TEMP/path-policy.json")" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "ok=true" >> "$GITHUB_OUTPUT"
@@ -768,7 +785,7 @@ jobs:
           set -euo pipefail
           RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           REASON="${DENYLIST_REPORT:-$FINALIZE_REASON}"
-          CAUSE=merge_blocked
+          CAUSE="${FINALIZE_CAUSE:-merge_blocked}"
           if [ "$NEXT_ACTION" = give_up ]; then
             CAUSE=resolution_rejected
             REASON="The resolution review rejected Claude's resolution $ATTEMPT times. Last reasons: $REVIEW_REASON"
@@ -820,6 +837,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           DENYLIST_REPORT: ${{ needs.sync.outputs.denylist_report }}
           FINALIZE_REASON: ${{ needs.finalize.outputs.reason }}
+          FINALIZE_CAUSE: ${{ needs.finalize.outputs.cause }}
           RESOLVE_RESULT: ${{ needs.resolve-conflicts.result }}
           FINALIZE_RESULT: ${{ needs.finalize.result }}
           ATTEMPT: ${{ needs.resolution-review.outputs.attempt }}

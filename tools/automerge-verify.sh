@@ -78,14 +78,22 @@ agent_resolved() {
 
 # --- Protected paths and the file denylist ---------------------------------
 git diff --name-only "$MAIN...HEAD" > "$OUT/changed.txt"
-# Fork-owned paths: the pipeline's own workflows, code, policy, ledger, bot
-# key, tests and packaging. Upstream dotnet/wpf has none of them (it has
-# .github/, but the fork deleted upstream's workflows), so neither a
-# cherry-pick nor the sync PR may change them without a person. Same list as
-# the fork-owned part of file_denylist in .if-fork/config.yaml.
-FORK_OWNED='^(\.github/|\.if-fork/|tools/|tests/|test/|docs/|perf/|data/|packaging/InitialForce\.[^/]*/|FORK\.md$|NOTICE\.md$|pyproject\.toml$|(.*/)?\.claude/|(.*/)?(CLAUDE\.md|CLAUDE\.local\.md|AGENTS\.md|\.mcp\.json)$)'
-PROTECTED=$(grep -E "$FORK_OWNED" "$OUT/changed.txt" || true)
-[ -z "$PROTECTED" ] || refuse "touches fork-owned files that need a human merge: $(echo "$PROTECTED" | tr '\n' ' ')"
+# Path rules shared with ingestion and the nightly sync (tools/path-policy.py):
+# no fork-owned path for either kind, and for a cherry-pick only src/ and
+# eng/ (eng/ is still subject to file_denylist below). Ingestion runs the
+# same check before it pushes, so a refusal here means the rule changed or a
+# person pushed to the branch.
+path_policy() {
+  python3 "$TRUSTED/tools/path-policy.py" --kind "$1" \
+    --changed-files "$OUT/changed.txt" > "$OUT/path-policy.json" && return 0
+  local hit
+  hit=$(jq -r '(.fork_owned // []) + (.outside_allowlist // []) | join(" ")' "$OUT/path-policy.json")
+  case "$(jq -r .reason "$OUT/path-policy.json")" in
+    fork_owned_paths) refuse "touches fork-owned files: $hit" ;;
+    paths_outside_allowlist) refuse "changes files outside src/ and eng/: $hit" ;;
+    *) refuse "path policy check failed: $(jq -r .reason "$OUT/path-policy.json")" ;;
+  esac
+}
 
 deny() {
   python3 "$TRUSTED/tools/check-denylist.py" --config "$TRUSTED/.if-fork/config.yaml" \
@@ -104,11 +112,7 @@ case "$HEAD_BRANCH" in
     [ "$UP_URL" = "https://github.com/dotnet/wpf/pull/$BRANCH_PR" ] \
       || refuse "Upstream-PR trailer does not match branch $HEAD_BRANCH"
     [[ "$UP_HEAD" =~ ^[0-9a-f]{40}$ ]] || refuse "missing or bad Upstream-PR-Head trailer"
-    # Allowlist: a cherry-pick merges by itself only when it stays inside
-    # upstream's source and build folders (eng/ is still subject to
-    # file_denylist below). Anything else goes to a person.
-    OUTSIDE=$(grep -vE '^(src|eng)/' "$OUT/changed.txt" || true)
-    [ -z "$OUTSIDE" ] || refuse "changes files outside src/ and eng/, which need a human merge: $(echo "$OUTSIDE" | tr '\n' ' ')"
+    path_policy cherry-pick
     git show "$MAIN:.if-fork/patch-ledger.jsonl" > "$OUT/ledger.jsonl"
     python3 "$TRUSTED/tools/check-approval.py" --ledger "$OUT/ledger.jsonl" \
       --pr-number "$BRANCH_PR" --head-sha "$UP_HEAD" > "$OUT/approval.json" \
@@ -128,6 +132,7 @@ case "$HEAD_BRANCH" in
     [ -z "${RESOLUTION_REFUSED:-}" ] || resolution_refused cherry-pick
     ;;
   if/staging)
+    path_policy sync
     UPSTREAM=upstream/release/10.0
     [ "$(git rev-list --parents -n 1 HEAD | wc -w)" -eq 3 ] || refuse "sync PR head is not a merge commit"
     bot_signed HEAD || refuse "merge commit $HEAD_SHA is not signed by the bot key"

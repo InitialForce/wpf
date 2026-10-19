@@ -95,9 +95,9 @@ def test_verify_uses_trusted_if_main(workflow: dict) -> None:
 
 def test_protected_paths_and_denylist_in_verify_script() -> None:
     text = (REPO_ROOT / "tools" / "automerge-verify.sh").read_text()
-    for path in (r"\.github/", r"\.if-fork/", "tools/", "docs/", "test/", "tests/"):
-        assert path in text, f"protected path {path!r} not refused"
-    assert "grep -vE '^(src|eng)/'" in text
+    # The path rules live in tools/path-policy.py, shared with ingestion.
+    assert '"$TRUSTED/tools/path-policy.py" --kind "$1"' in text
+    assert "path_policy cherry-pick" in text and "path_policy sync" in text
     assert '"$TRUSTED/tools/check-denylist.py" --config "$TRUSTED/.if-fork/config.yaml"' in text
     assert '"$TRUSTED/tools/check-approval.py"' in text
     assert '"$TRUSTED/docs/bot-gpg-pubkey.asc"' in text

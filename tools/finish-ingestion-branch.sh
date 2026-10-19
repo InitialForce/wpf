@@ -12,8 +12,9 @@
 # BASE_SHA.
 #
 # Writes $OUT/pushed (true) and $OUT/sha (the pushed commit) on success, or
-# $OUT/result=refused and $OUT/reason when the branch is refused. Exits 0 in
-# both cases.
+# $OUT/result=refused and $OUT/reason when the branch is refused (reasons:
+# not_exactly_one_commit, file_denylist, fork_owned_paths,
+# paths_outside_allowlist, path_policy_error). Exits 0 in both cases.
 set -euo pipefail
 
 [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid BASE_SHA" >&2; exit 1; }
@@ -36,6 +37,16 @@ if ! python3 "$TRUSTED/tools/check-denylist.py" --config "$TRUSTED/.if-fork/conf
        --changed-files "$OUT/changed.txt" > "$OUT/denylist.json"; then
   cat "$OUT/denylist.json"
   refuse file_denylist
+fi
+# The same path rules automerge-verify.sh applies. A branch automerge would
+# refuse for its paths is never pushed: ingestion records escalated with the
+# reason (fork_owned_paths or paths_outside_allowlist) and opens no PR.
+if ! python3 "$TRUSTED/tools/path-policy.py" --kind cherry-pick \
+       --changed-files "$OUT/changed.txt" > "$OUT/path-policy.json"; then
+  cat "$OUT/path-policy.json"
+  REASON=$(jq -r '.reason' "$OUT/path-policy.json")
+  [[ "$REASON" =~ ^(fork_owned_paths|paths_outside_allowlist)$ ]] || REASON=path_policy_error
+  refuse "$REASON"
 fi
 
 TRAILERS=(--trailer "Upstream-PR: https://github.com/dotnet/wpf/pull/$PR_NUMBER"

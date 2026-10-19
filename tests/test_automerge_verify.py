@@ -320,7 +320,7 @@ def test_denylisted_file_refused(tmp_path, env, origin, trusted, bot_key) -> Non
 def test_protected_path_refused(tmp_path, env, origin, trusted, bot_key) -> None:
     sha = make_pick(origin, env, {".github/workflows/x.yml": "on: push\n"})
     result, reason = verify(tmp_path, env, origin, trusted, sha, BRANCH, bot_key[1])
-    assert result == "refuse" and "human merge" in reason
+    assert result == "refuse" and "fork-owned" in reason
 
 
 @pytest.mark.parametrize(

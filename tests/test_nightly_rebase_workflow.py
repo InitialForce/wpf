@@ -247,6 +247,22 @@ def test_finalize_takes_only_conflicted_paths(finalize_steps: list[dict]) -> Non
     assert run.index("conflict-handoff.sh") < run.index("comm -23")
 
 
+def test_finalize_applies_the_shared_path_rules_before_push(
+    workflow: dict, finalize_steps: list[dict], report_steps: list[dict]
+) -> None:
+    # Same rule as automerge-verify.sh, so a sync PR automerge would refuse
+    # for its paths is never pushed. The cause becomes the rebase_failed reason.
+    run = _step(finalize_steps, "Recreate the merge")["run"]
+    assert '"$TRUSTED/tools/path-policy.py" --kind sync' in run
+    assert run.index("path-policy.py") < run.index('echo "ok=true"')
+    assert "cause=$CAUSE" in run
+    outputs = workflow["jobs"]["finalize"]["outputs"]
+    assert outputs["cause"] == "${{ steps.check.outputs.cause }}"
+    report = _step(report_steps, "blocked-sync issue")
+    assert 'CAUSE="${FINALIZE_CAUSE:-merge_blocked}"' in report["run"]
+    assert report["env"]["FINALIZE_CAUSE"] == "${{ needs.finalize.outputs.cause }}"
+
+
 def test_blocked_sync_issue_is_deduplicated(report_steps: list[dict]) -> None:
     run = _step(report_steps, "blocked-sync issue")["run"]
     assert "gh issue list" in run
