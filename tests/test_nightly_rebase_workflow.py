@@ -21,7 +21,10 @@ WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "nightly-rebase.yml"
 REBASE_PROMPT_PATH = REPO_ROOT / ".if-fork" / "prompts" / "rebase.md"
 CONFLICT_PROMPT_PATH = REPO_ROOT / ".if-fork" / "prompts" / "resolve-rebase-conflict.md"
 
-EXPECTED_JOBS = {"gate", "sync", "resolve-conflicts", "finalize", "report-blocked"}
+EXPECTED_JOBS = {
+    "gate", "sync", "resolve-conflicts", "finalize", "resolution-review", "retry-resolution",
+    "open-pr", "report-blocked",
+}
 GATE_CONDITION = "needs.gate.outputs.proceed == 'true'"
 
 
@@ -47,6 +50,11 @@ def sync_steps(workflow: dict) -> list[dict]:
 @pytest.fixture(scope="module")
 def finalize_steps(workflow: dict) -> list[dict]:
     return workflow["jobs"]["finalize"]["steps"]
+
+
+@pytest.fixture(scope="module")
+def open_pr_steps(workflow: dict) -> list[dict]:
+    return workflow["jobs"]["open-pr"]["steps"]
 
 
 @pytest.fixture(scope="module")
@@ -171,8 +179,8 @@ def test_blocked_sha_is_not_retried_without_force(sync_steps: list[dict]) -> Non
     assert "inputs.force_rebase" in force and "client_payload.force" in force
 
 
-def test_reuses_open_pr(finalize_steps: list[dict]) -> None:
-    run = _step(finalize_steps, "Open or update the sync PR")["run"]
+def test_reuses_open_pr(open_pr_steps: list[dict]) -> None:
+    run = _step(open_pr_steps, "Open or update the sync PR")["run"]
     assert 'if [ -n "$OPEN_PR" ]' in run
     assert "gh pr create" in run
     # Label failure must not fail the step.
@@ -250,8 +258,8 @@ def test_blocked_sync_issue_is_deduplicated(report_steps: list[dict]) -> None:
     assert "exit 1" not in run
 
 
-def test_blocked_issue_closed_on_success(finalize_steps: list[dict]) -> None:
-    step = _step(finalize_steps, "Close blocked-sync issue")
+def test_blocked_issue_closed_on_success(open_pr_steps: list[dict]) -> None:
+    step = _step(open_pr_steps, "Close blocked-sync issue")
     assert "nightly-close-blocked.sh" in step["run"]
     script = (REPO_ROOT / "tools" / "nightly-close-blocked.sh").read_text()
     assert "gh issue close" in script
@@ -308,18 +316,67 @@ def test_if_main_commit_is_pinned_across_jobs() -> None:
     assert 'git merge-base "$BASE_SHA" "$UPSTREAM_SHA"' in check
 
 
-def test_agent_resolution_is_marked_for_a_person(finalize_steps: list[dict]) -> None:
+def test_agent_resolution_is_marked_and_reviewed(
+    workflow: dict, finalize_steps: list[dict]
+) -> None:
     push = _step(finalize_steps, "Commit merge and push")
     assert '--trailer "Conflict-Resolved-By: claude"' in push["run"]
     assert push["env"]["HAS_CONFLICTS"] == "${{ needs.sync.outputs.has_conflicts }}"
-    pr = _step(finalize_steps, "Open or update the sync PR")
-    assert 'bash "$TRUSTED/tools/human-merge-label.sh" "$PR" "$HAS_CONFLICTS"' in pr["run"]
-    assert "A person must merge this PR" in pr["run"]
+    assert 'echo "sha=$(git rev-parse HEAD)"' in push["run"]
+    fin = workflow["jobs"]["finalize"]["outputs"]
+    assert fin["branch_sha"] == "${{ steps.push.outputs.sha }}"
+    assert fin["conflict_files"] == "${{ steps.check.outputs.conflicts }}"
+    review = workflow["jobs"]["resolution-review"]
+    assert review["uses"] == "./.github/workflows/resolution-review.yml"
+    assert "needs.sync.outputs.has_conflicts == 'true'" in review["if"]
+    w = review["with"]
+    assert (w["kind"], w["pr_number"], w["branch"]) == ("sync", "0", "if/staging")
+    assert w["upstream_sha"] == "${{ needs.sync.outputs.upstream_sha }}"
+    assert w["base_sha"] == "${{ needs.sync.outputs.main_sha }}"
+    assert w["branch_sha"] == "${{ needs.finalize.outputs.branch_sha }}"
+
+
+def test_sync_pr_only_for_a_clean_merge_or_an_approved_resolution(
+    workflow: dict, open_pr_steps: list[dict]
+) -> None:
+    cond = workflow["jobs"]["open-pr"]["if"]
+    assert "needs.sync.outputs.has_conflicts == 'false'" in cond
+    assert "needs.resolution-review.outputs.next_action == 'approved'" in cond
+    # Nothing in finalize opens a PR any more.
+    assert all("gh pr" not in s.get("run", "") for s in workflow["jobs"]["finalize"]["steps"])
+    pr = _step(open_pr_steps, "Open or update the sync PR")["run"]
+    assert 'bash "$TRUSTED/tools/human-merge-label.sh" "$PR" false' in pr
+    assert "A person must merge" not in pr
+
+
+def test_rejection_with_an_attempt_left_reruns_with_force(workflow: dict) -> None:
+    job = workflow["jobs"]["retry-resolution"]
+    assert "needs.resolution-review.outputs.next_action == 'retry'" in job["if"]
+    run = _step(job["steps"], "Dispatch a fresh sync run")["run"]
+    assert '{event_type: "nightly-rebase", client_payload: {force: true}}' in run
+
+
+def test_last_rejection_closes_the_pr_and_records_rebase_failed(
+    workflow: dict, report_steps: list[dict]
+) -> None:
+    cond = workflow["jobs"]["report-blocked"]["if"]
+    assert "needs.resolution-review.outputs.next_action == 'give_up'" in cond
+    close = _step(report_steps, "Close the sync PR")
+    assert close["if"] == "env.NEXT_ACTION == 'give_up'"
+    assert "gh pr close" in close["run"]
+    run = _step(report_steps, "blocked-sync issue")["run"]
+    assert "CAUSE=resolution_rejected" in run
+    assert '\\"reason\\":\\"$CAUSE\\"' in run
 
 
 def test_open_pr_is_rebuilt_when_if_main_moved(sync_steps: list[dict]) -> None:
     run = _step(sync_steps, "Decide whether a sync is needed")["run"]
     assert 'git diff --name-only "origin/$STAGING_BRANCH...origin/$MAIN_BRANCH"' in run
     assert "grep -vxF .if-fork/patch-ledger.jsonl" in run
-    # A PR with Claude's resolution waits for a person; it is not rebuilt.
+
+
+def test_unreviewed_resolution_is_not_treated_as_proposed(sync_steps: list[dict]) -> None:
+    run = _step(sync_steps, "Decide whether a sync is needed")["run"]
     assert "Conflict-Resolved-By" in run
+    assert '"$TRUSTED/tools/check-approval.py"' in run and "--resolution-only" in run
+    assert 'if [ -z "$BEHIND" ] && [ "$REVIEWED" = true ]; then' in run

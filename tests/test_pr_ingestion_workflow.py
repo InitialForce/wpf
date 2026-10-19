@@ -10,8 +10,8 @@ Structural assertions (>= 18):
   3.  workflow_dispatch trigger with pr_number and head_sha inputs
   4.  All 10 jobs present
   5.  Needs chain is correct (gate → pre-flight → sha-smuggling-check → cherry-pick
-      → [resolve-conflicts → finalize → prepare-resolution-review → review-resolution
-      → record-resolution-verdict] → open-pr). Build runs in build.yml on the PR.
+      → [resolve-conflicts → finalize → resolution-review → retry-resolution or
+      give-up-resolution] → open-pr). Build runs in build.yml on the PR.
   6.  sha-smuggling-check is NOT a direct dependency of cherry-pick (it must come BEFORE)
   7.  SHA-smuggling check job exists and references ledger-event.py
   8.  tools/cherry-pick-pre-flight.sh is referenced
@@ -51,9 +51,9 @@ EXPECTED_JOBS = {
     "cherry-pick",
     "resolve-conflicts",
     "finalize",
-    "prepare-resolution-review",
-    "review-resolution",
-    "record-resolution-verdict",
+    "resolution-review",
+    "retry-resolution",
+    "give-up-resolution",
     "open-pr",
 }
 
@@ -65,10 +65,10 @@ EXPECTED_NEEDS: dict[str, set[str]] = {
     "cherry-pick": {"sha-smuggling-check"},
     "resolve-conflicts": {"cherry-pick"},
     "finalize": {"resolve-conflicts"},
-    "prepare-resolution-review": {"finalize"},
-    "review-resolution": {"prepare-resolution-review"},
-    "record-resolution-verdict": {"review-resolution"},
-    "open-pr": {"cherry-pick", "finalize", "record-resolution-verdict"},
+    "resolution-review": {"finalize"},
+    "retry-resolution": {"resolution-review"},
+    "give-up-resolution": {"resolution-review"},
+    "open-pr": {"cherry-pick", "finalize", "resolution-review"},
 }
 
 # Jobs that must guard on the gate proceed output (all downstream jobs)
@@ -78,9 +78,9 @@ PROCEED_GUARDED_JOBS = {
     "cherry-pick",
     "resolve-conflicts",
     "finalize",
-    "prepare-resolution-review",
-    "review-resolution",
-    "record-resolution-verdict",
+    "resolution-review",
+    "retry-resolution",
+    "give-up-resolution",
     "open-pr",
 }
 
@@ -186,10 +186,10 @@ def test_all_jobs_present(workflow: dict) -> None:
     ("cherry-pick", {"sha-smuggling-check"}),
     ("resolve-conflicts", {"cherry-pick"}),
     ("finalize", {"cherry-pick", "resolve-conflicts"}),
-    ("prepare-resolution-review", {"cherry-pick", "finalize"}),
-    ("review-resolution", {"finalize", "prepare-resolution-review"}),
-    ("record-resolution-verdict", {"finalize", "prepare-resolution-review", "review-resolution"}),
-    ("open-pr", {"cherry-pick", "finalize", "record-resolution-verdict"}),
+    ("resolution-review", {"cherry-pick", "finalize"}),
+    ("retry-resolution", {"finalize", "resolution-review"}),
+    ("give-up-resolution", {"cherry-pick", "finalize", "resolution-review"}),
+    ("open-pr", {"cherry-pick", "finalize", "resolution-review"}),
 ])
 def test_needs_chain(workflow: dict, job_name: str, expected_needs: set) -> None:
     """Each job must declare the correct needs dependencies."""
@@ -353,7 +353,7 @@ def test_finish_runs_denylist_on_branch_diff_before_push() -> None:
 # Security: payload validation and no expressions in shell (items 3 and 6)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("job_name", sorted(EXPECTED_JOBS - {"gate"}))
+@pytest.mark.parametrize("job_name", sorted(EXPECTED_JOBS - {"gate", "resolution-review"}))
 def test_every_job_validates_payload_first(workflow: dict, job_name: str) -> None:
     first = workflow["jobs"][job_name]["steps"][0]
     assert first["name"] == "Validate payload"
@@ -589,7 +589,7 @@ def test_scripts_refuse_a_missing_base_sha() -> None:
         assert '[[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]' in script.read_text(), script.name
 
 
-def test_agent_resolution_is_marked_for_a_person(workflow: dict) -> None:
+def test_agent_resolution_is_marked_and_reviewed(workflow: dict) -> None:
     finish = next(s for s in workflow["jobs"]["finalize"]["steps"] if s.get("id") == "finish")
     assert finish["env"]["CONFLICT_RESOLVED"] == "true"
     # The clean path in cherry-pick must not set it.
@@ -597,138 +597,70 @@ def test_agent_resolution_is_marked_for_a_person(workflow: dict) -> None:
         s for s in workflow["jobs"]["cherry-pick"]["steps"] if s.get("id") == "finish"
     )
     assert "CONFLICT_RESOLVED" not in pick_finish["env"]
-    open_pr = next(s for s in workflow["jobs"]["open-pr"]["steps"] if s.get("id") == "open-pr")
-    env = open_pr["env"]
-    assert env["CONFLICT_RESOLVED"] == "${{ needs.finalize.outputs.pushed == 'true' }}"
-    assert env["RESOLUTION_APPROVED"] == (
-        "${{ needs.record-resolution-verdict.outputs.approved == 'true' }}"
-    )
-    run = open_pr["run"]
-    # needs-human-merge stays unless the resolution review approved.
-    assert "NEEDS_HUMAN=false" in run
-    approved_branch = run.index('[ "$RESOLUTION_APPROVED" = true ]')
-    assert run.index("NEEDS_HUMAN=true") > approved_branch
-    assert 'bash tools/human-merge-label.sh "$PR_NUM" "$NEEDS_HUMAN"' in run
-    assert "A person must merge this PR" in run and "${RESOLUTION_REASON:-" in run
-
-
-# ---------------------------------------------------------------------------
-# Resolution review: prepare (no secrets) -> review (Fable) -> record (trusted)
-# ---------------------------------------------------------------------------
-
-CONFIG = yaml.safe_load((REPO_ROOT / ".if-fork" / "config.yaml").read_text())
 
 
 def test_finalize_hands_on_the_pushed_commit(workflow: dict) -> None:
     job = workflow["jobs"]["finalize"]
     assert job["outputs"]["branch_sha"] == "${{ steps.finish.outputs.sha }}"
     assert job["outputs"]["conflict_files"] == "${{ steps.overlay.outputs.conflicts }}"
-    assert 'git rev-parse HEAD > "$OUT/sha"' in FINISH_SCRIPT.read_text()
     text = FINISH_SCRIPT.read_text()
+    assert 'git rev-parse HEAD > "$OUT/sha"' in text
     assert text.index("git push") < text.index('> "$OUT/sha"')
 
 
-@pytest.mark.parametrize(
-    "job_name", ["prepare-resolution-review", "review-resolution", "record-resolution-verdict"]
-)
-def test_resolution_jobs_run_only_after_a_resolution_was_pushed(
-    workflow: dict, job_name: str
-) -> None:
-    job = workflow["jobs"][job_name]
+def test_resolution_review_is_called_for_a_pushed_resolution(workflow: dict) -> None:
+    job = workflow["jobs"]["resolution-review"]
+    assert job["uses"] == "./.github/workflows/resolution-review.yml"
+    assert job["secrets"] == "inherit"
     assert "needs.finalize.outputs.pushed == 'true'" in job["if"]
-    assert job["env"]["BRANCH_SHA"] == "${{ needs.finalize.outputs.branch_sha }}"
-    assert '"$BRANCH_SHA" =~ ^[0-9a-f]{40}$' in job["steps"][0]["run"]
+    w = job["with"]
+    assert w["kind"] == "cherry-pick"
+    assert w["base_sha"] == "${{ needs.cherry-pick.outputs.main_sha }}"
+    assert w["branch_sha"] == "${{ needs.finalize.outputs.branch_sha }}"
+    assert w["branch"] == "${{ needs.cherry-pick.outputs.branch }}"
+    assert w["upstream_sha"] == "${{ inputs.head_sha || github.event.client_payload.head_sha }}"
 
 
-def test_prepare_resolution_review_holds_no_secrets(workflow: dict) -> None:
-    job = workflow["jobs"]["prepare-resolution-review"]
-    assert job["permissions"] == {"contents": "read"}
-    assert "environment" not in job
-    text = yaml.safe_dump(job)
-    assert "secrets." not in text and "import-bot-gpg" not in text
-    checkouts = [s for s in job["steps"] if "actions/checkout" in s.get("uses", "")]
-    assert all(s["with"]["persist-credentials"] is False for s in checkouts)
-    refs = {s["with"]["path"]: s["with"]["ref"] for s in checkouts}
-    assert refs == {"trusted": "if/main", "work": "${{ env.BRANCH_SHA }}"}
-    run = next(s["run"] for s in job["steps"] if s.get("name") == "Write the review input")
-    # The commit is exactly one commit on the pinned if/main commit.
-    assert '"$BRANCH_SHA $BASE_SHA"' in run
-    # The upstream diff is the approved one, pinned like pr-review.yml.
-    assert '[ "$FETCHED" = "$PINNED_HEAD_SHA" ]' in run
-    assert '"$MERGE_BASE" "$PINNED_HEAD_SHA" > "$OUT/upstream.diff"' in run
-    assert 'git diff --no-color --no-ext-diff --no-renames "$BASE_SHA" "$BRANCH_SHA"' in run
-    assert 'python3 "$TRUSTED/tools/novel-lines.py"' in run
-    upload = next(s for s in job["steps"] if "upload-artifact" in s.get("uses", ""))
-    assert upload["with"]["name"] == "resolution-review-input"
-
-
-def test_resolution_reviewer_is_locked_down(workflow: dict) -> None:
-    job = workflow["jobs"]["review-resolution"]
-    assert job["environment"] == "claude"
-    assert job["permissions"] == {"contents": "read"}
-    text = yaml.safe_dump(job)
-    assert "GH_APP" not in text and "GPG" not in text and "github-app-token" not in text
-    checkout = next(s for s in job["steps"] if "actions/checkout" in s.get("uses", ""))
-    assert checkout["with"]["persist-credentials"] is False
-    assert checkout["with"]["sparse-checkout"].split() == [
-        "/.if-fork/config.yaml", "/.if-fork/prompts/",
-    ]
-    download = next(s for s in job["steps"] if "download-artifact" in s.get("uses", ""))
-    assert download["with"] == {"name": "resolution-review-input", "path": "review-input"}
-    claude = next(s for s in job["steps"] if "claude-code-action" in s.get("uses", ""))
-    w = claude["with"]
-    assert w["allowed_bots"] == "initial-force-wpf-bot"
-    assert w["github_token"] == "${{ github.token }}"
-    args = w["claude_args"]
-    assert "--model ${{ steps.settings.outputs.model }}" in args
-    assert "--max-turns ${{ steps.settings.outputs.max_turns }}" in args
-    allow = re.search(r'--allowedTools "([^"]+)"', args)
-    assert allow and allow.group(1).split(",") == [
-        "Read(./review-input/**)", "Read(./.if-fork/config.yaml)",
-        "Edit(./review-output/resolution.json)",
-    ]
-    deny = re.search(r'--disallowedTools "([^"]+)"', args)
-    assert deny
-    for rule in ("Bash", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Task",
-                 "Glob", "Grep", "Read(//proc/**)", "Read(//home/runner/work/_temp/**)"):
-        assert rule in deny.group(1).split(","), rule
-    settings = next(s for s in job["steps"] if s.get("id") == "settings")["run"]
-    assert "['claude_models']['resolution_review']" in settings
-    assert "['claude_limits']['max_turns_resolution_review']" in settings
-    assert CONFIG["claude_models"]["resolution_review"] == "claude-fable-5-1"
-    assert isinstance(CONFIG["claude_limits"]["max_turns_resolution_review"], int)
-    prompt = next(s for s in job["steps"] if s.get("id") == "load-prompt")["run"]
-    assert "cat .if-fork/prompts/resolution-review.md" in prompt
-    assert "review-output/resolution.json" in prompt
-    hash_step = next(s for s in job["steps"] if s.get("id") == "verdict")
-    assert hash_step["if"] == "always()" and "sha256sum" in hash_step["run"]
-    assert job["outputs"]["verdict_sha256"] == "${{ steps.verdict.outputs.sha256 }}"
-    assert job["outputs"]["upload"] == "${{ steps.upload.outcome }}"
-
-
-def test_record_resolution_verdict_checks_origin_and_records_before_publishing(
-    workflow: dict,
-) -> None:
-    job = workflow["jobs"]["record-resolution-verdict"]
-    assert job["environment"] == "bot-credentials"
-    assert job["if"].startswith("always()")
-    steps = job["steps"]
-    names = [s.get("name") for s in steps]
-    verdict = next(s for s in steps if s.get("name") == "Download the verdict")
-    assert verdict["with"]["name"] == "resolution-verdict.json"
-    assert "pattern" not in verdict["with"]
-    recompute = next(s for s in steps if s.get("name") == "Recompute the branch diff")["run"]
-    assert '[ "$PARENTS" = "$BASE_SHA" ]' in recompute
-    decide = next(s for s in steps if s.get("id") == "decide")
-    assert decide["env"]["VERDICT_SHA256"] == (
-        "${{ needs.review-resolution.outputs.verdict_sha256 }}"
+def test_open_pr_only_for_a_clean_pick_or_an_approved_resolution(workflow: dict) -> None:
+    job = workflow["jobs"]["open-pr"]
+    cond = job["if"]
+    assert "needs.cherry-pick.outputs.pushed == 'true'" in cond
+    assert "needs.resolution-review.outputs.next_action == 'approved'" in cond
+    step = next(s for s in job["steps"] if s.get("id") == "open-pr")
+    assert step["env"]["RESOLUTION_APPROVED"] == (
+        "${{ needs.resolution-review.outputs.next_action == 'approved' }}"
     )
-    assert decide["env"]["UPLOAD"] == "${{ needs.review-resolution.outputs.upload }}"
-    run = decide["run"]
-    assert "python tools/record-resolution-verdict.py" in run
-    assert '--branch-sha "$BRANCH_SHA"' in run and '--head-sha "$PINNED_HEAD_SHA"' in run
-    assert '--final-diff "$RUNNER_TEMP/final.diff"' in run
-    assert names.index("Record in ledger") < names.index("Publish the decision")
-    ledger = next(s for s in steps if s.get("name") == "Record in ledger")["run"]
-    assert "--events-file" in ledger and "--push" in ledger
-    assert job["outputs"]["approved"] == "${{ steps.record.outputs.approved }}"
+    # No needs-human-merge in the automatic path; a stale label is cleared.
+    assert 'bash tools/human-merge-label.sh "$PR_NUM" false' in step["run"]
+    assert "A person must merge" not in step["run"]
+
+
+def test_a_rejection_with_an_attempt_left_dispatches_a_fresh_run(workflow: dict) -> None:
+    job = workflow["jobs"]["retry-resolution"]
+    assert "needs.resolution-review.outputs.next_action == 'retry'" in job["if"]
+    assert job["environment"] == "bot-credentials"
+    run = next(s["run"] for s in job["steps"] if s.get("name") == "Dispatch a fresh ingestion run")
+    assert '"pr-ingestion-requested"' in run
+    assert "pr_number: $pr, head_sha: $sha" in run
+
+
+def test_the_last_rejection_closes_the_pr_and_escalates(workflow: dict) -> None:
+    job = workflow["jobs"]["give-up-resolution"]
+    assert "needs.resolution-review.outputs.next_action == 'give_up'" in job["if"]
+    steps = {s.get("name"): s for s in job["steps"]}
+    close = steps["Close the PR and delete the branch"]["run"]
+    assert "gh pr close" in close
+    assert 'gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$BRANCH"' in close
+    record = steps["Record escalated"]["run"]
+    assert 'event: "escalated"' in record and 'reason: "resolution_rejected"' in record
+    assert "--events-file" in record and "--push" in record
+    assert '[[ "$BRANCH" == "claude/cherry-pick-pr-$PR_NUMBER" ]]' in job["steps"][0]["run"]
+
+
+def test_discovery_and_approval_stop_after_escalated() -> None:
+    # The escalated event ends the pair: check-approval refuses it, and
+    # discovery treats it as reviewed and as an ingestion outcome.
+    approval = (REPO_ROOT / "tools" / "check-approval.py").read_text()
+    assert 'OUTCOME_EVENTS = {"approved", "rejected", "escalated"}' in approval
+    discover = (REPO_ROOT / "tools" / "discover-prs.py").read_text()
+    assert 'REVIEWED_EVENTS = frozenset(["merged_verdict", "escalated"])' in discover

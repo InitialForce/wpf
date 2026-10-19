@@ -17,7 +17,9 @@ import yaml
 
 REPO_ROOT = Path(__file__).parent.parent
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
-NAMES = ["pr-ingestion.yml", "nightly-rebase.yml", "claude-on-failure.yml"]
+NAMES = [
+    "pr-ingestion.yml", "nightly-rebase.yml", "claude-on-failure.yml", "resolution-review.yml",
+]
 
 
 def _claude_steps(name: str) -> list[tuple[str, dict]]:

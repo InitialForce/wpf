@@ -11,7 +11,8 @@
 #   - Checker code and policy (check-denylist.py, check-commit-denylist.py,
 #     config.yaml) always come from a separate checkout of if/main
 #     ("trusted/"), never from the candidate tree.
-#   - Claude runs only in resolve-conflicts and review-resolution, jobs with
+#   - Claude runs only in resolve-conflicts and resolution-review.yml's review
+#     job, jobs with
 #     contents:read, no App token, no GPG key and no persisted credentials.
 #     Both load only the action's own user settings (no project settings,
 #     hooks or MCP servers from the candidate tree) and have no shell. In
@@ -22,16 +23,19 @@
 #     conflict itself, takes only those paths from the artifact, checks them,
 #     and only then signs and pushes.
 #   - Nothing is pushed before the whole branch diff passes file_denylist.
-#   - A resolution Claude wrote is reviewed before it can merge by itself.
-#     prepare-resolution-review (no secrets) pins the approved upstream diff,
-#     the pushed branch diff and a novel-lines report (tools/novel-lines.py).
-#     review-resolution (Fable, the pr-review.yml reviewer limits) writes a
-#     verdict. record-resolution-verdict (trusted) checks the verdict's
-#     origin, applies code rules (tools/record-resolution-verdict.py) and
-#     records resolution_approved or resolution_rejected for the exact branch
-#     commit. automerge-verify.sh merges a Conflict-Resolved-By cherry-pick
-#     only with resolution_approved for its head SHA; open-pr leaves
-#     needs-human-merge on everything else.
+#   - A resolution Claude wrote is reviewed before anything merges it.
+#     resolution-review.yml pins the approved upstream diff, the pushed
+#     branch diff and a novel-lines report (tools/novel-lines.py) in a job
+#     with no secrets, has Fable review it with the pr-review.yml reviewer
+#     limits, and records resolution_approved or resolution_rejected for the
+#     exact branch commit in a trusted job. automerge-verify.sh merges a
+#     Conflict-Resolved-By cherry-pick only with resolution_approved for its
+#     head SHA.
+#   - No step waits for a person. Approved: open the PR. Rejected with an
+#     attempt left (conflict_resolution.max_resolution_attempts, counted in
+#     the ledger): dispatch a fresh run, which resolves again from scratch.
+#     Rejected on the last attempt: close the PR, delete the branch and
+#     record escalated (reason resolution_rejected).
 #   - cherry-pick records the if/main commit it starts from (main_sha).
 #     resolve-conflicts and finalize branch from exactly that commit, so a
 #     change that lands on if/main meanwhile cannot be overwritten by a
@@ -40,9 +44,8 @@
 #
 # Flow: gate -> pre-flight (already in the fork?) -> approval check (the
 # exact pair must be approved in the ledger) -> cherry-pick (deterministic) ->
-# [resolve-conflicts -> finalize -> prepare-resolution-review ->
-# review-resolution -> record-resolution-verdict] -> open or reuse the PR to
-# if/main.
+# [resolve-conflicts -> finalize -> resolution-review -> retry or give up]
+# -> open or reuse the PR to if/main.
 # build.yml runs on that PR; automerge.yml merges it when it passes.
 name: PR Ingestion (Cherry-Pick)
 
@@ -632,296 +635,91 @@ jobs:
           TRUSTED: ${{ github.workspace }}/trusted
 
   # -------------------------------------------------------------------------
-  # Job 7: prepare-resolution-review. No secrets. Pin what the resolution
-  # reviewer sees: the approved upstream diff, the pushed branch diff, the
-  # three versions of each changed file and the novel-lines report.
+  # Job 7: resolution-review. Fable reviews the resolution Claude wrote
+  # (resolution-review.yml: prepare with no secrets, review with the
+  # pr-review.yml limits, record in a trusted job). It records
+  # resolution_approved or resolution_rejected for the exact branch commit
+  # and returns next_action: approved, retry or give_up.
   # -------------------------------------------------------------------------
-  prepare-resolution-review:
-    name: Write the resolution review input
+  resolution-review:
+    name: Resolution review
     needs: [gate, cherry-pick, finalize]
     if: needs.gate.outputs.proceed == 'true' && needs.finalize.outputs.pushed == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    env:
-      BASE_SHA: ${{ needs.cherry-pick.outputs.main_sha }}
-      BRANCH_SHA: ${{ needs.finalize.outputs.branch_sha }}
-      CONFLICT_FILES: ${{ needs.finalize.outputs.conflict_files }}
-
-    steps:
-      - name: Validate payload
-        run: |
-          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] && [[ "$PINNED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] \
-            && [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] && [[ "$BRANCH_SHA" =~ ^[0-9a-f]{40}$ ]] \
-            || { echo "::error::Invalid pr_number, head_sha, if/main SHA or branch SHA"; exit 1; }
-
-      - name: Check out if/main (trusted tools)
-        uses: actions/checkout@v4
-        with:
-          ref: if/main
-          path: trusted
-          persist-credentials: false
-
-      - name: Check out the pushed branch commit
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ env.BRANCH_SHA }}
-          path: work
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Write the review input
-        working-directory: work
-        env:
-          GH_TOKEN: ${{ github.token }}
-          OUT: ${{ runner.temp }}/resolution-review-input
-          UP: ${{ runner.temp }}/upstream.git
-          TRUSTED: ${{ github.workspace }}/trusted
-        run: |
-          set -euo pipefail
-          mkdir -p "$OUT/base" "$OUT/upstream-head" "$OUT/final"
-
-          # The reviewed commit must be the pushed one, exactly one commit on
-          # the pinned if/main commit.
-          [ "$(git rev-parse HEAD)" = "$BRANCH_SHA" ] \
-            || { echo "::error::Checked-out commit is not $BRANCH_SHA"; exit 1; }
-          [ "$(git rev-list --parents -n 1 "$BRANCH_SHA")" = "$BRANCH_SHA $BASE_SHA" ] \
-            || { echo "::error::$BRANCH_SHA is not one commit on $BASE_SHA"; exit 1; }
-
-          set -f
-          for f in $CONFLICT_FILES; do
-            [[ "$f" =~ ^[A-Za-z0-9._+-][A-Za-z0-9._/+-]*$ ]] && [[ "/$f/" != */../* ]] \
-              || { echo "::error::Unexpected conflicted path"; exit 1; }
-            echo "$f" >> "$OUT/conflicts.txt"
-          done
-          set +f
-          [ -s "$OUT/conflicts.txt" ] || { echo "::error::No conflicted paths recorded"; exit 1; }
-
-          # The upstream diff the reviewers approved, pinned as pr-review.yml
-          # pins it: refs/pull/N/head must still be the approved head.
-          gh api "repos/dotnet/wpf/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json"
-          UP_BASE=$(jq -r .base.sha "$RUNNER_TEMP/pr.json")
-          [[ "$UP_BASE" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Upstream PR has no usable base SHA"; exit 1; }
-          git clone --quiet --bare --filter=blob:none --no-tags --single-branch \
-            --branch main https://github.com/dotnet/wpf.git "$UP"
-          git --git-dir="$UP" fetch --quiet --no-tags origin "+refs/pull/$PR_NUMBER/head:refs/pr/head"
-          git --git-dir="$UP" cat-file -e "$UP_BASE^{commit}" 2>/dev/null \
-            || git --git-dir="$UP" fetch --quiet --no-tags origin "$UP_BASE"
-          FETCHED=$(git --git-dir="$UP" rev-parse refs/pr/head)
-          [ "$FETCHED" = "$PINNED_HEAD_SHA" ] \
-            || { echo "::error::Upstream PR head is $FETCHED, not the approved $PINNED_HEAD_SHA"; exit 1; }
-          MERGE_BASE=$(git --git-dir="$UP" merge-base "$UP_BASE" "$PINNED_HEAD_SHA")
-          git --git-dir="$UP" diff --no-color --no-ext-diff --no-renames \
-            "$MERGE_BASE" "$PINNED_HEAD_SHA" > "$OUT/upstream.diff"
-
-          git diff --no-color --no-ext-diff --no-renames "$BASE_SHA" "$BRANCH_SHA" > "$OUT/final.diff"
-          git diff --name-only --no-renames -z "$BASE_SHA" "$BRANCH_SHA" > "$RUNNER_TEMP/files.z"
-          if [ "$(tr -dc '\n' < "$RUNNER_TEMP/files.z" | wc -c)" -gt 0 ]; then
-            echo "::error::A changed file name contains a newline."
-            exit 1
-          fi
-          tr '\0' '\n' < "$RUNNER_TEMP/files.z" > "$OUT/files.txt"
-          [ -s "$OUT/final.diff" ] || { echo "::error::Empty branch diff"; exit 1; }
-
-          # Three versions of each changed file, 1 MB max each. A file that is
-          # not copied cannot excuse a novel line.
-          copy() { # <git dir> <commit> <path> <dest root>
-            git --git-dir="$1" cat-file -e "$2:$3" 2>/dev/null || return 0
-            [ "$(git --git-dir="$1" cat-file -s "$2:$3")" -le 1048576 ] || return 0
-            mkdir -p "$4/$(dirname -- "$3")"
-            git --git-dir="$1" show "$2:$3" > "$4/$3"
-          }
-          while IFS= read -r -d '' path; do
-            copy .git "$BASE_SHA" "$path" "$OUT/base"
-            copy .git "$BRANCH_SHA" "$path" "$OUT/final"
-            copy "$UP" "$PINNED_HEAD_SHA" "$path" "$OUT/upstream-head"
-          done < "$RUNNER_TEMP/files.z"
-
-          python3 "$TRUSTED/tools/novel-lines.py" \
-            --final-diff "$OUT/final.diff" --upstream-diff "$OUT/upstream.diff" \
-            --base-dir "$OUT/base" --upstream-head-dir "$OUT/upstream-head" \
-            --output "$OUT/novel-lines.json"
-
-          jq -n --slurpfile pr "$RUNNER_TEMP/pr.json" --slurpfile novel "$OUT/novel-lines.json" \
-            --arg head "$PINNED_HEAD_SHA" --arg base "$BASE_SHA" --arg branch "$BRANCH_SHA" \
-            --arg mb "$MERGE_BASE" --argjson files "$(grep -c . "$OUT/files.txt")" \
-            --argjson conflicts "$(grep -c . "$OUT/conflicts.txt")" \
-            '{pr_number: $pr[0].number, title: $pr[0].title, upstream_head_sha: $head,
-              upstream_merge_base: $mb, base_sha: $base, branch_sha: $branch,
-              files_changed: $files, conflicted_files: $conflicts,
-              novel_count: $novel[0].novel_count, dropped_count: $novel[0].dropped_count}' \
-            > "$OUT/meta.json"
-          cat "$OUT/meta.json"
-
-      - name: Upload review input
-        uses: actions/upload-artifact@v4
-        with:
-          name: resolution-review-input
-          path: ${{ runner.temp }}/resolution-review-input
-          retention-days: 30
-          if-no-files-found: error
+    uses: ./.github/workflows/resolution-review.yml
+    secrets: inherit
+    with:
+      kind: cherry-pick
+      pr_number: ${{ inputs.pr_number || github.event.client_payload.pr_number }}
+      upstream_sha: ${{ inputs.head_sha || github.event.client_payload.head_sha }}
+      base_sha: ${{ needs.cherry-pick.outputs.main_sha }}
+      branch_sha: ${{ needs.finalize.outputs.branch_sha }}
+      branch: ${{ needs.cherry-pick.outputs.branch }}
+      conflict_files: ${{ needs.finalize.outputs.conflict_files }}
 
   # -------------------------------------------------------------------------
-  # Job 8: review-resolution. Fable reviews the resolution. Same limits as
-  # the pr-review.yml reviewers: read-only token, sparse checkout of the
-  # config and prompts only, trusted settings only, Read limited to the
-  # input and the config, Write limited to its verdict file, no shell.
+  # Job 8: retry-resolution. The review rejected the resolution and an
+  # attempt is left: ask for a fresh ingestion run, which resolves the
+  # conflict again from scratch in new jobs and reviews the new commit. The
+  # ledger counts the attempts (tools/record-resolution-verdict.py).
   # -------------------------------------------------------------------------
-  review-resolution:
-    name: Review the conflict resolution (Fable)
-    needs: [gate, cherry-pick, finalize, prepare-resolution-review]
-    if: needs.gate.outputs.proceed == 'true' && needs.finalize.outputs.pushed == 'true'
-    runs-on: ubuntu-latest
-    environment: claude
-    permissions:
-      contents: read
-    # record-resolution-verdict checks the verdict against these.
-    outputs:
-      reviewer_id: ${{ steps.settings.outputs.reviewer_id }}
-      verdict_sha256: ${{ steps.verdict.outputs.sha256 }}
-      upload: ${{ steps.upload.outcome }}
-    env:
-      BASE_SHA: ${{ needs.cherry-pick.outputs.main_sha }}
-      BRANCH_SHA: ${{ needs.finalize.outputs.branch_sha }}
-
-    steps:
-      - name: Validate payload
-        run: |
-          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] && [[ "$PINNED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] \
-            && [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] && [[ "$BRANCH_SHA" =~ ^[0-9a-f]{40}$ ]] \
-            || { echo "::error::Invalid pr_number, head_sha, if/main SHA or branch SHA"; exit 1; }
-
-      # Only the policy file and the prompts. The working directory holds
-      # nothing else from the repository: no .claude/, .mcp.json or CLAUDE.md.
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          sparse-checkout-cone-mode: false
-          sparse-checkout: |
-            /.if-fork/config.yaml
-            /.if-fork/prompts/
-
-      - name: Download pinned review input
-        uses: actions/download-artifact@v4
-        with:
-          name: resolution-review-input
-          path: review-input
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Read review settings from config.yaml
-        id: settings
-        run: |
-          pip install --quiet pyyaml
-          python - <<'PY' >> "$GITHUB_OUTPUT"
-          import yaml
-          c = yaml.safe_load(open(".if-fork/config.yaml"))
-          print(f"model={c['claude_models']['resolution_review']}")
-          print(f"reviewer_id={c['claude_models']['resolution_review']}-resolution-review")
-          print(f"max_turns={c['claude_limits']['max_turns_resolution_review']}")
-          PY
-
-      - name: Load resolution-review prompt
-        id: load-prompt
-        env:
-          REVIEWER_ID: ${{ steps.settings.outputs.reviewer_id }}
-        run: |
-          mkdir -p review-output
-          {
-            echo 'prompt<<__EOF_PROMPT__'
-            cat .if-fork/prompts/resolution-review.md
-            echo
-            echo '## Run inputs'
-            echo
-            echo "- Upstream PR: $PR_NUMBER (https://github.com/dotnet/wpf/pull/$PR_NUMBER)"
-            echo "- Approved upstream head SHA: $PINNED_HEAD_SHA"
-            echo "- BASE_SHA (pinned if/main): $BASE_SHA"
-            echo "- BRANCH_SHA (commit under review): $BRANCH_SHA"
-            echo "- Reviewer ID: $REVIEWER_ID"
-            echo "- Verdict file: review-output/resolution.json"
-            echo '__EOF_PROMPT__'
-          } >> "$GITHUB_OUTPUT"
-
-      # Trusted settings only, as in pr-review.yml: the user settings the
-      # action writes (hooks off), no project settings and no MCP servers but
-      # the action's own. A double slash is an absolute path in a rule.
-      # Claude Code checks Write against the Edit rules.
-      - name: Review the resolution
-        id: review
-        uses: anthropics/claude-code-action@v1
-        with:
-          allowed_bots: initial-force-wpf-bot
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: ${{ steps.load-prompt.outputs.prompt }}
-          settings: '{"disableAllHooks": true}'
-          claude_args: >-
-            --setting-sources user
-            --strict-mcp-config
-            --max-turns ${{ steps.settings.outputs.max_turns }}
-            --model ${{ steps.settings.outputs.model }}
-            --allowedTools "Read(./review-input/**),Read(./.if-fork/config.yaml),Edit(./review-output/resolution.json)"
-            --disallowedTools "Bash,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task,Glob,Grep,Read(//proc/**),Read(//home/runner/work/_temp/**),Edit(//home/runner/work/_temp/**)"
-          github_token: ${{ github.token }}
-
-      # The hash goes to record-resolution-verdict as a job output, which no
-      # other job can set, so a verdict file swapped in by another job is
-      # caught.
-      - name: Hash the verdict
-        id: verdict
-        if: always()
-        run: |
-          F=review-output/resolution.json
-          if [ -f "$F" ] && [ ! -L "$F" ]; then
-            echo "sha256=$(sha256sum "$F" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Upload the verdict
-        id: upload
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: resolution-verdict.json
-          path: review-output/resolution.json
-          retention-days: 30
-          if-no-files-found: warn
-
-  # -------------------------------------------------------------------------
-  # Job 9: record-resolution-verdict. Trusted. Check the verdict's origin,
-  # apply the code rules and record resolution_approved or
-  # resolution_rejected for the exact branch commit. Runs when the review
-  # failed too: no valid verdict is a rejection.
-  # -------------------------------------------------------------------------
-  record-resolution-verdict:
-    name: Record the resolution review
-    needs: [gate, cherry-pick, finalize, prepare-resolution-review, review-resolution]
+  retry-resolution:
+    name: Resolve again from scratch
+    needs: [gate, finalize, resolution-review]
     if: >-
       always() && needs.gate.outputs.proceed == 'true' &&
-      needs.finalize.outputs.pushed == 'true'
+      needs.finalize.outputs.pushed == 'true' &&
+      needs.resolution-review.outputs.next_action == 'retry'
     runs-on: ubuntu-latest
     environment: bot-credentials
-    outputs:
-      approved: ${{ steps.record.outputs.approved }}
-      reason: ${{ steps.record.outputs.reason }}
+
+    steps:
+      - name: Validate payload
+        run: |
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] && [[ "$PINNED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::Invalid pr_number or head_sha"; exit 1; }
+
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      # The new run waits for this one (same concurrency group).
+      - name: Dispatch a fresh ingestion run
+        run: |
+          jq -n --argjson pr "$PR_NUMBER" --arg sha "$PINNED_HEAD_SHA" \
+            '{event_type: "pr-ingestion-requested", client_payload: {pr_number: $pr, head_sha: $sha}}' \
+            | gh api "repos/$GITHUB_REPOSITORY/dispatches" --input -
+          echo "::notice::Resolution attempt $ATTEMPT was rejected ($REASON). A fresh run resolves upstream #$PR_NUMBER again."
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ATTEMPT: ${{ needs.resolution-review.outputs.attempt }}
+          REASON: ${{ needs.resolution-review.outputs.reason }}
+
+  # -------------------------------------------------------------------------
+  # Job 9: give-up-resolution. The last attempt was rejected too: close the
+  # PR, delete the branch and record escalated (reason resolution_rejected),
+  # which ends the change for this head. Discovery does not queue it again.
+  # -------------------------------------------------------------------------
+  give-up-resolution:
+    name: Give up on this change
+    needs: [gate, cherry-pick, finalize, resolution-review]
+    if: >-
+      always() && needs.gate.outputs.proceed == 'true' &&
+      needs.finalize.outputs.pushed == 'true' &&
+      needs.resolution-review.outputs.next_action == 'give_up'
+    runs-on: ubuntu-latest
+    environment: bot-credentials
     env:
-      BASE_SHA: ${{ needs.cherry-pick.outputs.main_sha }}
-      BRANCH_SHA: ${{ needs.finalize.outputs.branch_sha }}
       BRANCH: ${{ needs.cherry-pick.outputs.branch }}
 
     steps:
       - name: Validate payload
         run: |
           [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] && [[ "$PINNED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] \
-            && [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] && [[ "$BRANCH_SHA" =~ ^[0-9a-f]{40}$ ]] \
             && [[ "$BRANCH" == "claude/cherry-pick-pr-$PR_NUMBER" ]] \
-            || { echo "::error::Invalid pr_number, head_sha, SHAs or branch"; exit 1; }
+            || { echo "::error::Invalid pr_number, head_sha or branch"; exit 1; }
 
       - name: Generate GH App token
         id: app-token
@@ -940,9 +738,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Python dependencies
-        run: pip install pyyaml
-
       - name: Import bot GPG key
         uses: ./.github/actions/import-bot-gpg
         with:
@@ -950,105 +745,53 @@ jobs:
           gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
           gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
 
-      # Exact artifact name; a pattern could let another artifact stand in.
-      - name: Download the verdict
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: resolution-verdict.json
-          path: ${{ runner.temp }}/verdict/
-
-      # Only the counts of the novel-lines report go into the ledger.
-      - name: Download the review input
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: resolution-review-input
-          path: ${{ runner.temp }}/review-input/
-
-      # The hard-fail scan runs on the diff of the pushed commit, recomputed
-      # here, not on the artifact.
-      - name: Recompute the branch diff
+      - name: Close the PR and delete the branch
         run: |
           set -euo pipefail
-          git fetch --quiet --no-tags --depth=1 origin "$BASE_SHA" "$BRANCH_SHA"
-          PARENTS=$(git cat-file -p "$BRANCH_SHA" | sed -n 's/^parent //p')
-          [ "$PARENTS" = "$BASE_SHA" ] \
-            || { echo "::error::$BRANCH_SHA is not one commit on $BASE_SHA"; exit 1; }
-          git diff --no-color --no-ext-diff --no-renames "$BASE_SHA" "$BRANCH_SHA" \
-            > "$RUNNER_TEMP/final.diff"
-
-      # Exits 0 approved, 1 rejected, 3 error. The reviewer ID comes from the
-      # config here, not from the review job, so a review job that never ran
-      # cannot leave the check empty.
-      - name: Apply the rules
-        id: decide
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          PR_NUM=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --head "$BRANCH" \
+                     --base if/main --json number --jq '.[0].number // empty')
+          if [ -n "$PR_NUM" ]; then
+            gh pr close "$PR_NUM" --repo "$GITHUB_REPOSITORY" --comment "The resolution review rejected Claude's conflict resolution $ATTEMPT times ($REASON). The pipeline gave up on upstream #$PR_NUMBER at \`$PINNED_HEAD_SHA\` and recorded it as escalated. Run: $RUN_URL"
+          fi
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$BRANCH" \
+            || echo "::warning::Could not delete $BRANCH (already gone?)."
         env:
-          VERDICT_SHA256: ${{ needs.review-resolution.outputs.verdict_sha256 }}
-          UPLOAD: ${{ needs.review-resolution.outputs.upload }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          MODEL=$(python3 -c "import yaml; print(yaml.safe_load(open('.if-fork/config.yaml'))['claude_models']['resolution_review'])")
-          set +e
-          python tools/record-resolution-verdict.py \
-            --verdict "$RUNNER_TEMP/verdict/resolution.json" \
-            --reviewer-id "$MODEL-resolution-review" \
-            --verdict-sha256 "$VERDICT_SHA256" \
-            --upload "$UPLOAD" \
-            --config .if-fork/config.yaml \
-            --final-diff "$RUNNER_TEMP/final.diff" \
-            --novel-lines "$RUNNER_TEMP/review-input/novel-lines.json" \
-            --pr-number "$PR_NUMBER" \
-            --head-sha "$PINNED_HEAD_SHA" \
-            --branch-sha "$BRANCH_SHA" \
-            --branch "$BRANCH" \
-            --run-url "$RUN_URL" \
-            --output "$RUNNER_TEMP/decision.json" \
-            --events-out "$RUNNER_TEMP/resolution-events.jsonl"
-          rc=$?
-          set -e
-          case "$rc" in
-            0) echo "decision=approved" >> "$GITHUB_OUTPUT" ;;
-            1) echo "decision=rejected" >> "$GITHUB_OUTPUT" ;;
-            *) echo "::error::record-resolution-verdict.py failed (exit $rc)"; exit 1 ;;
-          esac
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ATTEMPT: ${{ needs.resolution-review.outputs.attempt }}
+          REASON: ${{ needs.resolution-review.outputs.reason }}
 
-      - name: Record in ledger
+      - name: Record escalated
+        run: |
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          jq -n --argjson pr "$PR_NUMBER" --arg sha "$PINNED_HEAD_SHA" --arg run "$RUN_URL" \
+            --arg attempts "$ATTEMPT" --arg why "$REASON" \
+            '{event: "escalated", pr_number: $pr, head_sha: $sha,
+              details: {reason: "resolution_rejected", attempts: $attempts,
+                        last_reasons: $why, run_url: $run}}' > "$RUNNER_TEMP/events.jsonl"
+          python tools/ledger-event.py --events-file "$RUNNER_TEMP/events.jsonl" \
+            --actor pr-ingestion --push
+          echo "::warning::Upstream #$PR_NUMBER at $PINNED_HEAD_SHA: resolution rejected $ATTEMPT times. Escalated and closed."
         env:
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          DECISION: ${{ steps.decide.outputs.decision }}
-        run: |
-          python tools/ledger-event.py \
-            --events-file "$RUNNER_TEMP/resolution-events.jsonl" \
-            --actor pr-ingestion \
-            --message "ledger: resolution pr#$PR_NUMBER $DECISION" \
-            --push
-
-      # Only after the ledger commit is pushed: open-pr drops
-      # needs-human-merge on approved == true.
-      - name: Publish the decision
-        id: record
-        env:
-          DECISION: ${{ steps.decide.outputs.decision }}
-        run: |
-          REASON=$(jq -r '.reasons | join("; ")' "$RUNNER_TEMP/decision.json" | tr -d '\r\n' | head -c 500)
-          {
-            if [ "$DECISION" = approved ]; then echo "approved=true"; else echo "approved=false"; fi
-            echo "reason=$REASON"
-          } >> "$GITHUB_OUTPUT"
-          echo "::notice::Resolution of upstream #$PR_NUMBER at $BRANCH_SHA: $DECISION. $REASON"
+          ATTEMPT: ${{ needs.resolution-review.outputs.attempt }}
+          REASON: ${{ needs.resolution-review.outputs.reason }}
 
   # -------------------------------------------------------------------------
   # Job 10: open-pr — open (or reuse) the PR to if/main, emit ledger event
   # -------------------------------------------------------------------------
   open-pr:
     name: Open internal PR
-    needs: [gate, cherry-pick, finalize, record-resolution-verdict]
+    needs: [gate, cherry-pick, finalize, resolution-review]
+    # A clean cherry-pick, or a resolution the review approved. A rejected
+    # resolution never gets a PR of its own.
     if: >-
       always() && needs.gate.outputs.proceed == 'true' &&
-      (needs.cherry-pick.outputs.pushed == 'true' || needs.finalize.outputs.pushed == 'true')
+      (needs.cherry-pick.outputs.pushed == 'true' ||
+       (needs.finalize.outputs.pushed == 'true' &&
+        needs.resolution-review.outputs.next_action == 'approved'))
     runs-on: ubuntu-latest
     environment: bot-credentials
     outputs:
@@ -1089,12 +832,9 @@ jobs:
         run: |
           set -euo pipefail
           RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          NEEDS_HUMAN=false
-          if [ "$CONFLICT_RESOLVED" = true ] && [ "$RESOLUTION_APPROVED" = true ]; then
-            MERGE_NOTE="The cherry-pick conflicted with the fork, and Claude wrote the resolution (commit trailer \`Conflict-Resolved-By: claude\`). A separate review of that resolution (\`resolution-review.md\`) approved commit \`$BRANCH_SHA\`, and the ledger records it as \`resolution_approved\`. When \`Build\` passes, \`automerge.yml\` merges this PR. A new push to the branch needs a new review."
-          elif [ "$CONFLICT_RESOLVED" = true ]; then
-            NEEDS_HUMAN=true
-            MERGE_NOTE="**A person must merge this PR.** The cherry-pick conflicted with the fork, and Claude wrote the resolution (commit trailer \`Conflict-Resolved-By: claude\`). The review of that resolution did not approve it: ${RESOLUTION_REASON:-the review did not finish}. \`automerge.yml\` will not merge this PR. Review the resolved files against the upstream PR, then merge it by hand when \`Build\` passes."
+          if [ "$CONFLICT_RESOLVED" = true ]; then
+            [ "$RESOLUTION_APPROVED" = true ] || { echo "::error::Resolution not approved"; exit 1; }
+            MERGE_NOTE="The cherry-pick conflicted with the fork, and Claude wrote the resolution (commit trailer \`Conflict-Resolved-By: claude\`). A separate review of that resolution (\`resolution-review.md\`, attempt $RESOLUTION_ATTEMPT) approved commit \`$BRANCH_SHA\`, and the ledger records it as \`resolution_approved\`. When \`Build\` passes, \`automerge.yml\` merges this PR. A new push to the branch needs a new review."
           else
             MERGE_NOTE="The \`Build\` workflow runs on this PR. When it passes, \`automerge.yml\` merges this PR (unless \`IF_AUTOMERGE_FROZEN=true\`)."
           fi
@@ -1122,7 +862,9 @@ jobs:
           fi
           gh pr edit "$PR_NUM" --repo "$GITHUB_REPOSITORY" --add-label automated \
             || echo "::warning::Could not add label 'automated' to PR #$PR_NUM; automerge.yml will skip it."
-          bash tools/human-merge-label.sh "$PR_NUM" "$NEEDS_HUMAN"
+          # The automatic path never needs a person; clear a label left from
+          # before.
+          bash tools/human-merge-label.sh "$PR_NUM" false
           echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
           echo "::notice::Internal PR #$PR_NUM"
         env:
@@ -1131,8 +873,8 @@ jobs:
           UPSTREAM_TITLE: ${{ needs.cherry-pick.outputs.title }}
           CONFLICT_RESOLVED: ${{ needs.finalize.outputs.pushed == 'true' }}
           BRANCH_SHA: ${{ needs.finalize.outputs.branch_sha }}
-          RESOLUTION_APPROVED: ${{ needs.record-resolution-verdict.outputs.approved == 'true' }}
-          RESOLUTION_REASON: ${{ needs.record-resolution-verdict.outputs.reason }}
+          RESOLUTION_APPROVED: ${{ needs.resolution-review.outputs.next_action == 'approved' }}
+          RESOLUTION_ATTEMPT: ${{ needs.resolution-review.outputs.attempt }}
 
       - name: Emit cherry_picked ledger event
         run: |
