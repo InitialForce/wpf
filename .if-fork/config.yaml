@@ -159,6 +159,10 @@ conflict_resolution:
   max_conflict_lines: 80
   min_confidence: 0.85
   pause_run_if_escalation_pct_exceeds: 30
+  # The Fable review of a resolved cherry-pick (pr-ingestion.yml
+  # review-resolution) must report at least this confidence before automerge
+  # may merge the PR (tools/record-resolution-verdict.py).
+  review_min_confidence: 0.9
 
 stable_adoption:
   abort_run_if_escalation_pct_exceeds: 30
@@ -174,6 +178,9 @@ claude_models:
   review_1: claude-fable-5-1
   review_2: claude-fable-5-1
   cherry_pick: claude-sonnet-4-6
+  # pr-ingestion.yml review-resolution: checks a conflict resolution Claude
+  # wrote for a cherry-pick (owner decision: Fable).
+  resolution_review: claude-fable-5-1
   conflict_resolve: claude-sonnet-4-6
   release_notes: claude-sonnet-4-6
   failure_analysis: claude-sonnet-4-6
@@ -184,6 +191,9 @@ claude_limits:
   # and writes one file: about 15 turns at minimum. 12 was too low.
   max_turns_review: 40
   max_turns_cherry_pick: 15
+  # The resolution review reads config, two diffs, the novel-lines report and
+  # some whole files, then writes one file.
+  max_turns_resolution_review: 40
   max_turns_conflict: 20
   daily_token_cap_usd: 25
   monthly_token_cap_usd: 200

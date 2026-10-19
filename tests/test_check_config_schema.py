@@ -96,6 +96,7 @@ def _minimal_valid_config() -> dict[str, object]:
             "max_conflict_lines": 80,
             "min_confidence": 0.85,
             "pause_run_if_escalation_pct_exceeds": 30,
+            "review_min_confidence": 0.9,
         },
         "stable_adoption": {
             "abort_run_if_escalation_pct_exceeds": 30,
@@ -113,12 +114,14 @@ def _minimal_valid_config() -> dict[str, object]:
             "conflict_resolve": "claude-sonnet-4-6",
             "release_notes": "claude-sonnet-4-6",
             "failure_analysis": "claude-sonnet-4-6",
+            "resolution_review": "claude-fable-5-1",
         },
         "claude_limits": {
             "max_turns_triage": 8,
             "max_turns_review": 12,
             "max_turns_cherry_pick": 15,
             "max_turns_conflict": 20,
+            "max_turns_resolution_review": 40,
             "daily_token_cap_usd": 25,
             "monthly_token_cap_usd": 200,
         },

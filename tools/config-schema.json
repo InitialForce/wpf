@@ -202,7 +202,7 @@
     },
     "conflict_resolution": {
       "type": "object",
-      "required": ["max_hunk_count", "max_conflict_lines", "min_confidence", "pause_run_if_escalation_pct_exceeds"],
+      "required": ["max_hunk_count", "max_conflict_lines", "min_confidence", "pause_run_if_escalation_pct_exceeds", "review_min_confidence"],
       "additionalProperties": false,
       "properties": {
         "max_hunk_count": {
@@ -226,6 +226,12 @@
           "minimum": 0.0,
           "maximum": 100.0,
           "description": "Pause the run if escalation percentage exceeds this threshold"
+        },
+        "review_min_confidence": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Minimum confidence of the resolution review before a Claude-resolved cherry-pick may automerge"
         }
       }
     },
@@ -278,13 +284,14 @@
     },
     "claude_models": {
       "type": "object",
-      "required": ["triage", "review_1", "review_2", "cherry_pick", "conflict_resolve", "release_notes", "failure_analysis"],
+      "required": ["triage", "review_1", "review_2", "cherry_pick", "conflict_resolve", "release_notes", "failure_analysis", "resolution_review"],
       "additionalProperties": false,
       "properties": {
         "triage": {"type": "string", "description": "Claude model for PR triage"},
         "review_1": {"type": "string", "description": "Claude model for first review pass"},
         "review_2": {"type": "string", "description": "Claude model for second review pass"},
         "cherry_pick": {"type": "string", "description": "Claude model for cherry-pick operations"},
+        "resolution_review": {"type": "string", "description": "Claude model that reviews a cherry-pick conflict resolution"},
         "conflict_resolve": {"type": "string", "description": "Claude model for conflict resolution"},
         "release_notes": {"type": "string", "description": "Claude model for release note generation"},
         "failure_analysis": {"type": "string", "description": "Claude model for failure analysis"}
@@ -297,6 +304,7 @@
         "max_turns_review",
         "max_turns_cherry_pick",
         "max_turns_conflict",
+        "max_turns_resolution_review",
         "daily_token_cap_usd",
         "monthly_token_cap_usd"
       ],
@@ -306,6 +314,7 @@
         "max_turns_review": {"type": "integer", "minimum": 1},
         "max_turns_cherry_pick": {"type": "integer", "minimum": 1},
         "max_turns_conflict": {"type": "integer", "minimum": 1},
+        "max_turns_resolution_review": {"type": "integer", "minimum": 1},
         "daily_token_cap_usd": {"type": "number", "minimum": 0.0},
         "monthly_token_cap_usd": {"type": "number", "minimum": 0.0}
       }
