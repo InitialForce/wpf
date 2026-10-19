@@ -33,7 +33,9 @@ case "$1 $2" in
       */pulls/*) cat "$STUB/pr-${2##*/}.json" ;;
       */actions/workflows/build.yml/runs*)
         sha="${2##*head_sha=}"; sha="${sha%%&*}"; cat "$STUB/build-$sha" 2>/dev/null ;;
-      */issues/*/comments) n="${2%/comments}"; cat "$STUB/comments-${n##*/}" 2>/dev/null ;;
+      */issues/*/comments) n="${2%/comments}"
+        if [[ "$*" == *created_at* ]]; then cat "$STUB/rebuild-times-${n##*/}" 2>/dev/null || true
+        else cat "$STUB/comments-${n##*/}" 2>/dev/null; fi ;;
       */dispatches) jq -c . >> "$STUB/dispatches" ;;
     esac ;;
 esac
@@ -221,3 +223,36 @@ def test_one_broken_pr_does_not_stop_the_others(setup) -> None:
     r = run(work, env)
     assert r.returncode == 1
     assert lines(stub / "merged") == ["2"]
+
+
+def _stamp(hours_ago: float) -> str:
+    import datetime as dt
+
+    t = dt.datetime.now(dt.UTC) - dt.timedelta(hours=hours_ago)
+    return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@pytest.mark.parametrize("verify", ["behind", "unreviewed"])
+def test_rebuilds_are_capped_at_three_per_day_per_pr(setup, verify: str) -> None:
+    # Opus M1: every rebuild makes a new head, so only a count per change
+    # stops a rebuild that never gets a decision.
+    stub, work, env = setup
+    sha = add_pr(stub, 1, verify)
+    (stub / "rebuild-times-1").write_text(
+        "\n".join(_stamp(h) for h in (1, 5, 23)) + "\n"
+    )
+    assert run(work, env).returncode == 0
+    assert not (stub / "dispatches").exists()
+    text = (stub / "comments-1").read_text()
+    assert f"<!-- automerge-rebuild-capped:{sha} -->" in text
+    assert f"<!-- automerge-rebuild:{sha} -->" not in text
+
+
+def test_old_rebuilds_do_not_count_towards_the_cap(setup) -> None:
+    stub, work, env = setup
+    add_pr(stub, 1, "unreviewed")
+    (stub / "rebuild-times-1").write_text(
+        "\n".join(_stamp(h) for h in (2, 25, 30, 48)) + "\n"
+    )
+    assert run(work, env).returncode == 0
+    assert len(lines(stub / "dispatches")) == 1
