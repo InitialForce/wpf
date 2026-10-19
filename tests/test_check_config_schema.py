@@ -97,6 +97,7 @@ def _minimal_valid_config() -> dict[str, object]:
             "min_confidence": 0.85,
             "pause_run_if_escalation_pct_exceeds": 30,
             "review_min_confidence": 0.9,
+            "max_resolution_attempts": 2,
         },
         "stable_adoption": {
             "abort_run_if_escalation_pct_exceeds": 30,

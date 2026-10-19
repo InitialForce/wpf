@@ -147,3 +147,20 @@ def test_resolution_approval_needs_the_upstream_approval(tmp_path: Path) -> None
 def test_resolution_branch_sha_is_validated(tmp_path: Path) -> None:
     led = _ledger_with(tmp_path, [])
     assert _run_resolution(led, "abc")[0] == 1
+
+
+def test_resolution_only_skips_the_review_outcome(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.jsonl"
+    path.write_text(json.dumps(_resolution("resolution_approved", 0, SHA_A, BRANCH_1)) + "\n")
+    r = subprocess.run(
+        [sys.executable, str(TOOL), "--ledger", str(path), "--pr-number", "0",
+         "--head-sha", SHA_A, "--resolution-branch-sha", BRANCH_1, "--resolution-only"],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stdout
+    r = subprocess.run(
+        [sys.executable, str(TOOL), "--ledger", str(path), "--pr-number", "0",
+         "--head-sha", SHA_A, "--resolution-branch-sha", BRANCH_2, "--resolution-only"],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 2

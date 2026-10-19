@@ -163,6 +163,11 @@ conflict_resolution:
   # review-resolution) must report at least this confidence before automerge
   # may merge the PR (tools/record-resolution-verdict.py).
   review_min_confidence: 0.9
+  # Resolver runs per (upstream PR, head) for a cherry-pick, or per upstream
+  # SHA for a sync, before the pipeline gives up on that change. A rejected
+  # review below this starts a fresh resolver run; at it, a cherry-pick is
+  # escalated and closed, and a sync is recorded as rebase_failed.
+  max_resolution_attempts: 2
 
 stable_adoption:
   abort_run_if_escalation_pct_exceeds: 30

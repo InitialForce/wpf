@@ -53,10 +53,11 @@ bot_signed() {
     | awk -v f="$KEY_FPR" '$2 == "VALIDSIG" && ($3 == f || $NF == f) {ok = 1} END {exit !ok}'
 }
 
-# A conflict resolution written by Claude merges by itself only for a
-# cherry-pick, and only when a Fable review approved that exact commit (see
-# the cherry-pick case). Otherwise a person merges it.
-HUMAN_MERGE="a person must review and merge it (needs-human-merge)"
+# A conflict resolution written by Claude merges by itself only when the
+# Fable resolution review approved that exact commit (resolution_approved in
+# the if/main ledger with branch_sha = the PR head). A resolution with no such
+# approval, or one made by anyone else, is refused.
+NOT_APPROVED="no resolution review approved this exact commit"
 agent_resolved() {
   [ -n "$(git log -1 --format='%(trailers:key=Conflict-Resolved-By,valueonly)' "$1")" ]
 }
@@ -106,7 +107,7 @@ case "$HEAD_BRANCH" in
       python3 "$TRUSTED/tools/check-approval.py" --ledger "$OUT/ledger.jsonl" \
         --pr-number "$BRANCH_PR" --head-sha "$UP_HEAD" --resolution-branch-sha "$HEAD_SHA" \
         > "$OUT/resolution.json" \
-        || refuse "Claude resolved a conflict in this cherry-pick and the resolution review did not approve commit $HEAD_SHA ($(jq -r .reason "$OUT/resolution.json")); $HUMAN_MERGE"
+        || refuse "Claude resolved a conflict in this cherry-pick and $NOT_APPROVED ($(jq -r .reason "$OUT/resolution.json"))"
     fi
     deny "$OUT/changed.txt"
     echo "$BRANCH_PR" > "$OUT/upstream_pr"
@@ -122,17 +123,29 @@ case "$HEAD_BRANCH" in
     [ -z "$OTHER" ] || refuse "commits that are neither upstream nor bot-signed: $(echo "$OTHER" | tr '\n' ' ')"
     # Files where the result differs from git's own merge are the conflict
     # resolutions. Kept fork deletions (absent from if/main and the result)
-    # are not changes.
-    AUTO=$(git merge-tree --write-tree HEAD^1 HEAD^2 | head -n1 || true)
+    # are not changes. merge-tree lists the conflicted files after the tree.
+    git merge-tree --write-tree --name-only --no-messages HEAD^1 HEAD^2 > "$OUT/auto.txt" || true
+    AUTO=$(head -n1 "$OUT/auto.txt")
     [[ "$AUTO" =~ ^[0-9a-f]{40}$ ]] || refuse "could not recreate the merge"
+    tail -n +2 "$OUT/auto.txt" | sed '/^$/d' | sort -u > "$OUT/conflicted.txt"
     git diff --name-only "$AUTO" HEAD | while read -r f; do
       if git cat-file -e "HEAD:$f" 2>/dev/null || git cat-file -e "HEAD^1:$f" 2>/dev/null; then
         echo "$f"
       fi
     done > "$OUT/resolved.txt"
     deny "$OUT/resolved.txt"
-    if agent_resolved HEAD || [ -s "$OUT/resolved.txt" ]; then
-      refuse "the sync merge holds conflict resolutions ($(tr '\n' ' ' < "$OUT/resolved.txt")); $HUMAN_MERGE"
+    if [ -s "$OUT/resolved.txt" ] || agent_resolved HEAD; then
+      # Only Claude's trailer can be approved, and only for the files git
+      # could not merge: every other file must equal git's own merge.
+      agent_resolved HEAD \
+        || refuse "the sync merge differs from git's own merge in $(tr '\n' ' ' < "$OUT/resolved.txt")without a Conflict-Resolved-By trailer"
+      EXTRA=$(sort -u "$OUT/resolved.txt" | comm -23 - "$OUT/conflicted.txt")
+      [ -z "$EXTRA" ] || refuse "the sync merge changes files git merged cleanly: $(echo "$EXTRA" | tr '\n' ' ')"
+      git show "$MAIN:.if-fork/patch-ledger.jsonl" > "$OUT/ledger.jsonl"
+      python3 "$TRUSTED/tools/check-approval.py" --ledger "$OUT/ledger.jsonl" \
+        --pr-number 0 --head-sha "$(git rev-parse HEAD^2)" --resolution-branch-sha "$HEAD_SHA" \
+        --resolution-only > "$OUT/resolution.json" \
+        || refuse "Claude resolved a conflict in this sync merge and $NOT_APPROVED ($(jq -r .reason "$OUT/resolution.json"))"
     fi
     ;;
   *)

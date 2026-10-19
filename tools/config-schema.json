@@ -202,7 +202,7 @@
     },
     "conflict_resolution": {
       "type": "object",
-      "required": ["max_hunk_count", "max_conflict_lines", "min_confidence", "pause_run_if_escalation_pct_exceeds", "review_min_confidence"],
+      "required": ["max_hunk_count", "max_conflict_lines", "min_confidence", "pause_run_if_escalation_pct_exceeds", "review_min_confidence", "max_resolution_attempts"],
       "additionalProperties": false,
       "properties": {
         "max_hunk_count": {
@@ -231,7 +231,12 @@
           "type": "number",
           "minimum": 0.0,
           "maximum": 1.0,
-          "description": "Minimum confidence of the resolution review before a Claude-resolved cherry-pick may automerge"
+          "description": "Minimum confidence of the resolution review before a Claude-resolved merge may automerge"
+        },
+        "max_resolution_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Resolver runs per change before a rejected resolution is given up (escalated or rebase_failed)"
         }
       }
     },

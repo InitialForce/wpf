@@ -162,3 +162,138 @@ def test_config_without_threshold_exits_3(tmp_path: Path) -> None:
     cfg = tmp_path / "config.yaml"
     cfg.write_text("review_hard_fail_patterns: []\nconflict_resolution: {}\n")
     assert _run(tmp_path, _verdict(), config=cfg)[0] == 3
+
+
+# ---------------------------------------------------------------------------
+# Attempts and the next action
+# ---------------------------------------------------------------------------
+
+
+def _ledger(tmp_path: Path, events: list[tuple[str, int, str]]) -> Path:
+    path = tmp_path / "ledger.jsonl"
+    path.write_text("".join(
+        json.dumps({"event": e, "pr_number": pr, "head_sha": sha,
+                    "details": {"branch_sha": "d" * 40}}) + "\n"
+        for e, pr, sha in events
+    ))
+    return path
+
+
+def _run_with(tmp_path: Path, verdict: dict[str, Any], *extra: str) -> dict[str, Any]:
+    vpath = tmp_path / "resolution.json"
+    vpath.write_text(json.dumps(verdict))
+    (tmp_path / "final.diff").write_text(CLEAN_DIFF)
+    out, events = tmp_path / "decision.json", tmp_path / "events.jsonl"
+    args = ["--pr-number", "77", "--head-sha", HEAD, *extra]
+    r = subprocess.run(
+        [sys.executable, str(TOOL), "--verdict", str(vpath), "--reviewer-id", REVIEWER,
+         "--verdict-sha256", hashlib.sha256(vpath.read_bytes()).hexdigest(),
+         "--upload", "success", "--config", str(CONFIG),
+         "--final-diff", str(tmp_path / "final.diff"),
+         "--branch-sha", BRANCH_SHA, "--branch", "b",
+         "--output", str(out), "--events-out", str(events), *args],
+        capture_output=True, text=True,
+    )
+    assert r.returncode in (0, 1), r.stderr
+    return {**json.loads(out.read_text()), "event": json.loads(events.read_text())}
+
+
+def test_first_rejection_is_retried(tmp_path: Path) -> None:
+    led = _ledger(tmp_path, [])
+    d = _run_with(tmp_path, _verdict(verdict="reject"), "--ledger", str(led))
+    assert (d["decision"], d["attempt"], d["next_action"]) == ("rejected", 1, "retry")
+    assert d["event"]["details"]["attempt"] == 1
+
+
+def test_second_rejection_gives_up(tmp_path: Path) -> None:
+    led = _ledger(tmp_path, [("resolution_rejected", 77, HEAD)])
+    d = _run_with(tmp_path, _verdict(verdict="reject"), "--ledger", str(led))
+    assert (d["attempt"], d["next_action"]) == (2, "give_up")
+
+
+def test_approval_after_a_rejection(tmp_path: Path) -> None:
+    led = _ledger(tmp_path, [("resolution_rejected", 77, HEAD)])
+    d = _run_with(tmp_path, _verdict(), "--ledger", str(led))
+    assert (d["decision"], d["attempt"], d["next_action"]) == ("approved", 2, "approved")
+
+
+def test_a_rebuild_after_an_approval_starts_again(tmp_path: Path) -> None:
+    led = _ledger(tmp_path, [
+        ("resolution_rejected", 77, HEAD),
+        ("resolution_approved", 77, HEAD),
+    ])
+    d = _run_with(tmp_path, _verdict(verdict="reject"), "--ledger", str(led))
+    assert (d["attempt"], d["next_action"]) == (1, "retry")
+
+
+def test_rejections_of_other_pairs_do_not_count(tmp_path: Path) -> None:
+    led = _ledger(tmp_path, [
+        ("resolution_rejected", 78, HEAD),
+        ("resolution_rejected", 77, "e" * 40),
+        ("resolution_rejected", 0, HEAD),
+    ])
+    d = _run_with(tmp_path, _verdict(verdict="reject"), "--ledger", str(led))
+    assert d["next_action"] == "retry"
+
+
+def test_max_attempts_from_the_command_line(tmp_path: Path) -> None:
+    led = _ledger(tmp_path, [])
+    d = _run_with(tmp_path, _verdict(verdict="reject"), "--ledger", str(led),
+                  "--max-attempts", "1")
+    assert d["next_action"] == "give_up"
+
+
+def test_sync_is_recorded_with_pr_0_and_upstream_sha(tmp_path: Path) -> None:
+    vpath = tmp_path / "resolution.json"
+    vpath.write_text(json.dumps(_verdict()))
+    # Upstream code the resolution kept from release/10.0 shows up as a
+    # removed marker-region line; only added lines are scanned for a sync.
+    diff = CLEAN_DIFF + "-    unsafe { Upstream(); }\n"
+    (tmp_path / "final.diff").write_text(diff)
+    out, events = tmp_path / "d.json", tmp_path / "e.jsonl"
+    r = subprocess.run(
+        [sys.executable, str(TOOL), "--kind", "sync", "--added-only",
+         "--verdict", str(vpath), "--reviewer-id", REVIEWER,
+         "--verdict-sha256", hashlib.sha256(vpath.read_bytes()).hexdigest(),
+         "--upload", "success", "--config", str(CONFIG),
+         "--final-diff", str(tmp_path / "final.diff"),
+         "--pr-number", "0", "--head-sha", HEAD, "--branch-sha", BRANCH_SHA,
+         "--branch", "if/staging", "--output", str(out), "--events-out", str(events)],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    event = json.loads(events.read_text())
+    assert event["event"] == "resolution_approved" and event["pr_number"] == 0
+    assert event["details"]["upstream_sha"] == HEAD and event["details"]["kind"] == "sync"
+
+
+def test_sync_added_line_with_hard_fail_is_rejected(tmp_path: Path) -> None:
+    vpath = tmp_path / "resolution.json"
+    vpath.write_text(json.dumps(_verdict()))
+    (tmp_path / "final.diff").write_text(CLEAN_DIFF + "+    unsafe { New(); }\n")
+    out, events = tmp_path / "d.json", tmp_path / "e.jsonl"
+    r = subprocess.run(
+        [sys.executable, str(TOOL), "--kind", "sync", "--added-only",
+         "--verdict", str(vpath), "--reviewer-id", REVIEWER,
+         "--verdict-sha256", hashlib.sha256(vpath.read_bytes()).hexdigest(),
+         "--upload", "success", "--config", str(CONFIG),
+         "--final-diff", str(tmp_path / "final.diff"),
+         "--pr-number", "0", "--head-sha", HEAD, "--branch-sha", BRANCH_SHA,
+         "--branch", "if/staging", "--output", str(out), "--events-out", str(events)],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 1
+
+
+@pytest.mark.parametrize(("kind", "pr"), [("sync", "77"), ("cherry-pick", "0")])
+def test_pr_number_must_match_the_kind(tmp_path: Path, kind: str, pr: str) -> None:
+    (tmp_path / "final.diff").write_text(CLEAN_DIFF)
+    r = subprocess.run(
+        [sys.executable, str(TOOL), "--kind", kind, "--verdict", "x",
+         "--reviewer-id", REVIEWER, "--config", str(CONFIG),
+         "--final-diff", str(tmp_path / "final.diff"), "--pr-number", pr,
+         "--head-sha", HEAD, "--branch-sha", BRANCH_SHA, "--branch", "b",
+         "--output", str(tmp_path / "o"), "--events-out", str(tmp_path / "e")],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 3

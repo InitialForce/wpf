@@ -15,6 +15,10 @@ cherry-pick whose conflicts Claude resolved), the pair must also have a
 later ``resolution_rejected`` event for that commit. An approval for any other
 commit of the branch does not count, so a new push needs a new review.
 
+--resolution-only checks just that resolution rule and skips the review
+outcome. automerge-verify.sh uses it for a sync merge, recorded with
+pr_number 0 and the upstream release/10.0 SHA as head_sha.
+
 Exit codes:
   0  approved
   1  bad input or unreadable ledger
@@ -86,7 +90,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pr-number", required=True)
     parser.add_argument("--head-sha", required=True)
     parser.add_argument("--resolution-branch-sha")
+    parser.add_argument("--resolution-only", action="store_true")
     args = parser.parse_args(argv)
+    if args.resolution_only and args.resolution_branch_sha is None:
+        parser.error("--resolution-only needs --resolution-branch-sha")
 
     branch_sha = args.resolution_branch_sha
     if (
@@ -108,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"approved": False, "reason": f"cannot read ledger: {exc}"}))
         return 1
 
-    if outcome != "approved":
+    if outcome != "approved" and not args.resolution_only:
         reason = (
             "no review outcome for this head" if outcome is None else f"last outcome is {outcome}"
         )

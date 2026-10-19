@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Decide whether a Fable review approved a Claude conflict resolution.
 
-pr-ingestion.yml runs this in the trusted record-resolution-verdict job,
-after the review-resolution job. Model output alone never approves. The
-resolution is approved only when all of these hold:
+The record job of resolution-review.yml runs this after the review job, for
+a cherry-pick (pr-ingestion.yml) or a nightly sync merge (nightly-rebase.yml).
+Model output alone never approves. The resolution is approved only when all
+of these hold:
   - origin: the review job's upload step succeeded, the verdict file's
     SHA-256 equals the hash that job recorded as a job output, and its
     reviewer_id is that job's reviewer ID (the same checks merge-verdicts.py
@@ -11,15 +12,28 @@ resolution is approved only when all of these hold:
   - the verdict file is one JSON object with verdict "approve",
     novel_lines_justified true and a numeric confidence of at least
     conflict_resolution.review_min_confidence from the config
-  - no review_hard_fail_patterns entry matches an added or removed line of
-    the final branch diff (BASE_SHA..BRANCH_SHA)
+  - no review_hard_fail_patterns entry matches a scanned line of --final-diff.
+    For a cherry-pick that is every added and removed line of
+    BASE_SHA..BRANCH_SHA (the upstream part was already scanned at review).
+    For a sync it is the added lines of the diff from git's automatic merge
+    (with conflict markers) to the result, which is what the resolution
+    itself wrote; the rest is upstream release/10.0 (--added-only).
 Anything else, including a missing or malformed verdict, is a rejection.
 
 The decision is bound to the exact commit that was reviewed: the ledger event
 (resolution_approved or resolution_rejected) carries pr_number and head_sha
-(the approved upstream pair) and details.branch_sha. automerge-verify.sh
-accepts a Conflict-Resolved-By commit only with a resolution_approved event
-for its own SHA, so any new push to the branch needs a new review.
+and details.branch_sha. For a cherry-pick that pair is the approved upstream
+PR and head; for a sync it is pr_number 0 and the upstream release/10.0 SHA,
+also in details.upstream_sha. automerge-verify.sh accepts a
+Conflict-Resolved-By commit only with a resolution_approved event for its own
+SHA, so any new push to the branch needs a new review.
+
+Attempts: with --ledger, the decision also says what the caller does next.
+The attempt number is one more than the resolution_rejected events for the
+same pair since its last resolution_approved (a rebuild after an approval
+starts again at 1). A rejection below --max-attempts (default
+conflict_resolution.max_resolution_attempts, else 2) is "retry": the caller
+runs the resolver again from scratch. At the limit it is "give_up".
 
 Usage:
   python tools/record-resolution-verdict.py --verdict resolution.json \\
@@ -50,6 +64,8 @@ EXIT_ERROR = 3
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 VALID_VERDICTS = frozenset(["approve", "reject"])
+KINDS = ("cherry-pick", "sync")
+DEFAULT_MAX_ATTEMPTS = 2
 
 
 def die(message: str) -> None:
@@ -112,9 +128,19 @@ def verdict_problems(verdict: dict[str, Any], threshold: float) -> list[str]:
     return problems
 
 
-def hard_fail_hits(diff_text: str, patterns: list[str]) -> list[dict[str, str]]:
-    """Return the first changed line of the diff that each pattern matches."""
-    lines = _changed_lines(diff_text)
+def _added_lines(diff_text: str) -> list[str]:
+    return [
+        line[1:]
+        for line in diff_text.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    ]
+
+
+def hard_fail_hits(
+    diff_text: str, patterns: list[str], added_only: bool = False
+) -> list[dict[str, str]]:
+    """Return the first scanned line of the diff that each pattern matches."""
+    lines = _added_lines(diff_text) if added_only else _changed_lines(diff_text)
     hits: list[dict[str, str]] = []
     for pattern in patterns:
         regex = re.compile(pattern)
@@ -123,6 +149,29 @@ def hard_fail_hits(diff_text: str, patterns: list[str]) -> list[dict[str, str]]:
                 hits.append({"pattern": pattern, "line": line.strip()[:200]})
                 break
     return hits
+
+
+def prior_rejections(ledger_text: str, pr_number: int, head_sha: str) -> int:
+    """resolution_rejected events for the pair since its last resolution_approved."""
+    count = 0
+    for line in ledger_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        entry = json.loads(line)
+        if entry.get("pr_number") != pr_number or entry.get("head_sha") != head_sha:
+            continue
+        if entry.get("event") == "resolution_approved":
+            count = 0
+        elif entry.get("event") == "resolution_rejected":
+            count += 1
+    return count
+
+
+def next_action(rejected: bool, attempt: int, max_attempts: int) -> str:
+    if not rejected:
+        return "approved"
+    return "retry" if attempt < max_attempts else "give_up"
 
 
 def decide(
@@ -145,13 +194,18 @@ def build_event(
     reasons: list[str],
     hits: list[dict[str, str]],
     novel: dict[str, Any] | None,
+    attempt: int,
 ) -> dict[str, Any]:
     details: dict[str, Any] = {
+        "kind": args.kind,
         "branch": args.branch,
         "branch_sha": args.branch_sha,
         "reviewer_id": args.reviewer_id,
+        "attempt": attempt,
         "reasons": reasons,
     }
+    if args.kind == "sync":
+        details["upstream_sha"] = args.head_sha
     if verdict is not None:
         details["verdict"] = verdict.get("verdict")
         details["confidence"] = verdict.get("confidence")
@@ -184,13 +238,19 @@ class _Parser(argparse.ArgumentParser):
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = _Parser(description=__doc__.splitlines()[0])
+    parser.add_argument("--kind", choices=KINDS, default="cherry-pick")
     parser.add_argument("--verdict", type=Path, required=True)
     parser.add_argument("--reviewer-id", required=True)
     parser.add_argument("--verdict-sha256", default="")
     parser.add_argument("--upload", default="")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--final-diff", type=Path, required=True)
+    parser.add_argument("--added-only", action="store_true",
+                        help="Scan only added lines of --final-diff (sync)")
     parser.add_argument("--novel-lines", type=Path)
+    parser.add_argument("--ledger", type=Path,
+                        help="Ledger to count earlier resolution attempts for the pair")
+    parser.add_argument("--max-attempts", type=int)
     parser.add_argument("--pr-number", type=int, required=True)
     parser.add_argument("--head-sha", required=True)
     parser.add_argument("--branch-sha", required=True)
@@ -203,6 +263,10 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("--head-sha and --branch-sha must be 40 lowercase hex characters")
     if not args.reviewer_id:
         parser.error("--reviewer-id must not be empty")
+    if args.kind == "sync" and args.pr_number != 0:
+        parser.error("a sync resolution is recorded with --pr-number 0")
+    if args.kind == "cherry-pick" and args.pr_number <= 0:
+        parser.error("a cherry-pick needs the upstream PR number")
     return args
 
 
@@ -211,6 +275,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = yaml.safe_load(args.config.read_text(encoding="utf-8"))
         threshold = float(config["conflict_resolution"]["review_min_confidence"])
+        max_attempts = int(
+            args.max_attempts
+            or config["conflict_resolution"].get("max_resolution_attempts", DEFAULT_MAX_ATTEMPTS)
+        )
+        ledger_text = args.ledger.read_text(encoding="utf-8") if args.ledger else ""
+        prior = prior_rejections(ledger_text, args.pr_number, args.head_sha)
         patterns = list(config.get("review_hard_fail_patterns", []))
         diff_text = args.final_diff.read_text(encoding="utf-8", errors="replace")
     except (OSError, yaml.YAMLError, KeyError, TypeError, ValueError) as exc:
@@ -230,12 +300,17 @@ def main(argv: list[str] | None = None) -> int:
     verdict, origin_reasons = load_verdict(
         args.verdict, args.reviewer_id, args.verdict_sha256, args.upload
     )
-    hits = hard_fail_hits(diff_text, patterns)
+    hits = hard_fail_hits(diff_text, patterns, added_only=args.added_only)
     reasons = decide(verdict, origin_reasons, hits, threshold)
-    event = build_event(args, verdict, reasons, hits, novel)
+    attempt = prior + 1
+    event = build_event(args, verdict, reasons, hits, novel, attempt)
 
     decision = {
         "decision": "rejected" if reasons else "approved",
+        "next_action": next_action(bool(reasons), attempt, max_attempts),
+        "attempt": attempt,
+        "max_attempts": max_attempts,
+        "kind": args.kind,
         "pr_number": args.pr_number,
         "head_sha": args.head_sha,
         "branch_sha": args.branch_sha,
