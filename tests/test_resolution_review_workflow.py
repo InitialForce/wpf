@@ -147,6 +147,7 @@ def test_prepare_holds_no_secrets(workflow: dict, reviewer: dict) -> None:
     assert '"$MERGE_BASE" "$UPSTREAM_SHA" > "$OUT/upstream.diff"' in run
     assert 'git diff --no-color --no-ext-diff --no-renames "$BASE_SHA" "$BRANCH_SHA"' in run
     assert 'python3 "$TRUSTED/tools/novel-lines.py"' in run
+    assert '--final-dir "$OUT/final"' in run
     # record checks the report against this job output before the novel cap.
     assert 'echo "novel_sha256=$(sha256sum "$OUT/novel-lines.json"' in run
     assert job["outputs"]["novel_sha256"] == "${{ steps.input.outputs.novel_sha256 }}"
@@ -198,7 +199,10 @@ def test_reviewer_is_locked_down(reviewer: dict) -> None:
     assert CONFIG["claude_models"]["resolution_review"] == "claude-fable-5-1"
     prompt = _step(job, "load-prompt")["run"]
     assert "cat .if-fork/prompts/resolution-review.md" in prompt
-    assert (REPO_ROOT / ".if-fork" / "prompts" / "resolution-review.md").exists()
+    text = (REPO_ROOT / ".if-fork" / "prompts" / "resolution-review.md").read_text()
+    # The reviewer must not lean on a clean novel-lines count.
+    assert "`novel_count: 0` does not mean the resolution is safe" in text
+    assert "reordered_lines" in text and "duplicated_lines" in text
     hash_step = _step(job, "verdict")
     assert hash_step["if"] == "always()" and "sha256sum" in hash_step["run"]
     assert job["outputs"]["verdict_sha256"] == "${{ steps.verdict.outputs.sha256 }}"

@@ -227,6 +227,7 @@ jobs:
           python3 "$TRUSTED/tools/novel-lines.py" \
             --final-diff "$OUT/final.diff" --upstream-diff "$OUT/upstream.diff" \
             --base-dir "$OUT/base" --upstream-head-dir "$OUT/upstream-head" \
+            --final-dir "$OUT/final" \
             --output "$OUT/novel-lines.json"
           echo "novel_sha256=$(sha256sum "$OUT/novel-lines.json" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
@@ -238,7 +239,9 @@ jobs:
             '{kind: $kind, pr_number: $pr, title: $title, upstream_sha: $up,
               upstream_merge_base: $mb, base_sha: $base, branch_sha: $branch,
               files_changed: $files, conflicted_files: $conflicts,
-              novel_count: $novel[0].novel_count, dropped_count: $novel[0].dropped_count}' \
+              novel_count: $novel[0].novel_count, dropped_count: $novel[0].dropped_count,
+              reordered_count: $novel[0].reordered_count,
+              duplicated_count: $novel[0].duplicated_count}' \
             > "$OUT/meta.json"
           cat "$OUT/meta.json"
 

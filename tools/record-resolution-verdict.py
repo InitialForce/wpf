@@ -359,6 +359,8 @@ def build_event(
     if novel is not None:
         details["novel_count"] = novel.get("novel_count")
         details["dropped_count"] = novel.get("dropped_count")
+        details["reordered_count"] = novel.get("reordered_count")
+        details["duplicated_count"] = novel.get("duplicated_count")
         details["max_novel_lines"] = args.max_novel_lines
     if args.run_url:
         details["run_url"] = args.run_url

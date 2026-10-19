@@ -30,13 +30,19 @@ def diff(path: str, old: int, new: int, body: str) -> str:
 UPSTREAM = diff("src/a.cs", 10, 10, " ctx\n-    int x = 1;\n+    int x = 2;\n")
 
 
-def report(tmp_path: Path, final: str, base: dict[str, str], head: dict[str, str]) -> Any:
-    for root, files in (("base", base), ("head", head)):
+def report(
+    tmp_path: Path, final: str, base: dict[str, str], head: dict[str, str],
+    final_files: dict[str, str] | None = None, upstream: str = UPSTREAM,
+) -> Any:
+    for root, files in (("base", base), ("head", head), ("final", final_files or {})):
         for rel, text in files.items():
             p = tmp_path / root / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(text)
-    return novel_lines.find_novel(final, UPSTREAM, tmp_path / "base", tmp_path / "head")
+    return novel_lines.find_novel(
+        final, upstream, tmp_path / "base", tmp_path / "head",
+        tmp_path / "final" if final_files is not None else None,
+    )
 
 
 def test_lines_from_upstream_or_fork_are_not_novel(tmp_path: Path) -> None:
@@ -79,7 +85,8 @@ def test_new_file_and_missing_sides(tmp_path: Path) -> None:
     )
     r = report(tmp_path, final, {}, {})
     assert r["files"] == ["src/new.cs"]
-    assert [n["text"] for n in r["novel_lines"]] == ["Other();"]
+    # Upstream added "int x = 2;" to src/a.cs only, which excuses nothing here.
+    assert [n["text"] for n in r["novel_lines"]] == ["int x = 2;", "Other();"]
 
 
 def test_deleted_file_counts_as_dropped(tmp_path: Path) -> None:
@@ -90,8 +97,8 @@ def test_deleted_file_counts_as_dropped(tmp_path: Path) -> None:
     r = report(tmp_path, final, {}, {})
     assert r["files"] == ["src/gone.cs"]
     assert r["novel_count"] == 0
-    # Upstream removed "int x = 1;", so only the fork line is dropped.
-    assert r["dropped_lines"] == [{"file": "src/gone.cs", "old_line": 1, "text": "ForkCode();"}]
+    # Upstream removed "int x = 1;" from src/a.cs, not from this file.
+    assert [d["text"] for d in r["dropped_lines"]] == ["ForkCode();", "    int x = 1;"]
 
 
 def test_path_outside_the_side_dir_is_ignored(tmp_path: Path) -> None:
@@ -131,7 +138,8 @@ def test_cli_writes_report(tmp_path: Path) -> None:
     r = subprocess.run(
         [sys.executable, str(SCRIPT), "--final-diff", str(tmp_path / "final.diff"),
          "--upstream-diff", str(tmp_path / "pr.diff"), "--base-dir", str(tmp_path / "b"),
-         "--upstream-head-dir", str(tmp_path / "h"), "--output", str(out)],
+         "--upstream-head-dir", str(tmp_path / "h"), "--final-dir", str(tmp_path / "f"),
+         "--output", str(out)],
         capture_output=True, text=True,
     )
     assert r.returncode == 0, r.stderr
@@ -148,3 +156,52 @@ def test_cli_refuses_empty_final_diff(tmp_path: Path) -> None:
         capture_output=True, text=True,
     )
     assert r.returncode == 1 and not (tmp_path / "o.json").exists()
+
+
+def test_upstream_line_of_another_path_does_not_excuse(tmp_path: Path) -> None:
+    upstream = diff("tests/t.cs", 1, 1, "+    return true;\n")
+    final = diff("src/a.cs", 1, 1, "+    return true;\n")
+    assert report(tmp_path, final, {}, {}, upstream=upstream)["novel_count"] == 1
+
+
+BASE_FILE = "void F()\n{\n    if (!Allowed()) return;\n    Run();\n}\nbool G() { return true; }\n"
+
+
+def test_copied_line_in_a_new_place_is_reordered(tmp_path: Path) -> None:
+    # "return;" exists in the file, so it is not novel, but nothing has it here.
+    final_file = "void F()\n{\n    return;\n    if (!Allowed()) return;\n    Run();\n}\n" \
+        "bool G() { return true; }\n"
+    final = diff("src/a.cs", 1, 1, " void F()\n {\n+    return;\n")
+    h = "void H()\n{\n    return;\n}\n"
+    r = report(tmp_path, final, {"src/a.cs": BASE_FILE + h},
+               {"src/a.cs": BASE_FILE}, {"src/a.cs": final_file + h})
+    assert r["novel_count"] == 0
+    assert r["reordered_lines"] == [{"file": "src/a.cs", "line": 3, "text": "    return;"}]
+    assert r["duplicated_lines"] == [
+        {"file": "src/a.cs", "text": "return;", "final_count": 2, "expected_count": 1}
+    ]
+
+
+def test_guard_moved_below_the_call_is_reordered(tmp_path: Path) -> None:
+    final_file = "void F()\n{\n    Run();\n    if (!Allowed()) return;\n}\n" \
+        "bool G() { return true; }\n"
+    final = diff("src/a.cs", 2, 2, " {\n+    Run();\n     if (!Allowed()) return;\n-    Run();\n")
+    r = report(tmp_path, final, {"src/a.cs": BASE_FILE}, {"src/a.cs": BASE_FILE},
+               {"src/a.cs": final_file})
+    assert r["novel_count"] == 0 and r["duplicated_count"] == 0
+    assert [x["text"] for x in r["reordered_lines"]] == ["    Run();"]
+
+
+def test_lines_where_a_side_has_them_are_not_reordered(tmp_path: Path) -> None:
+    head = BASE_FILE.replace("    Run();\n", "    Run();\n    Log();\n")
+    final = diff("src/a.cs", 4, 4, "     Run();\n+    Log();\n")
+    upstream = diff("src/a.cs", 4, 4, "     Run();\n+    Log();\n")
+    r = report(tmp_path, final, {"src/a.cs": BASE_FILE}, {"src/a.cs": head},
+               {"src/a.cs": head}, upstream=upstream)
+    assert r["novel_count"] == r["reordered_count"] == r["duplicated_count"] == 0
+
+
+def test_without_final_dir_the_position_lists_stay_empty(tmp_path: Path) -> None:
+    final = diff("src/a.cs", 1, 1, "+    Run();\n")
+    r = report(tmp_path, final, {"src/a.cs": BASE_FILE}, {})
+    assert r["reordered_count"] == 0 and r["duplicated_count"] == 0

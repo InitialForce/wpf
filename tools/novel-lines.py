@@ -6,20 +6,35 @@ Claude resolved should only hold lines from the upstream change or from the
 fork. Any other added line is "novel": the reviewer must justify each one,
 and the report gives it a list that does not depend on a model.
 
-An added line of the final diff (BASE_SHA..BRANCH_SHA) is novel when its
-text, with surrounding whitespace removed, is not empty and appears in none of:
-  - the added lines of the upstream PR diff (any file)
+All checks are per file. An added line of the final diff
+(BASE_SHA..BRANCH_SHA) is novel when its text, with surrounding whitespace
+removed, is not empty and appears in none of:
+  - the added lines of the upstream diff for the same path
   - the BASE_SHA version of the same file (<base dir>/<path>)
-  - the upstream PR head version of the same file (<upstream head dir>/<path>)
+  - the upstream head version of the same file (<upstream head dir>/<path>)
 A missing file counts as empty, so its lines cannot excuse anything.
 
+Known text in a new place is not novel, but it can still change behaviour
+(a copied "return;", a guard moved below the call it guards). Two more
+lists cover that, using the final file (<final dir>/<path>):
+  - "reordered": an added line that is not novel but sits where neither
+    side has it. The final file is aligned line by line with the base file
+    and with the upstream head file (difflib, whitespace trimmed); the line
+    matches a position in neither alignment.
+  - "duplicated": a line the final file holds more often than expected:
+    more than its count in the base file plus the upstream diff's net
+    additions of it for that path, and more than its count in the upstream
+    head file.
+
 The report also lists "dropped" lines: lines the final diff removes that the
-upstream PR diff does not remove. They are for the reviewer only; a
-resolution that drops fork code must explain why.
+upstream diff does not remove for that path. These lists are for the
+reviewer; only novel_count has a code cap. Zero novel lines does not mean a
+resolution is safe.
 
 Usage:
   python tools/novel-lines.py --final-diff final.diff --upstream-diff pr.diff \\
-      --base-dir base --upstream-head-dir upstream-head --output novel-lines.json
+      --base-dir base --upstream-head-dir upstream-head --final-dir final \\
+      --output novel-lines.json
 
 Exit codes: 0 report written, 1 bad input.
 """
@@ -27,9 +42,11 @@ Exit codes: 0 report written, 1 bad input.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -129,47 +146,88 @@ def parse_diff(text: str) -> list[FileDiff]:
     return files
 
 
-def _file_lines(root: Path, rel: str) -> set[str]:
-    """Trimmed lines of root/rel, or an empty set when it is missing or outside root."""
+def _read_lines(root: Path | None, rel: str) -> list[str]:
+    """Trimmed lines of root/rel, or [] when it is missing or outside root."""
+    if root is None:
+        return []
     try:
         base = root.resolve()
         target = (root / rel).resolve()
         if not target.is_relative_to(base) or not target.is_file():
-            return set()
+            return []
         text = target.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return set()
-    return {line.strip() for line in text.splitlines()}
+        return []
+    return [line.strip() for line in text.splitlines()]
+
+
+def _matched(final: list[str], side: list[str]) -> set[int]:
+    """0-based indexes of final lines that align with a line of side."""
+    matcher = difflib.SequenceMatcher(None, side, final, autojunk=False)
+    out: set[int] = set()
+    for block in matcher.get_matching_blocks():
+        out.update(range(block.b, block.b + block.size))
+    return out
 
 
 def find_novel(
-    final_diff: str, upstream_diff: str, base_dir: Path, head_dir: Path
+    final_diff: str,
+    upstream_diff: str,
+    base_dir: Path,
+    head_dir: Path,
+    final_dir: Path | None = None,
 ) -> dict[str, object]:
     """Build the novel-lines report (see the module docstring)."""
-    upstream = parse_diff(upstream_diff)
-    upstream_added = {text.strip() for f in upstream for _, text in f.added}
-    upstream_removed = {text.strip() for f in upstream for _, text in f.removed}
+    up_added: dict[str, Counter[str]] = {}
+    up_removed: dict[str, Counter[str]] = {}
+    for f in parse_diff(upstream_diff):
+        up_added.setdefault(f.path, Counter()).update(t.strip() for _, t in f.added)
+        up_removed.setdefault(f.path, Counter()).update(t.strip() for _, t in f.removed)
 
     novel: list[dict[str, object]] = []
+    reordered: list[dict[str, object]] = []
+    duplicated: list[dict[str, object]] = []
     dropped: list[dict[str, object]] = []
     final_files = parse_diff(final_diff)
     for f in final_files:
-        known = upstream_added | _file_lines(base_dir, f.path) | _file_lines(head_dir, f.path)
+        added_here = up_added.get(f.path, Counter())
+        removed_here = up_removed.get(f.path, Counter())
+        base = _read_lines(base_dir, f.path)
+        head = _read_lines(head_dir, f.path)
+        final = _read_lines(final_dir, f.path)
+        known = set(added_here) | set(base) | set(head)
+        aligned = _matched(final, base) | _matched(final, head) if final else set()
         for number, text in f.added:
             key = text.strip()
-            if key and key not in known:
+            if not key:
+                continue
+            if key not in known:
                 novel.append({"file": f.path, "line": number, "text": text})
+            elif final and number - 1 not in aligned:
+                reordered.append({"file": f.path, "line": number, "text": text})
+        if final:
+            base_count, head_count = Counter(base), Counter(head)
+            for key, count in sorted(Counter(k for k in final if k).items()):
+                expected = base_count[key] + added_here[key] - removed_here[key]
+                if count > max(expected, head_count[key]) and key in known:
+                    duplicated.append({"file": f.path, "text": key, "final_count": count,
+                                       "expected_count": max(expected, head_count[key])})
         for number, text in f.removed:
             key = text.strip()
-            if key and key not in upstream_removed:
+            if key and key not in removed_here:
                 dropped.append({"file": f.path, "old_line": number, "text": text})
 
+    lists = (novel, reordered, duplicated, dropped)
     return {
         "novel_count": len(novel),
         "novel_lines": novel[:MAX_LISTED],
+        "reordered_count": len(reordered),
+        "reordered_lines": reordered[:MAX_LISTED],
+        "duplicated_count": len(duplicated),
+        "duplicated_lines": duplicated[:MAX_LISTED],
         "dropped_count": len(dropped),
         "dropped_lines": dropped[:MAX_LISTED],
-        "truncated": len(novel) > MAX_LISTED or len(dropped) > MAX_LISTED,
+        "truncated": any(len(x) > MAX_LISTED for x in lists),
         "files": [f.path for f in final_files],
     }
 
@@ -180,6 +238,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--upstream-diff", type=Path, required=True)
     parser.add_argument("--base-dir", type=Path, required=True)
     parser.add_argument("--upstream-head-dir", type=Path, required=True)
+    parser.add_argument("--final-dir", type=Path,
+                        help="BRANCH_SHA version of each changed file; without it the "
+                             "reordered and duplicated lists stay empty")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
 
@@ -193,10 +254,13 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"error": "final diff is empty"}), file=sys.stderr)
         return 1
 
-    report = find_novel(final_diff, upstream_diff, args.base_dir, args.upstream_head_dir)
+    report = find_novel(
+        final_diff, upstream_diff, args.base_dir, args.upstream_head_dir, args.final_dir
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps({k: report[k] for k in ("novel_count", "dropped_count", "truncated")}))
+    keys = ("novel_count", "reordered_count", "duplicated_count", "dropped_count", "truncated")
+    print(json.dumps({k: report[k] for k in keys}))
     return 0
 
 
