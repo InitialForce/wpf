@@ -597,6 +597,12 @@ jobs:
           if ! bash "$TRUSTED/tools/conflict-handoff.sh" apply "$OUT/conflicts.txt" "$RUNNER_TEMP/resolution"; then
             echo "reason=cherry_pick_conflict" >> "$GITHUB_OUTPUT"; exit 0
           fi
+          # The resolver kept the fork's version everywhere: the change is
+          # already in the fork or the fork rewrote that code. Nothing to push.
+          if git diff --cached --quiet HEAD; then
+            git cherry-pick --abort
+            echo "empty=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
           GIT_EDITOR=true git cherry-pick --continue
           {
             echo "ok=true"
@@ -623,6 +629,24 @@ jobs:
           # Adds the Conflict-Resolved-By trailer. automerge merges such a
           # commit only with a resolution_approved ledger event for it.
           CONFLICT_RESOLVED: "true"
+
+      # Before, git cherry-pick --continue failed on an empty result and the
+      # job ended with no ledger event; discovery re-sent the PR every day
+      # until it gave up (#9222).
+      - name: Record a resolution that keeps the fork
+        if: steps.overlay.outputs.empty == 'true'
+        run: |
+          git checkout -q -B if/main origin/if/main
+          python "$TRUSTED/tools/ledger-event.py" \
+            --event graduated_upstream \
+            --pr-number "$PR_NUMBER" \
+            --head-sha "$PINNED_HEAD_SHA" \
+            --actor pr-ingestion \
+            --details-json '{"detection_method":"empty_resolution","reason":"fork_superseded"}' \
+            --push
+          echo "::notice::Upstream PR #$PR_NUMBER: the resolution keeps the fork's code everywhere. Recorded as superseded by the fork; no PR."
+        env:
+          TRUSTED: ${{ github.workspace }}/trusted
 
       - name: Escalate when the resolution was not accepted
         if: steps.overlay.outputs.reason != '' || steps.finish.outputs.reason != ''

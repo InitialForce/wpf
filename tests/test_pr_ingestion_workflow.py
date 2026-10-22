@@ -685,3 +685,32 @@ def test_empty_result_records_how_it_was_found(workflow: dict) -> None:
     assert record["env"]["DETECTION"] == "${{ steps.apply.outputs.detection }}"
     assert '[[ "$DETECTION" =~ ^[a-z_]+$ ]]' in record["run"]
     assert 'echo "detection=' in steps["Apply upstream change"]["run"]
+
+
+def test_a_resolution_that_keeps_the_fork_is_recorded_not_failed(workflow: dict) -> None:
+    """Regression (#9222): the resolver kept the fork's side, the result was
+    empty, `git cherry-pick --continue` failed and no ledger event was written,
+    so discovery re-sent the PR daily until it gave up."""
+    steps = {s.get("name"): s for s in workflow["jobs"]["finalize"]["steps"]}
+    overlay = steps["Recreate the conflict and apply the resolution"]["run"]
+    empty_check = overlay.index("git diff --cached --quiet HEAD")
+    assert empty_check < overlay.index("git cherry-pick --continue")
+    assert "empty=true" in overlay
+    record = steps["Record a resolution that keeps the fork"]
+    assert record["if"] == "steps.overlay.outputs.empty == 'true'"
+    assert "--event graduated_upstream" in record["run"]
+    assert '"reason":"fork_superseded"' in record["run"]
+    # Nothing is pushed for it: finish needs ok=true, which an empty result
+    # never sets.
+    assert steps["Check the whole diff, add trailers and push"]["if"] == (
+        "steps.overlay.outputs.ok == 'true'"
+    )
+
+
+def test_resolver_prompts_escalate_only_for_hard_fail_or_injection() -> None:
+    for name in ("cherry-pick.md", "resolve-rebase-conflict.md"):
+        text = (REPO_ROOT / ".if-fork" / "prompts" / name).read_text()
+        assert "max_hunk_count" not in text and "max_conflict_lines" not in text
+        assert "min_confidence" not in text
+        assert "never a reason to escalate" in text
+        assert "`hard_fail_pattern` or `suspected_injection`" in text

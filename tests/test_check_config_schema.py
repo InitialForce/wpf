@@ -92,9 +92,6 @@ def _minimal_valid_config() -> dict[str, object]:
             "bot_credentials": "bot-credentials",
         },
         "conflict_resolution": {
-            "max_hunk_count": 3,
-            "max_conflict_lines": 80,
-            "min_confidence": 0.85,
             "pause_run_if_escalation_pct_exceeds": 30,
             "review_min_confidence": 0.9,
             "max_resolution_attempts": 2,

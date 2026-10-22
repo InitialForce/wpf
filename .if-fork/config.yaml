@@ -154,10 +154,11 @@ human_gate_environments:
   branch_promotion: branch-promotion
   bot_credentials: bot-credentials
 
+# The conflict resolvers (prompts cherry-pick.md and resolve-rebase-conflict.md)
+# always attempt a resolution, whatever its size; they escalate only for a
+# hard-fail pattern or a suspected injection. The gates below decide whether
+# a resolution lands.
 conflict_resolution:
-  max_hunk_count: 3
-  max_conflict_lines: 80
-  min_confidence: 0.85
   pause_run_if_escalation_pct_exceeds: 30
   # The Fable review of a resolved cherry-pick (pr-ingestion.yml
   # review-resolution) must report at least this confidence before automerge
