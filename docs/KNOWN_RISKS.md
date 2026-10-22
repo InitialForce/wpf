@@ -137,7 +137,7 @@ Between review and ingestion a contributor can force-push a new commit to their 
 - Review pins `head_sha`, and the review dispatch carries it.
 - `tools/check-approval.py` requires an `approved` outcome for that exact `(pr_number, head_sha)`, with no later `rejected` or `escalated`.
 - `tools/apply-upstream-pr.sh` refuses when the PR's current head is not the pinned SHA (`head_moved_after_review`).
-- For a merged PR it applies the upstream merge commit only when its diff has the same patch-id as the approved diff. Otherwise it applies the approved diff itself.
+- For a merged PR it applies the upstream merge commit only when its diff is byte for byte the approved diff (`git patch-id` is not used: it ignores whitespace, also inside string literals). Otherwise it applies the approved diff itself.
 - `automerge.yml` checks the `Upstream-PR-Head` trailer against the ledger again before merging.
 
 **Owner:** Øystein Krog

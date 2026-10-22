@@ -28,8 +28,8 @@
 #   title      upstream PR title
 #   source     upstream commit the change comes from
 #   source_kind  what was applied: merge_commit (the upstream merge commit,
-#              whose first-parent diff has the same patch-id as the approved
-#              diff), approved_diff (the reviewed diff merge-base..head,
+#              whose first-parent diff is byte for byte the approved diff),
+#              approved_diff (the reviewed diff merge-base..head,
 #              squashed, because the merge commit's diff differs from it) or
 #              pr_head (an open PR, squashed the same way)
 #   conflicts.txt  conflicted paths (only for conflict)
@@ -92,13 +92,17 @@ fi
 
 # The review approved head H, that is the diff merge-base..H. The merge
 # commit M can carry more (merge-resolution edits, a squash against a newer
-# main), so use M only when its first-parent diff is the same change.
-patch_id() {
-  git diff-tree -p --binary --no-ext-diff "$1" "$2" | git patch-id --stable | cut -d' ' -f1
+# main), so use M only when its first-parent diff is the same change, byte
+# for byte. Not git patch-id: it ignores whitespace, also inside string
+# literals. --full-index pins the exact blobs on both sides and --binary
+# includes binary content.
+change_digest() {
+  git diff-tree -p --binary --full-index --no-renames --no-ext-diff "$1" "$2" \
+    | sha256sum | cut -d' ' -f1
 }
 if [ "$SOURCE_KIND" = merge_commit ]; then
   APPROVED_BASE=$(git merge-base "$PINNED_HEAD_SHA" "$MERGE_SHA^1")
-  if [ "$(patch_id "$MERGE_SHA^1" "$MERGE_SHA")" != "$(patch_id "$APPROVED_BASE" "$PINNED_HEAD_SHA")" ]; then
+  if [ "$(change_digest "$MERGE_SHA^1" "$MERGE_SHA")" != "$(change_digest "$APPROVED_BASE" "$PINNED_HEAD_SHA")" ]; then
     echo "::notice::The upstream merge commit of PR #$PR_NUMBER differs from the approved diff; applying the approved diff."
     SOURCE="$PINNED_HEAD_SHA"
     SOURCE_KIND=approved_diff

@@ -129,11 +129,13 @@ def test_merge_commit_already_in_base_is_empty(tmp_path: Path) -> None:
     assert _git(fork, "status", "--porcelain") == ""
 
 
-def _merged_upstream(tmp_path: Path, extra_in_merge: bool) -> tuple[Path, str, str]:
+def _merged_upstream(
+    tmp_path: Path, merge_edit: tuple[str, str] | None = None
+) -> tuple[Path, str, str]:
     """Upstream where PR #12 (head H) is merged as M, and a fork from before M.
 
-    With *extra_in_merge*, M also edits b.cs, a change the review of H never
-    saw (a merge-resolution edit)."""
+    *merge_edit* (path, content) is written into M as well: a change the
+    review of H never saw (an edit made while merging)."""
     up = tmp_path / "upstream"
     up.mkdir()
     _git(up, "init", "-q", "-b", "main")
@@ -145,15 +147,15 @@ def _merged_upstream(tmp_path: Path, extra_in_merge: bool) -> tuple[Path, str, s
     _git(tmp_path, "clone", "-q", str(up), str(fork))
     _git(fork, "remote", "add", "upstream", str(up))
     _git(up, "checkout", "-q", "-b", "pr")
-    (up / "a.cs").write_text("int x = 1;\n")
+    (up / "a.cs").write_text('string s = "a b";\n')
     _git(up, "commit", "-q", "-am", "change")
     head = _git(up, "rev-parse", "HEAD")
     _git(up, "update-ref", "refs/pull/12/head", head)
     _git(up, "checkout", "-q", "main")
     _git(up, "merge", "-q", "--no-ff", "--no-commit", "pr")
-    if extra_in_merge:
-        (up / "b.cs").write_text("int y = 666;\n")
-        _git(up, "add", "b.cs")
+    if merge_edit:
+        (up / merge_edit[0]).write_text(merge_edit[1])
+        _git(up, "add", merge_edit[0])
     _git(up, "commit", "-q", "-m", "Merge pull request #12 from x/pr")
     return fork, head, _git(up, "rev-parse", "HEAD")
 
@@ -192,21 +194,32 @@ def _apply_merged(tmp_path: Path, fork: Path, head: str, merge: str) -> tuple[Pa
 
 
 def test_merge_commit_with_the_approved_diff_is_applied(tmp_path: Path) -> None:
-    fork, head, merge = _merged_upstream(tmp_path, extra_in_merge=False)
+    fork, head, merge = _merged_upstream(tmp_path)
     out, _ = _apply_merged(tmp_path, fork, head, merge)
     assert (out / "source_kind").read_text().strip() == "merge_commit"
     assert (out / "source").read_text().strip() == merge
-    assert (fork / "a.cs").read_text() == "int x = 1;\n"
+    assert (fork / "a.cs").read_text() == 'string s = "a b";\n'
     assert merge in _git(fork, "log", "-1", "--format=%B")
 
 
 def test_merge_commit_that_differs_applies_only_the_approved_diff(tmp_path: Path) -> None:
     """Astra: H approved, upstream merges it as M with an extra edit. Only the
     reviewed diff merge-base..H may land in the fork."""
-    fork, head, merge = _merged_upstream(tmp_path, extra_in_merge=True)
+    fork, head, merge = _merged_upstream(tmp_path, ("b.cs", "int y = 666;\n"))
     out, stdout = _apply_merged(tmp_path, fork, head, merge)
     assert (out / "source_kind").read_text().strip() == "approved_diff"
     assert (out / "source").read_text().strip() == head
-    assert (fork / "a.cs").read_text() == "int x = 1;\n"
+    assert (fork / "a.cs").read_text() == 'string s = "a b";\n'
     assert (fork / "b.cs").read_text() == "int y = 0;\n"
     assert "differs from the approved diff" in stdout
+
+
+def test_whitespace_only_edit_in_a_string_literal_is_not_the_approved_diff(
+    tmp_path: Path,
+) -> None:
+    """Astra: H sets "a b", the merge commit sets "ab". git patch-id --stable
+    gives both the same id; the exact comparison must not."""
+    fork, head, merge = _merged_upstream(tmp_path, ("a.cs", 'string s = "ab";\n'))
+    out, _ = _apply_merged(tmp_path, fork, head, merge)
+    assert (out / "source_kind").read_text().strip() == "approved_diff"
+    assert (fork / "a.cs").read_text() == 'string s = "a b";\n'

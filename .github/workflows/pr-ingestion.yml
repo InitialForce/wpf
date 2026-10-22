@@ -1068,8 +1068,8 @@ jobs:
 
       - name: Emit cherry_picked ledger event
         run: |
-          # source_kind says what was applied: the upstream merge commit (same
-          # patch-id as the approved diff) or the approved diff itself.
+          # source_kind says what was applied: the upstream merge commit (its
+          # diff is byte for byte the approved diff) or the approved diff itself.
           DETAILS=$(jq -cn --arg pr "$INTERNAL_PR" --arg b "$BRANCH" \
             --arg s "$SOURCE" --arg k "$SOURCE_KIND" \
             '{internal_pr: $pr, branch: $b, source: $s, source_kind: $k}')
