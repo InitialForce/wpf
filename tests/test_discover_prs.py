@@ -133,6 +133,44 @@ def test_applied_graduated_rejected_prs_are_skipped() -> None:
     assert events == [] and queue == []
 
 
+@pytest.mark.parametrize(
+    "details",
+    [
+        {"detection_method": "empty_resolution", "reason": "fork_superseded"},
+        {"detection_method": "hunk_match", "pre_flight": True},
+        {"detection_method": "empty_cherry_pick"},
+    ],
+)
+def test_content_graduation_ends_only_its_head(details: dict[str, Any]) -> None:
+    """Fable found head H obsolete; the author then pushes H2 with a needed fix."""
+    entries = [
+        _entry("discovered", 7, S("h")),
+        _entry("merged_verdict", 7, S("h"), verdict="approved"),
+        _entry("approved", 7, S("h")),
+        _entry("ingestion_requested", 7, S("h"), attempt=1),
+        _entry("graduated_upstream", 7, S("h"), **details),
+    ]
+    events, queue, ingest, _counts = _run_ingest_with(entries, [_pr(7, S("h2"))])
+    assert [(e["event"], e["head_sha"]) for e in events] == [("discovered", S("h2"))]
+    assert queue == [{"pr_number": 7, "head_sha": S("h2")}]
+    assert ingest == []
+
+    # The graduated head itself is not reviewed or ingested again.
+    events, queue, ingest, _counts = _run_ingest_with(entries, [_pr(7, S("h"))])
+    assert events == [] and queue == [] and ingest == []
+
+
+@pytest.mark.parametrize("method", ["upstream_commit_in_history", "merge_commit_in_history"])
+def test_ancestry_graduation_ends_the_whole_pr(method: str) -> None:
+    entries = [_entry("graduated_upstream", 8, S("h"), detection_method=method)]
+    events, queue, ingest, _counts = _run_ingest_with(entries, [_pr(8, S("h2"))])
+    assert events == [] and queue == [] and ingest == []
+
+
+def _run_ingest_with(entries, open_prs):  # type: ignore[no-untyped-def]
+    return discover_prs.discover(list(open_prs), [], list(entries), _config(), NOW, None)
+
+
 def test_ineligible_prs_are_ignored() -> None:
     prs = [
         _pr(1, isDraft=True),

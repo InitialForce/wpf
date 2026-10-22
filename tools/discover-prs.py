@@ -69,6 +69,13 @@ GH_FIELDS = (
 
 # Ledger events that end a PR's journey through the pipeline.
 TERMINAL_EVENTS = frozenset(["cherry_picked", "published", "graduated_upstream", "rejected"])
+# graduated_upstream ends the whole PR only when ancestry proves it: the
+# upstream merge commit is in if/main. Any other detection (an empty
+# resolution, fork_superseded, a hunk match, an empty cherry-pick) judged one
+# head's content, so it ends only that head; a new upstream head goes through
+# review again. An event with no detection_method predates this split and
+# stays final for the PR.
+ANCESTRY_DETECTIONS = frozenset(["upstream_commit_in_history", "merge_commit_in_history"])
 # Ledger events that close one (pr_number, head_sha) review.
 REVIEWED_EVENTS = frozenset(["merged_verdict", "escalated"])
 # Ledger events that end an ingestion attempt for one (pr_number, head_sha).
@@ -209,6 +216,14 @@ def _parse_ts(value: object) -> datetime | None:
         return None
 
 
+def _graduation_is_per_head(details: dict[str, Any]) -> bool:
+    """True when a graduated_upstream event ends only its own head SHA."""
+    method = details.get("detection_method")
+    if details.get("reason") == "fork_superseded":
+        return True
+    return bool(method) and method not in ANCESTRY_DETECTIONS
+
+
 class LedgerView:
     """What the ledger already knows, keyed by PR number and head SHA."""
 
@@ -245,7 +260,10 @@ class LedgerView:
                     self.seeded_merged[number] = (sha, details)
                 else:
                     self.latest_sha[number] = sha
-            if event in TERMINAL_EVENTS:
+            if event == "graduated_upstream" and _graduation_is_per_head(details):
+                self.reviewed.add(key)
+                self.escalated_reason[key] = None
+            elif event in TERMINAL_EVENTS:
                 self.closed_prs.add(number)
             if event in REVIEWED_EVENTS:
                 self.reviewed.add(key)
