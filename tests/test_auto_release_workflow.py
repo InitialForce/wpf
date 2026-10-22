@@ -126,6 +126,9 @@ def test_reconciles_unpublished_tag_before_planning(workflow: dict) -> None:
     assert ids.index("reconcile") < ids.index("redispatch") < ids.index("plan")
     rec = steps[ids.index("reconcile")]
     assert "release-version.py reconcile" in rec["run"]
+    # A newer green commit supersedes an unpublished tag from an earlier day.
+    assert '--target "$TARGET"' in rec["run"]
+    assert rec["env"]["TARGET"] == "${{ steps.green.outputs.sha }}"
     assert "--workflow release.yml" in rec["run"]
     plan_if = steps[ids.index("plan")]["if"]
     assert "steps.reconcile.outputs.action != 'wait'" in plan_if
