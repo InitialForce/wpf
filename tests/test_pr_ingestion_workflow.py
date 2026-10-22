@@ -664,3 +664,24 @@ def test_discovery_and_approval_stop_after_escalated() -> None:
     assert 'OUTCOME_EVENTS = {"approved", "rejected", "escalated"}' in approval
     discover = (REPO_ROOT / "tools" / "discover-prs.py").read_text()
     assert 'REVIEWED_EVENTS = frozenset(["merged_verdict", "escalated"])' in discover
+
+
+def test_partial_graduation_goes_on_to_the_cherry_pick(workflow: dict) -> None:
+    """Regression: a partial hunk match stopped the run for a human. Now only
+    'skip' ends the run in pre-flight; everything else is applied."""
+    steps = workflow["jobs"]["pre-flight"]["steps"]
+    for step in steps:
+        assert "escalate" not in str(step.get("if", ""))
+        assert "A human must decide" not in step.get("run", "")
+    check = next(s for s in steps if s.get("id") == "check")["run"]
+    assert '"$RC" -ne 2' not in check
+    smuggle_if = workflow["jobs"]["sha-smuggling-check"]["if"]
+    assert "needs.pre-flight.outputs.action == 'apply'" in smuggle_if
+
+
+def test_empty_result_records_how_it_was_found(workflow: dict) -> None:
+    steps = {s.get("name"): s for s in workflow["jobs"]["cherry-pick"]["steps"]}
+    record = steps["Record already-applied change"]
+    assert record["env"]["DETECTION"] == "${{ steps.apply.outputs.detection }}"
+    assert '[[ "$DETECTION" =~ ^[a-z_]+$ ]]' in record["run"]
+    assert 'echo "detection=' in steps["Apply upstream change"]["run"]

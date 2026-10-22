@@ -14,15 +14,24 @@
 #     [--patch-path <path>]   # bypass upstream fetch (testing / offline)
 #
 # Exit codes:
-#   0 — action=apply  (not-graduated; safe to proceed with cherry-pick)
+#   0 — action=apply  (not graduated, or only partly; proceed with cherry-pick)
 #   0 — action=skip   (graduated; already absorbed; ledger event emitted)
 #   1 — error         (unexpected failure; structured error on stderr)
-#   2 — partial       (some hunks present, some missing; escalation emitted)
+#
+# A partial match (some hunks found, some not) is not a stop. It usually means
+# the PR is in the fork and a later change edited one of its hunks. The
+# cherry-pick decides: empty is recorded as graduated_upstream, clean opens a
+# PR, a conflict goes to the resolver and the resolution review.
+#
+# Fast path: when the target's history holds the upstream commit that merged
+# the PR (subject ending "(#<pr>)" or starting "Merge pull request #<pr> from",
+# and reachable from <upstream-ref>/main), the PR is graduated without a hunk
+# check.
 #
 # Stdout (always exactly one JSON object):
-#   { "action": "apply", "patch_path": "/tmp/..." }          exit 0
-#   { "action": "skip",  "reason": "already-graduated" }     exit 0
-#   { "action": "escalate", "reason": "partial-graduation" } exit 2
+#   { "action": "apply", "patch_path": "/tmp/..." }                     exit 0
+#   { "action": "apply", "note": "partial-graduation", ... }             exit 0
+#   { "action": "skip",  "reason": "already-graduated" }                exit 0
 
 set -euo pipefail
 
@@ -67,10 +76,9 @@ Optional options:
   --help                 Print this message and exit 0
 
 Exit codes:
-  0  action=apply  (not-graduated; proceed with cherry-pick)
+  0  action=apply  (not graduated or partly graduated; proceed with cherry-pick)
   0  action=skip   (graduated; already absorbed)
   1  error
-  2  action=escalate (partial graduation)
 
 Stdout: exactly one JSON object describing the recommended action.
 EOF
@@ -248,6 +256,46 @@ fi
 log_info "Patch file ready: $PATCH_FILE ($(wc -c < "$PATCH_FILE") bytes)"
 
 # ---------------------------------------------------------------------------
+# Step 1b — Fast path: the upstream commit that merged the PR is in the tree's
+# history. Only commits reachable from upstream main count, so a fork commit
+# that merely names the PR cannot match.
+# ---------------------------------------------------------------------------
+upstream_merge_commit() {
+    local main_ref="refs/remotes/${UPSTREAM_REF}/main" sha subject
+    git -C "$TARGET_ROOT" rev-parse -q --verify "${main_ref}^{commit}" >/dev/null 2>&1 \
+        || return 0
+    while IFS=' ' read -r sha subject; do
+        case "$subject" in
+            *"(#${PR_NUMBER})"|"Merge pull request #${PR_NUMBER} from "*)
+                if git -C "$TARGET_ROOT" merge-base --is-ancestor "$sha" "$main_ref"; then
+                    echo "$sha"
+                    return 0
+                fi
+                ;;
+        esac
+    done < <(git -C "$TARGET_ROOT" log --format='%H %s' HEAD 2>/dev/null)
+}
+
+MERGED_AS="$(upstream_merge_commit || true)"
+if [[ -n "$MERGED_AS" ]]; then
+    log_info "PR #${PR_NUMBER} was merged upstream as $MERGED_AS, which is in the target history"
+    python3 "$LEDGER_EVENT" \
+        --event "graduated_upstream" \
+        --pr-number "$PR_NUMBER" \
+        --head-sha "$HEAD_SHA" \
+        --actor "$ACTOR" \
+        --details-json "{\"detection_method\":\"upstream_commit_in_history\",\"commit\":\"$MERGED_AS\",\"pre_flight\":true}" \
+        --ledger-path "$LEDGER_PATH" \
+        >&2 \
+        || {
+            log_error "ledger-event.py failed while emitting graduated_upstream"
+            exit 1
+        }
+    printf '{"action":"skip","reason":"already-graduated","pr_number":%s}\n' "$PR_NUMBER"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
 # Step 2 — Run check-graduated.py
 # ---------------------------------------------------------------------------
 log_info "Running check-graduated.py against tree: $TARGET_ROOT"
@@ -311,28 +359,14 @@ case "$VERDICT" in
     # -----------------------------------------------------------------------
     "partial")
     # -----------------------------------------------------------------------
-        log_warn "PR #${PR_NUMBER} is partially graduated; escalating to human review"
-
-        python3 "$LEDGER_EVENT" \
-            --event "escalated" \
-            --pr-number "$PR_NUMBER" \
-            --head-sha "$HEAD_SHA" \
-            --actor "$ACTOR" \
-            --details-json '{"reason":"partial_graduation","detection_method":"hunk_match","pre_flight":true}' \
-            --ledger-path "$LEDGER_PATH" \
-            >&2 \
-            || {
-                log_error "ledger-event.py failed while emitting escalated"
-                rm -f "$GRADUATED_JSON_OUT"
-                exit 2
-            }
-
-        log_warn "Ledger event escalated emitted for PR #${PR_NUMBER}"
+        # Not a stop: most often the PR is in the fork and a later change
+        # edited one of its hunks. The cherry-pick gives the answer.
+        log_info "PR #${PR_NUMBER} is partly found in the tree; the cherry-pick decides"
         rm -f "$GRADUATED_JSON_OUT"
 
-        printf '{"action":"escalate","reason":"partial-graduation","pr_number":%s}\n' \
-            "$PR_NUMBER"
-        exit 2
+        printf '{"action":"apply","note":"partial-graduation","patch_path":"%s","pr_number":%s}\n' \
+            "$PATCH_FILE" "$PR_NUMBER"
+        exit 0
         ;;
 
     # -----------------------------------------------------------------------

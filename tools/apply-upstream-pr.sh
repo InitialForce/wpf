@@ -21,6 +21,10 @@
 # Writes to $OUT:
 #   result     applied | conflict | empty | refused
 #   reason     why it was refused (only for refused)
+#   detection  how an empty result was found: merge_commit_in_history (the
+#              upstream merge commit is already an ancestor of BASE_SHA, for
+#              example through the upstream release branch) or
+#              empty_cherry_pick
 #   title      upstream PR title
 #   source     upstream commit that was cherry-picked
 #   conflicts.txt  conflicted paths (only for conflict)
@@ -68,6 +72,16 @@ for sha in "$SOURCE" "$PINNED_HEAD_SHA"; do
   fi
 done
 
+# The merged PR is already in the fork's history (upstream release/10.0
+# carries many main commits): nothing to apply. Cherry-picking it again would
+# only conflict with later edits to the same code.
+if [ -n "$MERGE_SHA" ] && [ "$SOURCE" = "$MERGE_SHA" ] \
+   && git merge-base --is-ancestor "$MERGE_SHA" "$BASE_SHA"; then
+  echo empty > "$OUT/result"
+  echo merge_commit_in_history > "$OUT/detection"
+  exit 0
+fi
+
 git checkout -q -B "$BRANCH" "$BASE_SHA"
 PICK_ARGS=(-x)
 if [ "$SOURCE" != "$MERGE_SHA" ]; then
@@ -92,6 +106,7 @@ if [ -s "$OUT/conflicts.txt" ]; then
 elif git diff --cached --quiet; then
   git cherry-pick --abort 2>/dev/null || true
   echo empty > "$OUT/result"
+  echo empty_cherry_pick > "$OUT/detection"
 else
   git cherry-pick --abort 2>/dev/null || true
   refuse apply_failed

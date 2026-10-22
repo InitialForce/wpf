@@ -42,7 +42,7 @@
 #     resolution made on an older tree. automerge.yml rebuilds the PR when
 #     if/main has moved.
 #
-# Flow: gate -> pre-flight (already in the fork?) -> approval check (the
+# Flow: gate -> pre-flight (already in the fork? a partial match goes on) -> approval check (the
 # exact pair must be approved in the ledger) -> cherry-pick (deterministic) ->
 # [resolve-conflicts -> finalize -> resolution-review -> retry or give up]
 # -> open or reuse the PR to if/main.
@@ -134,11 +134,12 @@ jobs:
           gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
           gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
 
+      # A partial match continues to the cherry-pick: the PR is usually in the
+      # fork with one hunk edited later, and git decides (empty, clean or a
+      # conflict for the resolver and its review).
       - name: Run cherry-pick-pre-flight.sh
         id: check
         run: |
-          # The script exits 2 on partial graduation; capture it instead of
-          # letting bash -e end the step before the action is recorded.
           set +e
           RESULT=$(bash tools/cherry-pick-pre-flight.sh \
             --pr-number "$PR_NUMBER" \
@@ -148,7 +149,7 @@ jobs:
           RC=$?
           set -e
           echo "$RESULT"
-          if [ "$RC" -ne 0 ] && [ "$RC" -ne 2 ]; then
+          if [ "$RC" -ne 0 ]; then
             echo "::error::Pre-flight failed (exit $RC)."
             exit 1
           fi
@@ -162,13 +163,6 @@ jobs:
         if: steps.check.outputs.action == 'skip'
         run: |
           echo "::notice::Upstream PR #$PR_NUMBER is already in the fork. Nothing to do."
-
-      - name: Handle partial graduation — stop for a human
-        if: steps.check.outputs.action == 'escalate'
-        run: |
-          # The pre-flight script already recorded an 'escalated' ledger event.
-          echo "::error::Upstream PR #$PR_NUMBER is partly in the fork already. A human must decide what to apply."
-          exit 1
 
   # -------------------------------------------------------------------------
   # Job 3: approval check — the exact (pr_number, head_sha) must be approved
@@ -317,6 +311,7 @@ jobs:
             echo "result=$(cat "$OUT/result")"
             echo "title=$(cat "$OUT/title" 2>/dev/null)"
             echo "reason=$(cat "$OUT/reason" 2>/dev/null)"
+            echo "detection=$(cat "$OUT/detection" 2>/dev/null)"
           } >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ github.token }}
@@ -355,15 +350,18 @@ jobs:
       - name: Record already-applied change
         if: steps.apply.outputs.result == 'empty'
         run: |
+          [[ "$DETECTION" =~ ^[a-z_]+$ ]] || DETECTION=empty_cherry_pick
           git checkout -q -B if/main origin/if/main
           python "$TRUSTED/tools/ledger-event.py" \
             --event graduated_upstream \
             --pr-number "$PR_NUMBER" \
             --head-sha "$PINNED_HEAD_SHA" \
             --actor pr-ingestion \
-            --details-json '{"detection_method":"empty_cherry_pick"}' \
+            --details-json "{\"detection_method\":\"$DETECTION\"}" \
             --push
+          echo "::notice::Upstream PR #$PR_NUMBER is already in the fork ($DETECTION). Nothing to do."
         env:
+          DETECTION: ${{ steps.apply.outputs.detection }}
           TRUSTED: ${{ github.workspace }}/trusted
 
       - name: Escalate when the change could not be applied
