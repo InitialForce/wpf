@@ -38,16 +38,14 @@
   </ItemGroup>
 
   <!--
-    Compile the shared benchmark classes from the sibling directories.
-    This avoids duplicating code between the NUnit project and the perf project.
-    The Smoke/ and Perf/ files are referenced as linked items.
+    Compile the shared helpers from the sibling Smoke/ directory as linked
+    items, so the NUnit project and this one share one copy. The .cs files in
+    this directory are picked up by the SDK's default glob; listing them again
+    is error NETSDK1022 (duplicate Compile items).
   -->
   <ItemGroup>
     <Compile Include="..\Smoke\SvgPathGenerator.cs" Link="Smoke\SvgPathGenerator.cs" />
     <Compile Include="..\Smoke\PixelDiffHelper.cs"  Link="Smoke\PixelDiffHelper.cs" />
-    <Compile Include="PerfHarness.cs" />
-    <Compile Include="BenchmarkConfig.cs" />
-    <Compile Include="PerfProgram.cs" />
   </ItemGroup>
 
 </Project>

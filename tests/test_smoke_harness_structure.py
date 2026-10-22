@@ -205,6 +205,23 @@ class TestPerfCsproj:
         content = self.PERF_CSPROJ.read_text(encoding="utf-8")
         assert "net10.0-windows" in content
 
+    def test_perf_csproj_does_not_list_globbed_files(self) -> None:
+        # The SDK already compiles every .cs file in the project directory.
+        # Listing one of them again fails the build with NETSDK1022.
+        root = ET.parse(str(self.PERF_CSPROJ)).getroot()
+        if root.get("Sdk") is None:
+            pytest.skip("not an SDK-style project")
+        if any(e.text and e.text.strip().lower() == "false"
+               for e in root.iter("EnableDefaultCompileItems")):
+            pytest.skip("default Compile items are off")
+        local = {p.name for p in PERF_DIR.glob("*.cs")}
+        listed = [
+            item.get("Include", "")
+            for item in root.iter("Compile")
+            if item.get("Include", "").replace("\\", "/") in local
+        ]
+        assert listed == [], f"Compile items the SDK already globs: {listed}"
+
 
 # ---------------------------------------------------------------------------
 # Gate 5: PerfHarness.cs exists in Perf/
