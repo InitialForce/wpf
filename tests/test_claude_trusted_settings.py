@@ -63,3 +63,48 @@ def test_claude_steps_deny_secrets_and_shell(name: str) -> None:
         assert allow, job_name
         bare = {"Read", "Write", "Edit", "Grep", "Glob", "Bash"}
         assert not bare & set(allow.group(1).split(",")), f"{job_name}: unscoped tool rule"
+
+
+@pytest.mark.parametrize(
+    ("name", "job", "key", "prompt"),
+    [
+        ("pr-ingestion.yml", "resolve-conflicts", "cherry_pick", "cherry-pick.md"),
+        ("nightly-rebase.yml", "resolve-conflicts", "conflict_resolve",
+         "resolve-rebase-conflict.md"),
+    ],
+)
+def test_resolver_reads_model_from_config_and_retries_once(
+    name: str, job: str, key: str, prompt: str
+) -> None:
+    """The resolver model comes from config.yaml (read before the upstream
+    change touches the tree), its tool calls are logged, and a run that leaves
+    markers without an escalation file gets exactly one more try."""
+    doc = yaml.safe_load((WORKFLOWS / name).read_text())
+    steps = doc["jobs"][job]["steps"]
+    names = [s.get("name", "") for s in steps]
+    claude = [s for s in steps if "claude-code-action" in str(s.get("uses", ""))]
+    assert len(claude) == 2
+    first, second = claude
+    for step in claude:
+        assert "--model ${{ steps." in step["with"]["claude_args"]
+        assert "claude-sonnet" not in step["with"]["claude_args"]
+        assert step["with"]["show_full_output"] is True
+        assert step["continue-on-error"] is True
+    setup = next(s for s in steps if key in s.get("run", ""))
+    assert prompt in setup["run"]
+    recreate = next(i for i, n in enumerate(names) if n.startswith("Recreate the conflicted"))
+    assert steps.index(setup) < recreate
+    left = next(s for s in steps if s.get("id") == "left")
+    assert "conflict-handoff.sh\" markers" in left["run"]
+    assert "[ -f .escalation.md ]" in left["run"]
+    assert second["if"] == "steps.left.outputs.retry == 'true'"
+    assert steps.index(first) < steps.index(left) < steps.index(second)
+    config = yaml.safe_load((REPO_ROOT / ".if-fork" / "config.yaml").read_text())
+    assert config["claude_models"][key] == "claude-sonnet-5-5"
+
+
+@pytest.mark.parametrize("prompt", ["cherry-pick.md", "resolve-rebase-conflict.md"])
+def test_resolver_prompt_says_keeping_a_side_is_an_edit(prompt: str) -> None:
+    text = (REPO_ROOT / ".if-fork" / "prompts" / prompt).read_text()
+    assert "Keeping one side is also an edit" in text
+    assert "`^(<<<<<<<|=======|>>>>>>>)` (no quotes around it)" in text

@@ -17,7 +17,7 @@ leave every file in `CONFLICT_FILES` with the correct content and no conflict ma
 workflow checks, stages, finishes the cherry-pick, pushes and opens the PR. Denylisted files
 never reach you.
 
-**Model:** `claude-sonnet-4-6` (see `config.claude_models.cherry_pick`)
+**Model:** set by `config.claude_models.cherry_pick` (read by the workflow)
 **Trigger:** `pr-ingestion.yml`, step "Resolve conflicts"
 
 ---
@@ -78,6 +78,23 @@ workflow records the upstream PR as superseded by the fork and opens no PR.
 
 The workflow records an `escalated` ledger event and stops when it finds an escalation
 file. Do not open issues or write the ledger yourself.
+
+---
+
+## Editing a conflicted file
+
+The workflow takes each file in `CONFLICT_FILES` from the work tree, exactly as you leave
+it. The files under `RESOLVER_INPUT` are read-only references; editing or reading them
+changes nothing in the work tree.
+
+- A conflict region is every line from `<<<<<<<` through `>>>>>>>`. Resolve each region
+  with one `Edit` whose `old_string` is the whole region, all three marker lines included,
+  and whose `new_string` is the resolved code.
+- Keeping one side is also an edit. `new_string` is then that side's lines, or empty when
+  that side is empty (for example the fork removed a field upstream still changes).
+- When you are done, run `Grep` on each file with the regular expression
+  `^(<<<<<<<|=======|>>>>>>>)` (no quotes around it) and fix every hit. Stop only when it
+  finds nothing.
 
 ---
 

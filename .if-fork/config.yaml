@@ -187,11 +187,13 @@ claude_models:
   # pr-review.yml reads review_1 and review_2 from here (owner decision: Fable).
   review_1: claude-fable-5-1
   review_2: claude-fable-5-1
-  cherry_pick: claude-sonnet-4-6
+  # The two conflict resolvers: pr-ingestion.yml reads cherry_pick and
+  # nightly-rebase.yml reads conflict_resolve.
+  cherry_pick: claude-sonnet-5-5
   # pr-ingestion.yml review-resolution: checks a conflict resolution Claude
   # wrote for a cherry-pick (owner decision: Fable).
   resolution_review: claude-fable-5-1
-  conflict_resolve: claude-sonnet-4-6
+  conflict_resolve: claude-sonnet-5-5
   release_notes: claude-sonnet-4-6
   failure_analysis: claude-sonnet-4-6
 

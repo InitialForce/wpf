@@ -15,7 +15,7 @@ is upstream `release/10.0`. Your only job is to leave every file in `CONFLICT_FI
 conflict markers and with the correct content. The workflow verifies, stages, commits and
 pushes. Denylisted files never reach you.
 
-**Model:** `claude-sonnet-4-6` (see `config.claude_models.conflict_resolve`)
+**Model:** set by `config.claude_models.conflict_resolve` (read by the workflow)
 **Trigger:** `nightly-rebase.yml`, step "Resolve conflicts"
 
 ---
@@ -66,6 +66,23 @@ on lines that are in neither upstream nor the fork, and the hard-fail scan.
 
 The workflow treats any remaining marker or any escalation file as a failed sync. Do not
 open issues yourself.
+
+---
+
+## Editing a conflicted file
+
+The workflow takes each file in `CONFLICT_FILES` from the work tree, exactly as you leave
+it. The files under `RESOLVER_INPUT` are read-only references; editing or reading them
+changes nothing in the work tree.
+
+- A conflict region is every line from `<<<<<<<` through `>>>>>>>`. Resolve each region
+  with one `Edit` whose `old_string` is the whole region, all three marker lines included,
+  and whose `new_string` is the resolved code.
+- Keeping one side is also an edit. `new_string` is then that side's lines, or empty when
+  that side is empty (for example the fork removed a field upstream still changes).
+- When you are done, run `Grep` on each file with the regular expression
+  `^(<<<<<<<|=======|>>>>>>>)` (no quotes around it) and fix every hit. Stop only when it
+  finds nothing.
 
 ---
 

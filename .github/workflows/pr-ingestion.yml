@@ -418,6 +418,22 @@ jobs:
       - name: Install Python dependencies
         run: pip install pyyaml
 
+      # Read before the cherry-pick touches the tree: model and prompt come
+      # from the pinned if/main commit, never from the upstream change.
+      - name: Read the resolver model and prompt
+        id: setup
+        run: |
+          MODEL=$(python3 -c "import yaml; print(yaml.safe_load(open('.if-fork/config.yaml'))['claude_models']['cherry_pick'])")
+          [[ "$MODEL" =~ ^claude-[a-z0-9.-]+$ ]] || { echo "::error::Bad claude_models.cherry_pick: $MODEL"; exit 1; }
+          echo "model=$MODEL" >> "$GITHUB_OUTPUT"
+          cp .if-fork/prompts/cherry-pick.md "$RUNNER_TEMP/resolver-prompt.md"
+          {
+            echo 'prompt<<__EOF_PROMPT__'
+            cat "$RUNNER_TEMP/resolver-prompt.md"
+            echo
+            echo '__EOF_PROMPT__'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Recreate the conflicted cherry-pick
         run: |
           # Copy the scripts out first: the cherry-pick and the agent change the tree.
@@ -452,22 +468,16 @@ jobs:
             *) exit "$RC" ;;
           esac
 
-      - name: Load cherry-pick conflict prompt
-        id: load-prompt-pick
-        run: |
-          {
-            echo 'prompt<<__EOF_PROMPT__'
-            cat .if-fork/prompts/cherry-pick.md
-            echo
-            echo '__EOF_PROMPT__'
-          } >> "$GITHUB_OUTPUT"
-
       # Trusted settings only: --setting-sources user skips the tree's
       # .claude/ and CLAUDE.md, --strict-mcp-config skips its .mcp.json, and
       # disableAllHooks turns hooks off. The deny rules keep the process
       # environment (/proc) and the runner's command files (_temp) out of
       # reach; a double slash is an absolute path in a permission rule.
-      - name: Resolve conflicts (Claude Sonnet)
+      # show_full_output logs the agent's tool calls. This job holds no
+      # secret the agent can read (no shell, no /proc, no _temp; the API key
+      # is masked), so the log is safe and makes a failed resolution
+      # debuggable.
+      - name: Resolve conflicts (Claude)
         id: pick
         if: steps.prepare.outputs.run == 'true'
         continue-on-error: true
@@ -475,11 +485,62 @@ jobs:
         with:
           allowed_bots: initial-force-wpf-bot
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: ${{ steps.load-prompt-pick.outputs.prompt }}
+          prompt: ${{ steps.setup.outputs.prompt }}
           settings: '{"disableAllHooks": true}'
+          show_full_output: true
           claude_args: >-
             --max-turns 30
-            --model claude-sonnet-4-6
+            --model ${{ steps.setup.outputs.model }}
+            --setting-sources user
+            --strict-mcp-config
+            --allowedTools "${{ steps.prepare.outputs.allowed }}"
+            --disallowedTools "Bash,WebFetch,WebSearch,NotebookEdit,Task,Read(//proc/**),Read(/proc/**),Read(//home/runner/work/_temp/**),Read(/home/runner/work/_temp/**),Edit(//home/runner/work/_temp/**),mcp__github__push_files,mcp__github__create_pull_request"
+          github_token: ${{ github.token }}
+        env:
+          CONFIG_PATH: .if-fork/config.yaml
+          RESOLVER_INPUT: .resolver-input
+          ESCALATION_ISSUE_PATH: ${{ github.workspace }}/.escalation.md
+
+      # #9551 and #9431: the agent ended "success" with markers left and no
+      # escalation file. Give it one more run with the list of those files.
+      - name: Find conflicts the agent left
+        id: left
+        if: steps.prepare.outputs.run == 'true'
+        run: |
+          LEFT=$(bash "$RUNNER_TEMP/conflict-handoff.sh" markers "$RUNNER_TEMP/apply/conflicts.txt" . .resolver-delete.txt)
+          if [ -z "$LEFT" ] || [ -f .escalation.md ]; then
+            echo "retry=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "::warning::Conflict markers remain after the first run: $(echo "$LEFT" | tr '\n' ' ')"
+          {
+            echo "retry=true"
+            echo 'prompt<<__EOF_PROMPT__'
+            cat "$RUNNER_TEMP/resolver-prompt.md"
+            echo
+            echo "## Second try"
+            echo
+            echo "Your first run ended without an escalation file, but these files still hold conflict marker lines:"
+            echo
+            echo "$LEFT" | sed 's/^/- /'
+            echo
+            echo "The workflow takes only the files in the work tree, so every region from \`<<<<<<<\` to \`>>>>>>>\` must be replaced in the file itself. Keeping one side is also an edit. Read each file again. For each region make one Edit whose old_string is the whole region, markers included, and whose new_string is the resolved code: the kept side's lines, or nothing when that side is empty. Then Grep each file for the regex ^(<<<<<<<|=======|>>>>>>>) and fix every hit."
+            echo '__EOF_PROMPT__'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve conflicts again (Claude, second try)
+        id: pick-again
+        if: steps.left.outputs.retry == 'true'
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          allowed_bots: initial-force-wpf-bot
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: ${{ steps.left.outputs.prompt }}
+          settings: '{"disableAllHooks": true}'
+          show_full_output: true
+          claude_args: >-
+            --max-turns 30
+            --model ${{ steps.setup.outputs.model }}
             --setting-sources user
             --strict-mcp-config
             --allowedTools "${{ steps.prepare.outputs.allowed }}"
