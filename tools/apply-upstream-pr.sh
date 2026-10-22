@@ -26,7 +26,12 @@
 #              example through the upstream release branch) or
 #              empty_cherry_pick
 #   title      upstream PR title
-#   source     upstream commit that was cherry-picked
+#   source     upstream commit the change comes from
+#   source_kind  what was applied: merge_commit (the upstream merge commit,
+#              whose first-parent diff has the same patch-id as the approved
+#              diff), approved_diff (the reviewed diff merge-base..head,
+#              squashed, because the merge commit's diff differs from it) or
+#              pr_head (an open PR, squashed the same way)
 #   conflicts.txt  conflicted paths (only for conflict)
 set -euo pipefail
 
@@ -60,10 +65,13 @@ git fetch --no-tags upstream main "+refs/pull/${PR_NUMBER}/head:refs/remotes/pr/
 if [ "$MERGED" = "true" ] && [ -n "$MERGE_SHA" ]; then
   git fetch --no-tags upstream "$MERGE_SHA"
   SOURCE="$MERGE_SHA"
+  SOURCE_KIND=merge_commit
 else
   SOURCE="$PINNED_HEAD_SHA"
+  SOURCE_KIND=pr_head
 fi
 echo "$SOURCE" > "$OUT/source"
+echo "$SOURCE_KIND" > "$OUT/source_kind"
 
 for sha in "$SOURCE" "$PINNED_HEAD_SHA"; do
   if ! python3 "$TRUSTED/tools/check-commit-denylist.py" "$sha" \
@@ -82,12 +90,34 @@ if [ -n "$MERGE_SHA" ] && [ "$SOURCE" = "$MERGE_SHA" ] \
   exit 0
 fi
 
+# The review approved head H, that is the diff merge-base..H. The merge
+# commit M can carry more (merge-resolution edits, a squash against a newer
+# main), so use M only when its first-parent diff is the same change.
+patch_id() {
+  git diff-tree -p --binary --no-ext-diff "$1" "$2" | git patch-id --stable | cut -d' ' -f1
+}
+if [ "$SOURCE_KIND" = merge_commit ]; then
+  APPROVED_BASE=$(git merge-base "$PINNED_HEAD_SHA" "$MERGE_SHA^1")
+  if [ "$(patch_id "$MERGE_SHA^1" "$MERGE_SHA")" != "$(patch_id "$APPROVED_BASE" "$PINNED_HEAD_SHA")" ]; then
+    echo "::notice::The upstream merge commit of PR #$PR_NUMBER differs from the approved diff; applying the approved diff."
+    SOURCE="$PINNED_HEAD_SHA"
+    SOURCE_KIND=approved_diff
+    echo "$SOURCE" > "$OUT/source"
+    echo "$SOURCE_KIND" > "$OUT/source_kind"
+  fi
+fi
+
 git checkout -q -B "$BRANCH" "$BASE_SHA"
 PICK_ARGS=(-x)
-if [ "$SOURCE" != "$MERGE_SHA" ]; then
-  # Squash the open PR into one synthetic commit on its upstream base so
-  # cherry-pick can do a real 3-way merge, including modify/delete conflicts.
-  BASE=$(git merge-base "$PINNED_HEAD_SHA" upstream/main)
+if [ "$SOURCE_KIND" != merge_commit ]; then
+  # Squash the reviewed head into one synthetic commit on its upstream base
+  # so cherry-pick can do a real 3-way merge, including modify/delete
+  # conflicts.
+  if [ "$SOURCE_KIND" = approved_diff ]; then
+    BASE="$APPROVED_BASE"
+  else
+    BASE=$(git merge-base "$PINNED_HEAD_SHA" upstream/main)
+  fi
   SOURCE=$(GIT_AUTHOR_NAME="$AUTHOR" GIT_AUTHOR_EMAIL="$AUTHOR@users.noreply.github.com" \
     git commit-tree "$PINNED_HEAD_SHA^{tree}" -p "$BASE" -m "$TITLE (dotnet/wpf#$PR_NUMBER)")
   PICK_ARGS=()

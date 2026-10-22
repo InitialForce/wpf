@@ -127,3 +127,86 @@ def test_merge_commit_already_in_base_is_empty(tmp_path: Path) -> None:
     assert (out / "result").read_text().strip() == "empty"
     assert (out / "detection").read_text().strip() == "merge_commit_in_history"
     assert _git(fork, "status", "--porcelain") == ""
+
+
+def _merged_upstream(tmp_path: Path, extra_in_merge: bool) -> tuple[Path, str, str]:
+    """Upstream where PR #12 (head H) is merged as M, and a fork from before M.
+
+    With *extra_in_merge*, M also edits b.cs, a change the review of H never
+    saw (a merge-resolution edit)."""
+    up = tmp_path / "upstream"
+    up.mkdir()
+    _git(up, "init", "-q", "-b", "main")
+    (up / "a.cs").write_text("int x = 0;\n")
+    (up / "b.cs").write_text("int y = 0;\n")
+    _git(up, "add", ".")
+    _git(up, "commit", "-q", "-m", "base")
+    fork = tmp_path / "fork"
+    _git(tmp_path, "clone", "-q", str(up), str(fork))
+    _git(fork, "remote", "add", "upstream", str(up))
+    _git(up, "checkout", "-q", "-b", "pr")
+    (up / "a.cs").write_text("int x = 1;\n")
+    _git(up, "commit", "-q", "-am", "change")
+    head = _git(up, "rev-parse", "HEAD")
+    _git(up, "update-ref", "refs/pull/12/head", head)
+    _git(up, "checkout", "-q", "main")
+    _git(up, "merge", "-q", "--no-ff", "--no-commit", "pr")
+    if extra_in_merge:
+        (up / "b.cs").write_text("int y = 666;\n")
+        _git(up, "add", "b.cs")
+    _git(up, "commit", "-q", "-m", "Merge pull request #12 from x/pr")
+    return fork, head, _git(up, "rev-parse", "HEAD")
+
+
+def _apply_merged(tmp_path: Path, fork: Path, head: str, merge: str) -> tuple[Path, str]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    upr = {"head": {"sha": head}, "merged": True, "merge_commit_sha": merge,
+           "user": {"login": "someone"}, "title": "Change"}
+    (tmp_path / "upr.json").write_text(json.dumps(upr))
+    gh = bin_dir / "gh"
+    gh.write_text(f'#!/bin/sh\ncat "{tmp_path / "upr.json"}"\n')
+    gh.chmod(0o755)
+    out = tmp_path / "out"
+    r = subprocess.run(
+        ["bash", str(SCRIPT)],
+        cwd=fork, capture_output=True, text=True,
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@example.com",
+            "GIT_COMMITTER_NAME": "T", "GIT_COMMITTER_EMAIL": "t@example.com",
+            "PR_NUMBER": "12",
+            "PINNED_HEAD_SHA": head,
+            "BRANCH": "claude/cherry-pick-pr-12",
+            "BASE_SHA": _git(fork, "rev-parse", "HEAD"),
+            "OUT": str(out),
+            "TRUSTED": str(REPO_ROOT),
+            "GH_TOKEN": "x",
+        },
+    )
+    assert r.returncode == 0, r.stderr
+    assert (out / "result").read_text().strip() == "applied"
+    return out, r.stdout
+
+
+def test_merge_commit_with_the_approved_diff_is_applied(tmp_path: Path) -> None:
+    fork, head, merge = _merged_upstream(tmp_path, extra_in_merge=False)
+    out, _ = _apply_merged(tmp_path, fork, head, merge)
+    assert (out / "source_kind").read_text().strip() == "merge_commit"
+    assert (out / "source").read_text().strip() == merge
+    assert (fork / "a.cs").read_text() == "int x = 1;\n"
+    assert merge in _git(fork, "log", "-1", "--format=%B")
+
+
+def test_merge_commit_that_differs_applies_only_the_approved_diff(tmp_path: Path) -> None:
+    """Astra: H approved, upstream merges it as M with an extra edit. Only the
+    reviewed diff merge-base..H may land in the fork."""
+    fork, head, merge = _merged_upstream(tmp_path, extra_in_merge=True)
+    out, stdout = _apply_merged(tmp_path, fork, head, merge)
+    assert (out / "source_kind").read_text().strip() == "approved_diff"
+    assert (out / "source").read_text().strip() == head
+    assert (fork / "a.cs").read_text() == "int x = 1;\n"
+    assert (fork / "b.cs").read_text() == "int y = 0;\n"
+    assert "differs from the approved diff" in stdout

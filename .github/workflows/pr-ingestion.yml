@@ -249,6 +249,8 @@ jobs:
       main_sha: ${{ steps.base.outputs.sha }}
       title: ${{ steps.apply.outputs.title }}
       result: ${{ steps.apply.outputs.result }}
+      source: ${{ steps.apply.outputs.source }}
+      source_kind: ${{ steps.apply.outputs.source_kind }}
       conflicts_allowed: ${{ steps.conflict-denylist.outputs.allowed }}
       pushed: ${{ steps.finish.outputs.pushed }}
 
@@ -316,6 +318,8 @@ jobs:
             echo "title=$(cat "$OUT/title" 2>/dev/null)"
             echo "reason=$(cat "$OUT/reason" 2>/dev/null)"
             echo "detection=$(cat "$OUT/detection" 2>/dev/null)"
+            echo "source=$(cat "$OUT/source" 2>/dev/null)"
+            echo "source_kind=$(cat "$OUT/source_kind" 2>/dev/null)"
           } >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ github.token }}
@@ -356,17 +360,21 @@ jobs:
         run: |
           [[ "$DETECTION" =~ ^[a-z_]+$ ]] || DETECTION=empty_cherry_pick
           git checkout -q -B if/main origin/if/main
+          DETAILS=$(jq -cn --arg d "$DETECTION" --arg s "$SOURCE" --arg k "$SOURCE_KIND" \
+            '{detection_method: $d, source: $s, source_kind: $k}')
           python "$TRUSTED/tools/ledger-event.py" \
             --event graduated_upstream \
             --pr-number "$PR_NUMBER" \
             --head-sha "$PINNED_HEAD_SHA" \
             --actor pr-ingestion \
-            --details-json "{\"detection_method\":\"$DETECTION\"}" \
+            --details-json "$DETAILS" \
             --push
           bash "$TRUSTED/tools/close-ingestion-pr.sh" "$PR_NUMBER" "it is already in the fork (graduated_upstream, $DETECTION)"
           echo "::notice::Upstream PR #$PR_NUMBER is already in the fork ($DETECTION). Nothing to do."
         env:
           DETECTION: ${{ steps.apply.outputs.detection }}
+          SOURCE: ${{ steps.apply.outputs.source }}
+          SOURCE_KIND: ${{ steps.apply.outputs.source_kind }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TRUSTED: ${{ github.workspace }}/trusted
 
@@ -820,9 +828,11 @@ jobs:
           RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           jq -n --argjson pr "$PR_NUMBER" --arg sha "$PINNED_HEAD_SHA" --arg base "$BASE_SHA" \
             --arg attempt "$ATTEMPT" --arg run "$RUN_URL" \
+            --arg source "$SOURCE" --arg kind "$SOURCE_KIND" \
             '{event: "graduated_upstream", pr_number: $pr, head_sha: $sha,
               details: {detection_method: "empty_resolution", reason: "fork_superseded",
-                        base_sha: $base, review_attempt: $attempt, run_url: $run}}' \
+                        base_sha: $base, review_attempt: $attempt, run_url: $run,
+                        source: $source, source_kind: $kind}}' \
             > "$RUNNER_TEMP/events.jsonl"
           python tools/ledger-event.py --events-file "$RUNNER_TEMP/events.jsonl" \
             --actor pr-ingestion --push
@@ -833,6 +843,8 @@ jobs:
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           ATTEMPT: ${{ needs.review-empty.outputs.attempt }}
+          SOURCE: ${{ needs.cherry-pick.outputs.source }}
+          SOURCE_KIND: ${{ needs.cherry-pick.outputs.source_kind }}
 
   # -------------------------------------------------------------------------
   # Job 8: retry-resolution. The review rejected the resolution and an
@@ -1056,13 +1068,20 @@ jobs:
 
       - name: Emit cherry_picked ledger event
         run: |
+          # source_kind says what was applied: the upstream merge commit (same
+          # patch-id as the approved diff) or the approved diff itself.
+          DETAILS=$(jq -cn --arg pr "$INTERNAL_PR" --arg b "$BRANCH" \
+            --arg s "$SOURCE" --arg k "$SOURCE_KIND" \
+            '{internal_pr: $pr, branch: $b, source: $s, source_kind: $k}')
           python tools/ledger-event.py \
             --event cherry_picked \
             --pr-number "$PR_NUMBER" \
             --head-sha "$PINNED_HEAD_SHA" \
             --actor pr-ingestion \
-            --details-json "{\"internal_pr\": \"$INTERNAL_PR\", \"branch\": \"$BRANCH\"}" \
+            --details-json "$DETAILS" \
             --push
         env:
           INTERNAL_PR: ${{ steps.open-pr.outputs.pr_number }}
           BRANCH: ${{ needs.cherry-pick.outputs.branch }}
+          SOURCE: ${{ needs.cherry-pick.outputs.source }}
+          SOURCE_KIND: ${{ needs.cherry-pick.outputs.source_kind }}
