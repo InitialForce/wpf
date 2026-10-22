@@ -223,7 +223,8 @@ def test_every_ingestion_stop_closes_the_fork_pr() -> None:
     SHA-smuggling stops all close the PR; escalations do it in
     ingestion-escalate.sh."""
     text = (WORKFLOWS / "pr-ingestion.yml").read_text()
-    assert text.count("close-ingestion-pr.sh") == 4
+    # pre-flight, SHA check, empty cherry-pick, record-superseded, give-up.
+    assert text.count("close-ingestion-pr.sh") == 5
     assert "close-ingestion-pr.sh" in (REPO_ROOT / "tools" / "ingestion-escalate.sh").read_text()
     doc = yaml.safe_load(text)
     for job in ("cherry-pick", "finalize"):

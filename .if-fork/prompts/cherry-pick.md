@@ -74,7 +74,8 @@ on lines that are in neither upstream's change nor the fork, and the hard-fail s
 When the right answer is the fork's version in every hunk (the fork already has the
 change, or rewrote the code so the upstream change no longer applies), that is a valid
 resolution: write the fork's version. The cherry-pick then changes nothing, and the
-workflow records the upstream PR as superseded by the fork and opens no PR.
+workflow sends that to the Fable resolution review, which must confirm the fork already has
+upstream's intent or that it no longer applies before the PR is recorded as superseded.
 
 The workflow records an `escalated` ledger event and stops when it finds an escalation
 file. Do not open issues or write the ledger yourself.

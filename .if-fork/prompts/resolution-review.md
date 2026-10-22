@@ -121,10 +121,29 @@ Write exactly one JSON object to the verdict file named in "Run inputs":
 - `confidence`: how sure you are of the verdict, 0 to 1. The workflow approves only at
   `config.conflict_resolution.review_min_confidence` or higher.
 - `reviewer_id`: copy it exactly from "Run inputs". A verdict with another ID is ignored.
+- `upstream_intent`: only for kind `empty` (see below), `"already_in_fork"` or
+  `"obsolete"`. Leave it out for other kinds.
 
 The workflow approves the resolution only when `verdict` is `approve`,
 `novel_lines_justified` is `true`, `confidence` meets the threshold, and no
 `review_hard_fail_patterns` entry matches the final diff. It checks all of these in code.
+
+---
+
+## Kind empty
+
+When "Run inputs" says kind `empty`, the resolver kept the fork's code in every conflict,
+so the cherry-pick changes nothing. If you approve, the pipeline records the upstream PR
+as superseded by the fork and never applies it. `final.diff` is empty and `BRANCH_SHA`
+is `BASE_SHA`. `base/` holds the fork's version of every file the upstream change touches,
+and `upstream-head/` holds upstream's.
+
+Approve only when, for every hunk of `upstream.diff`, you can name where the fork already
+does the same thing (`"upstream_intent": "already_in_fork"`), or why the change no longer
+applies because the fork removed or rewrote that code (`"upstream_intent": "obsolete"`).
+Name the files and lines in `reasoning`. If any part of the upstream change is missing
+from the fork and still applies (a bug fix, a security fix, a behaviour change), reject:
+the resolver dropped it. `novel_lines_justified` is `true` (there are none).
 
 ---
 
