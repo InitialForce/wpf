@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -38,12 +39,13 @@ def _run(tmp_path: Path, reason: str) -> tuple[subprocess.CompletedProcess[str],
         "import sys\n"
         f"open({str(calls)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
     )
+    shutil.copy(REPO_ROOT / "tools" / "close-ingestion-pr.sh", trusted / "tools")
     summary = tmp_path / "summary.md"
     result = subprocess.run(
         ["bash", str(SCRIPT), reason],
         cwd=work, capture_output=True, text=True,
         env={
-            **os.environ,
+            **{k: v for k, v in os.environ.items() if k != "GH_TOKEN"},
             "PR_NUMBER": "9551",
             "PINNED_HEAD_SHA": "a" * 40,
             "TRUSTED": str(trusted),
@@ -68,6 +70,8 @@ def test_designed_stop_records_and_exits_zero(tmp_path: Path, reason: str) -> No
     result, calls = _run(tmp_path, reason)
     assert result.returncode == 0, result.stderr
     assert "::notice::" in result.stdout and "::error::" not in result.stdout
+    # It tries to close the fork PR (no token here, so only a warning).
+    assert "close-ingestion-pr: no GH_TOKEN" in result.stdout
     assert f'"reason":"{reason}"' in calls.read_text()
 
 

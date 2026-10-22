@@ -14,6 +14,8 @@
 #      event, last attempt over 6 hours ago. Each attempt is an
 #      `ingestion_requested` ledger event; after 3 the SHA is recorded as
 #      escalated. These events go into the same single commit as step 1.
+#   4. Closes fork PRs (claude/cherry-pick-pr-<n>) whose upstream PR the
+#      ledger shows finished (tools/stale-ingestion-prs.py).
 name: PR Discovery
 
 on:
@@ -131,6 +133,25 @@ jobs:
             echo "Dispatched review for $item"
             sleep 20
           done
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      # An upstream PR whose ingestion ended (escalated, given up after 3
+      # lost handoffs, or found already in the fork) must not leave a fork PR
+      # open. Ingestion closes its own PR; this sweep catches the rest,
+      # including PRs left from before it did.
+      - name: Close fork PRs for finished upstream PRs
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          gh pr list --repo "$GITHUB_REPOSITORY" --base if/main --state open --limit 200 \
+            --json number,headRefName > "$RUNNER_TEMP/open-prs.json"
+          python3 tools/stale-ingestion-prs.py --ledger .if-fork/patch-ledger.jsonl \
+            --open-prs "$RUNNER_TEMP/open-prs.json" > "$RUNNER_TEMP/stale-prs.json"
+          jq -r '.[] | "\(.upstream_pr)\t\(.reason)"' "$RUNNER_TEMP/stale-prs.json" |
+            while IFS=$'\t' read -r upstream reason; do
+              bash tools/close-ingestion-pr.sh "$upstream" "$reason"
+            done
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 

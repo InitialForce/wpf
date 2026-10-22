@@ -10,8 +10,12 @@
 # Failure opens no "CI failure" issue. Only a reason that means the pipeline
 # itself broke (apply_failed, reapply_mismatch, unknown) ends with exit 1.
 #
-# Environment: PR_NUMBER, PINNED_HEAD_SHA, TRUSTED (if/main checkout), and the
-# GitHub run variables. Runs in the work checkout with the bot key imported.
+# It then closes any open fork PR for this upstream PR
+# (tools/close-ingestion-pr.sh), so no PR is left waiting for a person.
+#
+# Environment: PR_NUMBER, PINNED_HEAD_SHA, TRUSTED (if/main checkout), GH_TOKEN
+# (App token, for closing the PR), and the GitHub run variables. Runs in the
+# work checkout with the bot key imported.
 set -euo pipefail
 
 REASON="$1"
@@ -33,6 +37,7 @@ python3 "$TRUSTED/tools/ledger-event.py" \
   --actor pr-ingestion \
   --details-json "{\"reason\":\"$REASON\",\"run_url\":\"$RUN_URL\"}" \
   --push
+bash "$TRUSTED/tools/close-ingestion-pr.sh" "$PR_NUMBER" "escalated ($REASON)"
 {
   echo "### Upstream PR #$PR_NUMBER was not applied"
   echo

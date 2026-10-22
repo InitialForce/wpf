@@ -162,7 +162,10 @@ jobs:
       - name: Handle graduated (nothing to do)
         if: steps.check.outputs.action == 'skip'
         run: |
+          bash tools/close-ingestion-pr.sh "$PR_NUMBER" "it is already in the fork (graduated_upstream)"
           echo "::notice::Upstream PR #$PR_NUMBER is already in the fork. Nothing to do."
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
   # -------------------------------------------------------------------------
   # Job 3: approval check — the exact (pr_number, head_sha) must be approved
@@ -224,6 +227,7 @@ jobs:
               --actor pr-ingestion \
               --details-json '{"reason": "sha_smuggling_detected", "cause": "no_approved_verdict_for_head"}' \
               --push
+            bash tools/close-ingestion-pr.sh "$PR_NUMBER" "escalated (sha_smuggling_detected)"
             exit 1
           fi
 
@@ -359,9 +363,11 @@ jobs:
             --actor pr-ingestion \
             --details-json "{\"detection_method\":\"$DETECTION\"}" \
             --push
+          bash "$TRUSTED/tools/close-ingestion-pr.sh" "$PR_NUMBER" "it is already in the fork (graduated_upstream, $DETECTION)"
           echo "::notice::Upstream PR #$PR_NUMBER is already in the fork ($DETECTION). Nothing to do."
         env:
           DETECTION: ${{ steps.apply.outputs.detection }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TRUSTED: ${{ github.workspace }}/trusted
 
       - name: Escalate when the change could not be applied
@@ -376,6 +382,7 @@ jobs:
         env:
           APPLY_REASON: ${{ steps.apply.outputs.reason }}
           FINISH_REASON: ${{ steps.finish.outputs.reason }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TRUSTED: ${{ github.workspace }}/trusted
 
   # -------------------------------------------------------------------------
@@ -705,8 +712,10 @@ jobs:
             --actor pr-ingestion \
             --details-json '{"detection_method":"empty_resolution","reason":"fork_superseded"}' \
             --push
+          bash "$TRUSTED/tools/close-ingestion-pr.sh" "$PR_NUMBER" "the resolution keeps the fork's code everywhere (graduated_upstream, fork_superseded)"
           echo "::notice::Upstream PR #$PR_NUMBER: the resolution keeps the fork's code everywhere. Recorded as superseded by the fork; no PR."
         env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TRUSTED: ${{ github.workspace }}/trusted
 
       - name: Escalate when the resolution was not accepted
@@ -715,6 +724,7 @@ jobs:
         env:
           OVERLAY_REASON: ${{ steps.overlay.outputs.reason }}
           FINISH_REASON: ${{ steps.finish.outputs.reason }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TRUSTED: ${{ github.workspace }}/trusted
 
   # -------------------------------------------------------------------------
@@ -835,6 +845,7 @@ jobs:
           PR_NUM=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --head "$BRANCH" \
                      --base if/main --json number --jq '.[0].number // empty')
           if [ -n "$PR_NUM" ]; then
+            bash tools/human-merge-label.sh "$PR_NUM" false
             gh pr close "$PR_NUM" --repo "$GITHUB_REPOSITORY" --comment "The resolution review rejected Claude's conflict resolution $ATTEMPT times ($REASON). The pipeline gave up on upstream #$PR_NUMBER at \`$PINNED_HEAD_SHA\` and recorded it as escalated. Run: $RUN_URL"
           fi
           gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$BRANCH" \
