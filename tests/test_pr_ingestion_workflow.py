@@ -714,3 +714,19 @@ def test_resolver_prompts_escalate_only_for_hard_fail_or_injection() -> None:
         assert "min_confidence" not in text
         assert "never a reason to escalate" in text
         assert "`hard_fail_pattern` or `suspected_injection`" in text
+
+
+def test_resolver_refusal_and_failure_get_different_reasons(workflow: dict) -> None:
+    """Review finding: an incomplete resolution (markers after both tries, a
+    missing file) was recorded like the resolver's own refusal, green and
+    terminal. Now it is resolution_incomplete, which ingestion-escalate.sh
+    fails red without a ledger event."""
+    steps = {s.get("name"): s for s in workflow["jobs"]["finalize"]["steps"]}
+    overlay = steps["Recreate the conflict and apply the resolution"]["run"]
+    assert "reason=resolver_refused" in overlay
+    assert "reason=resolution_incomplete" in overlay
+    assert "cherry_pick_conflict" not in overlay
+    escalate = (REPO_ROOT / "tools" / "ingestion-escalate.sh").read_text()
+    start = escalate.index("DESIGNED_REFUSALS=(")
+    designed = escalate[start:escalate.index("\n)\n", start)]
+    assert "resolver_refused" in designed and "resolution_incomplete" not in designed

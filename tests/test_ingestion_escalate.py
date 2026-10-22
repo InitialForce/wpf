@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -59,25 +60,52 @@ def _run(tmp_path: Path, reason: str) -> tuple[subprocess.CompletedProcess[str],
     return result, calls
 
 
-@pytest.mark.parametrize(
-    "reason",
-    ["file_denylist", "fork_owned_paths", "head_moved_after_review",
-     "cherry_pick_conflict", "conflict_in_denylist", "commit_denylist"],
-)
-def test_designed_stop_records_and_exits_zero(tmp_path: Path, reason: str) -> None:
+DESIGNED = [
+    "head_moved_after_review", "commit_denylist", "conflict_in_denylist",
+    "file_denylist", "fork_owned_paths", "paths_outside_allowlist", "resolver_refused",
+]
+
+
+@pytest.mark.parametrize("reason", DESIGNED)
+def test_designed_refusal_records_and_exits_zero(tmp_path: Path, reason: str) -> None:
     """Regression: every designed stop exited 1, so Claude On Failure opened
     a "CI failure" issue for each (#26, #29-#31, #33, #34)."""
     result, calls = _run(tmp_path, reason)
     assert result.returncode == 0, result.stderr
     assert "::notice::" in result.stdout and "::error::" not in result.stdout
+    assert f'"reason":"{reason}"' in calls.read_text()
     # It tries to close the fork PR (no token here, so only a warning).
     assert "close-ingestion-pr: no GH_TOKEN" in result.stdout
-    assert f'"reason":"{reason}"' in calls.read_text()
 
 
-@pytest.mark.parametrize("reason", ["apply_failed", "reapply_mismatch", "Not-A-Reason"])
-def test_real_failure_still_fails(tmp_path: Path, reason: str) -> None:
+@pytest.mark.parametrize(
+    "reason",
+    ["apply_failed", "reapply_mismatch", "resolution_incomplete", "path_policy_error",
+     "not_exactly_one_commit", "cherry_pick_conflict", "some_new_reason", "Not-A-Reason"],
+)
+def test_any_other_reason_fails_red_and_stays_retryable(tmp_path: Path, reason: str) -> None:
+    """Review finding: real failures (resolver outage, bad artifact, path
+    policy error) ended green and terminal. Now only the allowlist is green;
+    everything else fails, writes no ledger event and closes no PR, so
+    pr-discovery retries the pair."""
     result, calls = _run(tmp_path, reason)
     assert result.returncode == 1
     assert "::error::" in result.stdout
-    assert "--event escalated" in calls.read_text()
+    assert not calls.exists()
+    assert "close-ingestion-pr" not in result.stdout
+
+
+def test_every_refusal_reason_the_scripts_write_is_classified() -> None:
+    """Each reason apply-upstream-pr.sh and finish-ingestion-branch.sh can
+    refuse with is either a designed refusal or a known failure."""
+    failures = {"apply_failed", "not_exactly_one_commit", "path_policy_error"}
+    found: set[str] = set()
+    for name in ("apply-upstream-pr.sh", "finish-ingestion-branch.sh"):
+        text = (REPO_ROOT / "tools" / name).read_text()
+        found |= set(re.findall(r"^\s*refuse ([a-z_]+)\s*$", text, re.M))
+        found |= set(re.findall(r"REASON=([a-z_]+)", text))
+    assert found, "no refusal reasons found"
+    assert found <= set(DESIGNED) | failures, found - set(DESIGNED) - failures
+    script = SCRIPT.read_text()
+    for reason in DESIGNED:
+        assert f"  {reason} " in script

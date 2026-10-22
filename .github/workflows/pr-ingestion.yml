@@ -658,12 +658,17 @@ jobs:
           if [ "$(cat "$OUT/result")" != conflict ]; then
             echo "reason=reapply_mismatch" >> "$GITHUB_OUTPUT"; exit 0
           fi
+          # A designed refusal: the resolver's escalation file (hard-fail
+          # pattern or suspected injection) or prepare-resolver.sh's refusal.
           if [ -s "$RUNNER_TEMP/resolution/escalation.md" ]; then
             cat "$RUNNER_TEMP/resolution/escalation.md"
-            echo "reason=cherry_pick_conflict" >> "$GITHUB_OUTPUT"; exit 0
+            echo "reason=resolver_refused" >> "$GITHUB_OUTPUT"; exit 0
           fi
+          # A failure, not a refusal: markers left after both tries (for
+          # example the API failed twice), or a missing or invalid file. It
+          # fails the run and records nothing, so the pair stays retryable.
           if ! bash "$TRUSTED/tools/conflict-handoff.sh" apply "$OUT/conflicts.txt" "$RUNNER_TEMP/resolution"; then
-            echo "reason=cherry_pick_conflict" >> "$GITHUB_OUTPUT"; exit 0
+            echo "reason=resolution_incomplete" >> "$GITHUB_OUTPUT"; exit 0
           fi
           # The resolver kept the fork's version everywhere: the change is
           # already in the fork or the fork rewrote that code. Nothing to push.
