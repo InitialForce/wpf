@@ -224,6 +224,9 @@ bot_identity:
   email: "wpf-bot@initialforce.com"
   github_app_id_secret: GH_APP_ID
   github_app_private_key_secret: GH_APP_PRIVATE_KEY
+  # The App's bot login (the actor of its dispatches). close-ingestion-pr.sh
+  # closes only PRs this login opened.
+  github_login: "initial-force-wpf-bot[bot]"
 
 autonomy_kill_switches:
   enabled_var: IF_AUTONOMY_ENABLED

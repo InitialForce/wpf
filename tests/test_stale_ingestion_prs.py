@@ -11,6 +11,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -34,8 +35,9 @@ def _ev(event: str, pr: int, **details: Any) -> dict[str, Any]:
     return {"event": event, "pr_number": pr, "head_sha": "a" * 40, "details": details}
 
 
-def _pr(number: int, upstream: int) -> dict[str, Any]:
-    return {"number": number, "headRefName": f"claude/cherry-pick-pr-{upstream}"}
+def _pr(number: int, upstream: int, cross: bool = False) -> dict[str, Any]:
+    return {"number": number, "headRefName": f"claude/cherry-pick-pr-{upstream}",
+            "isCrossRepository": cross}
 
 
 def test_escalated_upstream_pr_leaves_a_stale_fork_pr() -> None:
@@ -71,6 +73,13 @@ def test_active_ingestion_is_not_stale() -> None:
     assert sip.stale_prs([_ev("cherry_picked", 6)], [_pr(13, 6)]) == []
 
 
+def test_a_fork_branch_with_the_same_name_is_ignored() -> None:
+    ledger = [_ev("escalated", 9215, reason="cherry_pick_conflict")]
+    assert sip.stale_prs(ledger, [_pr(50, 9215, cross=True)]) == []
+    unknown = {"number": 51, "headRefName": "claude/cherry-pick-pr-9215"}
+    assert sip.stale_prs(ledger, [unknown]) == []
+
+
 def test_only_ingestion_branches_count() -> None:
     ledger = [_ev("escalated", 0, reason="sync")]
     prs = [{"number": 32, "headRefName": "if/staging"},
@@ -99,38 +108,103 @@ def test_cli(tmp_path: Path) -> None:
     assert bad.returncode == 2
 
 
-def _close(tmp_path: Path, listed: str) -> tuple[subprocess.CompletedProcess[str], str]:
+BOT = "initial-force-wpf-bot[bot]"
+HEAD = "c" * 40
+
+
+def _pr_json(**over: Any) -> dict[str, Any]:
+    pr: dict[str, Any] = {
+        "state": "open",
+        "base": {"ref": "if/main"},
+        "head": {"ref": "claude/cherry-pick-pr-9215", "sha": HEAD,
+                 "repo": {"full_name": "InitialForce/wpf"}},
+        "user": {"login": BOT},
+        "labels": [{"name": "automated"}, {"name": "needs-human-merge"}],
+    }
+    pr.update(over)
+    return pr
+
+
+def _close(
+    tmp_path: Path, pr: dict[str, Any] | None, ref_sha: str = HEAD, bot: str | None = BOT
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    """Run close-ingestion-pr.sh with a gh stub that knows PR #27."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     calls = tmp_path / "gh-calls.txt"
+    (tmp_path / "pr.json").write_text(json.dumps(pr or {}))
+    listed = "27\\n" if pr else ""
     gh = bin_dir / "gh"
     gh.write_text(
         "#!/bin/sh\n"
         f'echo "$@" >> "{calls}"\n'
-        f'if [ "$1 $2" = "pr list" ]; then printf "{listed}"; fi\n'
+        'case "$1 $2" in\n'
+        f'  "pr list") printf "{listed}" ;;\n'
+        f'  "api repos/InitialForce/wpf/pulls/27") cat "{tmp_path / "pr.json"}" ;;\n'
+        '  "api repos/InitialForce/wpf/git/ref/heads/claude/cherry-pick-pr-9215")'
+        f" echo {ref_sha} ;;\n"
+        "esac\n"
     )
     gh.chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+           "GH_TOKEN": "x", "GITHUB_REPOSITORY": "InitialForce/wpf", "GITHUB_RUN_ID": "5"}
+    env.pop("BOT_LOGIN", None)
+    if bot is not None:
+        env["BOT_LOGIN"] = bot
     r = subprocess.run(
         ["bash", str(CLOSE), "9215", "escalated (cherry_pick_conflict)"],
-        capture_output=True, text=True,
-        env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
-             "GH_TOKEN": "x", "GITHUB_REPOSITORY": "InitialForce/wpf",
-             "GITHUB_RUN_ID": "5"},
+        capture_output=True, text=True, env=env,
     )
     return r, calls.read_text() if calls.exists() else ""
 
 
-def test_close_removes_label_comments_and_closes(tmp_path: Path) -> None:
-    r, calls = _close(tmp_path, "27\\n")
+def test_close_removes_label_comments_closes_and_deletes_branch(tmp_path: Path) -> None:
+    r, calls = _close(tmp_path, _pr_json())
     assert r.returncode == 0, r.stderr
     assert "--head claude/cherry-pick-pr-9215" in calls
     assert "pr edit 27 --repo InitialForce/wpf --remove-label needs-human-merge" in calls
     close = next(line for line in calls.splitlines() if line.startswith("pr close 27"))
-    assert "--delete-branch" in close and "cherry_pick_conflict" in close
+    assert "cherry_pick_conflict" in close and "--delete-branch" not in close
+    assert "api -X DELETE repos/InitialForce/wpf/git/refs/heads/claude/cherry-pick-pr-9215" in calls
+
+
+@pytest.mark.parametrize(
+    ("override", "why"),
+    [
+        ({"head": {"ref": "claude/cherry-pick-pr-9215", "sha": HEAD,
+                   "repo": {"full_name": "someone/wpf"}}}, "head is not in"),
+        ({"user": {"login": "someone"}}, "opened by someone"),
+        ({"labels": [{"name": "needs-human-merge"}]}, "no automated label"),
+        ({"base": {"ref": "main"}}, "base is not if/main"),
+    ],
+)
+def test_close_leaves_prs_that_are_not_the_pipelines(
+    tmp_path: Path, override: dict[str, Any], why: str
+) -> None:
+    """Review finding: a fork's branch of the same name, or a PR a person
+    opened, must never be closed or have its label or branch touched."""
+    r, calls = _close(tmp_path, _pr_json(**override))
+    assert r.returncode == 0
+    assert why in r.stdout
+    assert "pr close" not in calls and "pr edit" not in calls and "DELETE" not in calls
+
+
+def test_close_keeps_a_branch_that_moved(tmp_path: Path) -> None:
+    r, calls = _close(tmp_path, _pr_json(), ref_sha="d" * 40)
+    assert "pr close 27" in calls
+    assert "DELETE" not in calls
+    assert "Kept claude/cherry-pick-pr-9215" in r.stdout
+
+
+def test_close_reads_the_bot_login_from_config(tmp_path: Path) -> None:
+    r, calls = _close(tmp_path, _pr_json(), bot=None)
+    assert "pr close 27" in calls, r.stdout
+    config = yaml.safe_load((REPO_ROOT / ".if-fork" / "config.yaml").read_text())
+    assert config["bot_identity"]["github_login"] == BOT
 
 
 def test_close_with_nothing_open_does_nothing(tmp_path: Path) -> None:
-    r, calls = _close(tmp_path, "")
+    r, calls = _close(tmp_path, None)
     assert r.returncode == 0
     assert "pr close" not in calls
 
@@ -164,4 +238,5 @@ def test_discovery_sweeps_stale_prs_without_failing() -> None:
     steps = [s for job in doc["jobs"].values() for s in job.get("steps", [])]
     sweep = next(s for s in steps if "stale-ingestion-prs.py" in s.get("run", ""))
     assert sweep["continue-on-error"] is True
+    assert "isCrossRepository" in sweep["run"]
     assert "close-ingestion-pr.sh" in sweep["run"]

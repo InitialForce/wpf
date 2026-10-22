@@ -322,7 +322,8 @@
         "name": {"type": "string", "description": "Display name for the bot"},
         "email": {"type": "string", "format": "email", "description": "Email address for the bot"},
         "github_app_id_secret": {"type": "string", "description": "Secret name holding the GH App ID"},
-        "github_app_private_key_secret": {"type": "string", "description": "Secret name holding the GH App private key"}
+        "github_app_private_key_secret": {"type": "string", "description": "Secret name holding the GH App private key"},
+        "github_login": {"type": "string", "pattern": "^[a-z0-9-]+\\[bot\\]$", "description": "The App's bot login; tools/close-ingestion-pr.sh closes only PRs it opened"}
       }
     },
     "autonomy_kill_switches": {

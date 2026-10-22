@@ -5,8 +5,11 @@ Usage:
   python tools/stale-ingestion-prs.py --ledger .if-fork/patch-ledger.jsonl \\
       --open-prs <file>
 
-<file> is ``gh pr list --base if/main --state open --json number,headRefName``.
-Only PRs from ``claude/cherry-pick-pr-<n>`` count.
+<file> is ``gh pr list --base if/main --state open --json
+number,headRefName,isCrossRepository``. Only PRs from ``claude/cherry-pick-pr-<n>``
+in this repository count, never a fork's branch of the same name.
+tools/close-ingestion-pr.sh checks repository, author and label again before it
+closes anything.
 
 A PR is stale when the newest ledger event for upstream PR <n> that ends
 ingestion (``graduated_upstream``, ``escalated``, ``rejected``) is later than
@@ -64,7 +67,7 @@ def stale_prs(
     for pr in open_prs:
         m = BRANCH_RE.match(str(pr.get("headRefName", "")))
         fork_pr = pr.get("number")
-        if not m or not isinstance(fork_pr, int):
+        if not m or not isinstance(fork_pr, int) or pr.get("isCrossRepository") is not False:
             continue
         upstream = int(m.group(1))
         stop = last_stop.get(upstream)

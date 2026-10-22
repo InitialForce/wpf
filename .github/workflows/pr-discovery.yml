@@ -148,7 +148,7 @@ jobs:
         run: |
           set -euo pipefail
           gh pr list --repo "$GITHUB_REPOSITORY" --base if/main --state open --limit 200 \
-            --json number,headRefName > "$RUNNER_TEMP/open-prs.json"
+            --json number,headRefName,isCrossRepository > "$RUNNER_TEMP/open-prs.json"
           python3 tools/stale-ingestion-prs.py --ledger .if-fork/patch-ledger.jsonl \
             --open-prs "$RUNNER_TEMP/open-prs.json" > "$RUNNER_TEMP/stale-prs.json"
           jq -r '.[] | "\(.upstream_pr)\t\(.reason)"' "$RUNNER_TEMP/stale-prs.json" |
