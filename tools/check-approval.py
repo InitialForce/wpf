@@ -9,6 +9,11 @@ The pair (pr_number, head_sha) is approved when the ledger has an ``approved``
 event for exactly that pair and no later ``rejected`` or ``escalated`` event for
 it. Events for other head SHAs of the same PR do not count.
 
+A ``requeued`` event (pr-discovery sends an escalated pair back to ingestion
+once) restores the approval of an escalated pair that was approved before:
+same pinned head, no new review. Only the first ``requeued`` event for a pair
+counts, and a later ``escalated`` or ``rejected`` ends the approval again.
+
 With --resolution-branch-sha (automerge-verify.sh passes the PR head of a
 cherry-pick whose conflicts Claude resolved), the pair must also have a
 ``resolution_approved`` event whose details.branch_sha is that commit, and no
@@ -44,16 +49,25 @@ PR_RE = re.compile(r"^[0-9]+$")
 def last_outcome(ledger_text: str, pr_number: int, head_sha: str) -> str | None:
     """Return the last outcome event for the pair, or None if there is none."""
     outcome: str | None = None
+    approved_before = False
+    requeued = False
     for line in ledger_text.splitlines():
         line = line.strip()
         if not line:
             continue
         entry = json.loads(line)
-        if entry.get("event") not in OUTCOME_EVENTS:
+        event = entry.get("event")
+        if event not in OUTCOME_EVENTS and event != "requeued":
             continue
         if entry.get("pr_number") != pr_number or entry.get("head_sha") != head_sha:
             continue
-        outcome = str(entry["event"])
+        if event == "requeued":
+            if outcome == "escalated" and approved_before and not requeued:
+                outcome = "approved"
+            requeued = True
+            continue
+        outcome = str(event)
+        approved_before = approved_before or event == "approved"
     return outcome
 
 

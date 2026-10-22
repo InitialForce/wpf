@@ -164,3 +164,31 @@ def test_resolution_only_skips_the_review_outcome(tmp_path: Path) -> None:
         capture_output=True, text=True,
     )
     assert r.returncode == 2
+
+
+def test_requeued_pair_is_approved_again(tmp_path: Path) -> None:
+    """pr-discovery requeues an escalated pair once; the same pinned head is
+    accepted again without a new review."""
+    led = _ledger(tmp_path, [
+        ("approved", 7, SHA_A), ("escalated", 7, SHA_A), ("requeued", 7, SHA_A),
+    ])
+    assert _run(led, "7", SHA_A) == (0, {"approved": True, "reason": "approved"})
+    # Bound to the head: the other head of the same PR is not approved.
+    assert _run(led, "7", SHA_B)[0] == 2
+
+
+def test_requeue_counts_once(tmp_path: Path) -> None:
+    led = _ledger(tmp_path, [
+        ("approved", 7, SHA_A), ("escalated", 7, SHA_A), ("requeued", 7, SHA_A),
+        ("escalated", 7, SHA_A), ("requeued", 7, SHA_A),
+    ])
+    assert _run(led, "7", SHA_A) == (2, {"approved": False, "reason": "last outcome is escalated"})
+
+
+def test_requeue_needs_an_earlier_approval(tmp_path: Path) -> None:
+    led = _ledger(tmp_path, [("escalated", 7, SHA_A), ("requeued", 7, SHA_A)])
+    assert _run(led, "7", SHA_A)[0] == 2
+    rejected = _ledger(tmp_path, [
+        ("approved", 7, SHA_A), ("rejected", 7, SHA_A), ("requeued", 7, SHA_A),
+    ])
+    assert _run(rejected, "7", SHA_A)[0] == 2

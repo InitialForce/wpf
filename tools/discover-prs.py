@@ -33,6 +33,11 @@ Rules:
   approval is sent to pr-ingestion again, with an ``ingestion_requested``
   event per attempt. Not within 6 hours of the last attempt; after 3 attempts
   the pair is recorded as ``escalated`` (reason ``ingestion_retries_exhausted``).
+- Requeue: an approved pair whose last outcome is ``escalated`` with a reason
+  in ``discovery.requeue_escalation_reasons`` is sent to pr-ingestion again,
+  once per pair, with a ``requeued`` event (details.previous_reason) and an
+  ``ingestion_requested`` event. A later lost handoff is retried as above,
+  counted from the ``requeued`` event.
 
 Queue order: merged upstream first, then allowlisted authors, then tier
 S, A, B, SUSPECT, then oldest PR number first.
@@ -219,6 +224,10 @@ class LedgerView:
         self.approved_at: dict[tuple[int, str], int] = {}
         self.outcome_at: dict[tuple[int, str], int] = {}
         self.ingestion_requests: dict[tuple[int, str], list[tuple[int, datetime | None]]] = {}
+        # Requeue tracking: last escalation reason per pair (None once a later
+        # approval or requeue supersedes it) and pairs already requeued.
+        self.escalated_reason: dict[tuple[int, str], str | None] = {}
+        self.requeued: set[tuple[int, str]] = set()
 
         for index, entry in enumerate(entries):
             event = entry.get("event")
@@ -245,6 +254,15 @@ class LedgerView:
             if event == "approved" or (
                 event == "merged_verdict" and details.get("verdict") == "approved"
             ):
+                self.approved_at[key] = index
+                self.escalated_reason[key] = None
+            if event == "escalated":
+                self.escalated_reason[key] = str(details.get("reason") or "")
+            if event == "requeued":
+                self.requeued.add(key)
+                self.escalated_reason[key] = None
+                # A lost handoff after a requeue is retried like one after an
+                # approval.
                 self.approved_at[key] = index
             if event in INGESTION_OUTCOME_EVENTS:
                 self.outcome_at[key] = index
@@ -403,6 +421,7 @@ def discover(
         queue.append({"pr_number": number, "head_sha": sha})
 
     ingest = _ingestion_retries(ledger, now, events)
+    ingest += _requeues(ledger, discovery, events)
     counts = {
         "upstream_considered": len(upstream),
         "new_discovered": sum(1 for e in events if e["event"] == "discovered"),
@@ -410,8 +429,48 @@ def discover(
         "queued_for_review": len(queue),
         "ingestion_resent": len(ingest),
         "ingestion_given_up": sum(1 for e in events if e["event"] == "escalated"),
+        "requeued": sum(1 for e in events if e["event"] == "requeued"),
     }
     return events, queue, ingest, counts
+
+
+def _requeues(
+    ledger: LedgerView, discovery: dict[str, Any], events: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Send escalated pairs back to pr-ingestion, once each.
+
+    Only an approved pair whose last outcome is ``escalated`` with a reason in
+    ``discovery.requeue_escalation_reasons`` qualifies. Appends ``requeued`` and
+    ``ingestion_requested`` events to *events* and returns the pairs to send.
+    """
+    reasons = set(discovery.get("requeue_escalation_reasons") or [])
+    ingest: list[dict[str, Any]] = []
+    for key, reason in sorted(ledger.escalated_reason.items()):
+        number, sha = key
+        if reason is None or reason not in reasons:
+            continue
+        if key in ledger.requeued or key not in ledger.approved_at:
+            continue
+        if number in ledger.closed_prs or not SHA_RE.match(sha):
+            continue
+        events.append(
+            {
+                "event": "requeued",
+                "pr_number": number,
+                "head_sha": sha,
+                "details": {"previous_reason": reason, "source": "pr-discovery"},
+            }
+        )
+        events.append(
+            {
+                "event": "ingestion_requested",
+                "pr_number": number,
+                "head_sha": sha,
+                "details": {"attempt": 1, "source": "pr-discovery-requeue"},
+            }
+        )
+        ingest.append({"pr_number": number, "head_sha": sha})
+    return ingest
 
 
 def _ingestion_retries(

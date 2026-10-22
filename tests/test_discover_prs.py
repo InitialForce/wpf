@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 _SCRIPT = Path(__file__).parent.parent / "tools" / "discover-prs.py"
@@ -323,3 +324,76 @@ def test_cli_writes_events_and_queue(tmp_path: Path) -> None:
         {"pr_number": 2, "head_sha": S("sha2")},
     ]
     assert json.loads(ingest_out.read_text()) == []
+
+
+# ---------------------------------------------------------------------------
+# Requeue: escalated pairs the pipeline now handles are sent back once
+# ---------------------------------------------------------------------------
+
+REQUEUE_REASONS = ["partial_graduation", "cherry_pick_conflict", "ingestion_retries_exhausted"]
+
+
+def _run_requeue(entries, now=NOW):  # type: ignore[no-untyped-def]
+    config = _config()
+    config["discovery"]["requeue_escalation_reasons"] = REQUEUE_REASONS
+    return discover_prs.discover([], [], list(entries), config, now, None)
+
+
+def _stuck(reason: str, number: int = 9551) -> list[dict[str, Any]]:
+    return [
+        _entry("approved", number, S("a")),
+        _ts(_entry("ingestion_requested", number, S("a"), attempt=1), "2026-10-20T04:30:00Z"),
+        _entry("escalated", number, S("a"), reason=reason),
+    ]
+
+
+@pytest.mark.parametrize("reason", REQUEUE_REASONS)
+def test_escalated_pair_with_handled_reason_is_requeued(reason: str) -> None:
+    """The 14 pairs escalated since 2026-10-19 get one more ingestion run."""
+    events, _queue, ingest, counts = _run_requeue(_stuck(reason))
+    assert ingest == [{"pr_number": 9551, "head_sha": S("a")}]
+    assert [e["event"] for e in events] == ["requeued", "ingestion_requested"]
+    assert events[0]["details"]["previous_reason"] == reason
+    assert counts["requeued"] == 1
+
+
+def test_requeue_happens_only_once_per_pair() -> None:
+    first, _q, _i, _c = _run_requeue(_stuck("partial_graduation"))
+    # The requeued run escalated again: no second requeue.
+    entries = _stuck("partial_graduation") + [
+        {**e, "ts": "2026-10-23T04:20:00Z"} for e in first
+    ] + [_entry("escalated", 9551, S("a"), reason="partial_graduation")]
+    events, _queue, ingest, counts = _run_requeue(entries, now=NOW.replace(month=11))
+    assert ingest == [] and events == []
+    assert counts["requeued"] == 0
+
+
+def test_lost_handoff_after_requeue_is_retried_from_the_requeue() -> None:
+    first, _q, _i, _c = _run_requeue(_stuck("cherry_pick_conflict"))
+    entries = _stuck("cherry_pick_conflict") + [
+        {**e, "ts": "2026-10-23T04:20:00Z"} for e in first
+    ]
+    events, _queue, ingest, _ = _run_requeue(entries, now=NOW.replace(month=11))
+    assert ingest == [{"pr_number": 9551, "head_sha": S("a")}]
+    assert [(e["event"], e["details"]["attempt"]) for e in events] == [
+        ("ingestion_requested", 2)
+    ]
+
+
+def test_other_reasons_and_unapproved_pairs_are_not_requeued() -> None:
+    for reason in ("resolution_rejected", "sha_smuggling_detected", "file_denylist"):
+        events, _q, ingest, _ = _run_requeue(_stuck(reason))
+        assert ingest == [] and events == [], reason
+    # Escalated at review (never approved).
+    events, _q, ingest, _ = _run_requeue(
+        [_entry("escalated", 7, S("a"), reason="partial_graduation")]
+    )
+    assert ingest == [] and events == []
+    # Off by default: no config list.
+    events, _q, ingest, _ = _run_ingest(_stuck("partial_graduation"))
+    assert ingest == [] and events == []
+
+
+def test_repo_config_requeues_the_handled_reasons() -> None:
+    config = yaml.safe_load(REPO_CONFIG.read_text())
+    assert config["discovery"]["requeue_escalation_reasons"] == REQUEUE_REASONS

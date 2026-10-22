@@ -13,7 +13,10 @@
 #      handoff to pr-ingestion.yml was lost: approved, no ingestion outcome
 #      event, last attempt over 6 hours ago. Each attempt is an
 #      `ingestion_requested` ledger event; after 3 the SHA is recorded as
-#      escalated. These events go into the same single commit as step 1.
+#      escalated. An approved pair escalated for a reason in
+#      discovery.requeue_escalation_reasons is sent again once, with a
+#      `requeued` event; check-approval.py accepts that pair again. These
+#      events go into the same single commit as step 1.
 #   4. Closes fork PRs (claude/cherry-pick-pr-<n>) whose upstream PR the
 #      ledger shows finished (tools/stale-ingestion-prs.py).
 name: PR Discovery

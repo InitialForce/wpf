@@ -141,6 +141,7 @@ _EMITTED_BY_TOOLS: dict[str, str] = {
     "resolution_approved": "record-resolution-verdict.py",  # pr-ingestion.yml
     "resolution_rejected": "record-resolution-verdict.py",
     "resolution_review_error": "record-resolution-verdict.py",
+    "requeued": "discover-prs.py",          # pr-discovery.yml
 }
 
 

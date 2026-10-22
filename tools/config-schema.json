@@ -273,7 +273,8 @@
         "merged_lookback_days": {"type": "integer", "minimum": 1},
         "open_query_limit": {"type": "integer", "minimum": 1},
         "merged_query_limit": {"type": "integer", "minimum": 1},
-        "max_reviews_per_run": {"type": "integer", "minimum": 0}
+        "max_reviews_per_run": {"type": "integer", "minimum": 0},
+        "requeue_escalation_reasons": {"type": "array", "items": {"type": "string", "pattern": "^[a-z_]+$"}}
       }
     },
     "claude_models": {
