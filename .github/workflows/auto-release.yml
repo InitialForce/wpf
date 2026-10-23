@@ -14,7 +14,9 @@
 #
 # Before it plans a new tag, it re-dispatches release.yml for the newest
 # release tag when that tag has no GitHub Release and no successful or running
-# Release run (a lost dispatch or a failed run), at most 3 runs per tag.
+# Release run (a lost dispatch or a failed run), at most 3 runs per tag. A
+# newer green commit supersedes an unpublished tag from an earlier day: then
+# it plans a new tag for that commit instead.
 #
 # Decision rules live in tools/release-version.py (`reconcile` and `plan`),
 # with tests.
@@ -119,14 +121,18 @@ jobs:
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.force) }}
         env:
           GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ steps.green.outputs.sha }}
         run: |
           set -euo pipefail
           gh run list --repo "$GITHUB_REPOSITORY" --workflow release.yml \
             --event workflow_dispatch --limit 200 \
             --json displayTitle,status,conclusion > "$RUNNER_TEMP/release-runs.json"
+          # A newer green commit supersedes an unpublished tag from an
+          # earlier day: plan tags it instead of re-running the old tree.
           python3 tools/release-version.py reconcile \
             --published-tags-file "$RUNNER_TEMP/published-tags.txt" \
-            --runs-file "$RUNNER_TEMP/release-runs.json" | tee -a "$GITHUB_OUTPUT"
+            --runs-file "$RUNNER_TEMP/release-runs.json" \
+            --target "$TARGET" | tee -a "$GITHUB_OUTPUT"
         shell: bash
 
       - name: Check the tag to re-dispatch

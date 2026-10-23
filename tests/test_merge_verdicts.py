@@ -489,6 +489,42 @@ def test_events_out_records_reviews_verdict_and_outcome(
     assert events[0]["details"]["run_url"] == "https://example/run/1"
 
 
+def test_approved_event_records_the_reviewed_merge_base(tmp_path: Path) -> None:
+    write_json(tmp_path / "r1.json", _safe_rv())
+    write_json(tmp_path / "meta.json", {"head_sha": HEAD_SHA, "merge_base": "e" * 40})
+    events_path = tmp_path / "events.jsonl"
+    merge_verdicts.main([  # type: ignore[attr-defined]
+        "--review-1", str(tmp_path / "r1.json"),
+        "--single-review",
+        "--meta", str(tmp_path / "meta.json"),
+        "--pr-number", str(PR_NUMBER),
+        "--head-sha", HEAD_SHA,
+        "--output", str(tmp_path / "out.json"),
+        "--events-out", str(events_path),
+        *policy_args(tmp_path),
+    ])
+    events = [json.loads(line) for line in events_path.read_text().splitlines()]
+    approved = next(e for e in events if e["event"] == "approved")
+    assert approved["details"]["merge_base"] == "e" * 40
+
+
+def test_meta_for_another_head_is_an_error(tmp_path: Path) -> None:
+    write_json(tmp_path / "r1.json", _safe_rv())
+    write_json(tmp_path / "meta.json", {"head_sha": "f" * 40, "merge_base": "e" * 40})
+    with pytest.raises(SystemExit) as exc:
+        merge_verdicts.main([  # type: ignore[attr-defined]
+            "--review-1", str(tmp_path / "r1.json"),
+            "--single-review",
+            "--meta", str(tmp_path / "meta.json"),
+            "--pr-number", str(PR_NUMBER),
+            "--head-sha", HEAD_SHA,
+            "--output", str(tmp_path / "out.json"),
+            "--events-out", str(tmp_path / "events.jsonl"),
+            *policy_args(tmp_path),
+        ])
+    assert exc.value.code == merge_verdicts.EXIT_ERROR  # type: ignore[attr-defined]
+
+
 def test_single_review_uses_review_1_only(tmp_path: Path) -> None:
     write_json(tmp_path / "r1.json", _safe_rv())
     events_path = tmp_path / "events.jsonl"

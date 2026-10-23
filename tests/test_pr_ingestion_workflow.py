@@ -52,6 +52,8 @@ EXPECTED_JOBS = {
     "resolve-conflicts",
     "finalize",
     "resolution-review",
+    "review-empty",
+    "record-superseded",
     "retry-resolution",
     "give-up-resolution",
     "open-pr",
@@ -79,6 +81,8 @@ PROCEED_GUARDED_JOBS = {
     "resolve-conflicts",
     "finalize",
     "resolution-review",
+    "review-empty",
+    "record-superseded",
     "retry-resolution",
     "give-up-resolution",
     "open-pr",
@@ -188,7 +192,9 @@ def test_all_jobs_present(workflow: dict) -> None:
     ("finalize", {"cherry-pick", "resolve-conflicts"}),
     ("resolution-review", {"cherry-pick", "finalize"}),
     ("retry-resolution", {"finalize", "resolution-review"}),
-    ("give-up-resolution", {"cherry-pick", "finalize", "resolution-review"}),
+    ("give-up-resolution", {"cherry-pick", "finalize", "resolution-review", "review-empty"}),
+    ("review-empty", {"cherry-pick", "finalize"}),
+    ("record-superseded", {"cherry-pick", "finalize", "review-empty"}),
     ("open-pr", {"cherry-pick", "finalize", "resolution-review"}),
 ])
 def test_needs_chain(workflow: dict, job_name: str, expected_needs: set) -> None:
@@ -353,7 +359,9 @@ def test_finish_runs_denylist_on_branch_diff_before_push() -> None:
 # Security: payload validation and no expressions in shell (items 3 and 6)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("job_name", sorted(EXPECTED_JOBS - {"gate", "resolution-review"}))
+@pytest.mark.parametrize(
+    "job_name", sorted(EXPECTED_JOBS - {"gate", "resolution-review", "review-empty"})
+)
 def test_every_job_validates_payload_first(workflow: dict, job_name: str) -> None:
     first = workflow["jobs"][job_name]["steps"][0]
     assert first["name"] == "Validate payload"
@@ -649,7 +657,7 @@ def test_the_last_rejection_closes_the_pr_and_escalates(workflow: dict) -> None:
     assert "needs.resolution-review.outputs.next_action == 'give_up'" in job["if"]
     steps = {s.get("name"): s for s in job["steps"]}
     close = steps["Close the PR and delete the branch"]["run"]
-    assert "gh pr close" in close
+    assert "close-ingestion-pr.sh" in close
     assert 'gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$BRANCH"' in close
     record = steps["Record escalated"]["run"]
     assert 'event: "escalated"' in record and 'reason: "resolution_rejected"' in record
@@ -664,3 +672,101 @@ def test_discovery_and_approval_stop_after_escalated() -> None:
     assert 'OUTCOME_EVENTS = {"approved", "rejected", "escalated"}' in approval
     discover = (REPO_ROOT / "tools" / "discover-prs.py").read_text()
     assert 'REVIEWED_EVENTS = frozenset(["merged_verdict", "escalated"])' in discover
+
+
+def test_partial_graduation_goes_on_to_the_cherry_pick(workflow: dict) -> None:
+    """Regression: a partial hunk match stopped the run for a human. Now only
+    'skip' ends the run in pre-flight; everything else is applied."""
+    steps = workflow["jobs"]["pre-flight"]["steps"]
+    for step in steps:
+        assert "escalate" not in str(step.get("if", ""))
+        assert "A human must decide" not in step.get("run", "")
+    check = next(s for s in steps if s.get("id") == "check")["run"]
+    assert '"$RC" -ne 2' not in check
+    smuggle_if = workflow["jobs"]["sha-smuggling-check"]["if"]
+    assert "needs.pre-flight.outputs.action == 'apply'" in smuggle_if
+
+
+def test_empty_result_records_how_it_was_found(workflow: dict) -> None:
+    steps = {s.get("name"): s for s in workflow["jobs"]["cherry-pick"]["steps"]}
+    record = steps["Record already-applied change"]
+    assert record["env"]["DETECTION"] == "${{ steps.apply.outputs.detection }}"
+    assert '[[ "$DETECTION" =~ ^[a-z_]+$ ]]' in record["run"]
+    assert 'echo "detection=' in steps["Apply upstream change"]["run"]
+
+
+def test_an_empty_resolution_is_reviewed_before_it_is_recorded(workflow: dict) -> None:
+    """Regression (#9222): an empty result failed `git cherry-pick --continue`
+    and wrote nothing. Review finding: recording it as superseded without a
+    review let the resolver drop an approved change on its own word. Now
+    finalize records nothing, review-empty has Fable check it (kind empty,
+    bound to the upstream head and the pinned if/main commit), and only an
+    approval records graduated_upstream."""
+    jobs = workflow["jobs"]
+    fin = {s.get("name"): s for s in jobs["finalize"]["steps"]}
+    overlay = fin["Recreate the conflict and apply the resolution"]["run"]
+    assert overlay.index("git diff --cached --quiet HEAD") < overlay.index(
+        "git cherry-pick --continue"
+    )
+    assert "empty=true" in overlay
+    assert jobs["finalize"]["outputs"]["empty"] == "${{ steps.overlay.outputs.empty }}"
+    for step in jobs["finalize"]["steps"]:
+        assert "graduated_upstream" not in step.get("run", "")
+    assert fin["Check the whole diff, add trailers and push"]["if"] == (
+        "steps.overlay.outputs.ok == 'true'"
+    )
+
+    review = jobs["review-empty"]
+    assert review["uses"] == "./.github/workflows/resolution-review.yml"
+    assert review["with"]["kind"] == "empty"
+    assert review["with"]["branch_sha"] == "${{ needs.cherry-pick.outputs.main_sha }}"
+    assert review["with"]["base_sha"] == "${{ needs.cherry-pick.outputs.main_sha }}"
+    assert "needs.finalize.outputs.empty == 'true'" in review["if"]
+
+    record = jobs["record-superseded"]
+    assert "needs.review-empty.outputs.next_action == 'approved'" in record["if"]
+    run = next(s["run"] for s in record["steps"] if "graduated_upstream" in s.get("run", ""))
+    assert 'reason: "fork_superseded"' in run and "base_sha: $base" in run
+
+    # Rejected: the same retry and give-up as any resolution, not terminal
+    # for the upstream PR (give-up escalates this head only).
+    assert "needs.review-empty.outputs.next_action == 'retry'" in jobs["retry-resolution"]["if"]
+    give_up = jobs["give-up-resolution"]
+    assert "needs.review-empty.outputs.next_action == 'give_up'" in give_up["if"]
+    assert "graduated_upstream" not in str(give_up)
+    record_escalated = next(s for s in give_up["steps"] if s.get("name") == "Record escalated")
+    assert "::notice::" in record_escalated["run"]
+
+
+def test_review_workflows_accept_kind_empty_only_on_the_base_commit() -> None:
+    for name in ("resolution-review.yml", "resolution-reviewer.yml"):
+        text = (REPO_ROOT / ".github" / "workflows" / name).read_text()
+        assert '[ "$KIND" = empty ] && [ "$BRANCH" = "claude/cherry-pick-pr-$PR_NUMBER" ]' in text
+        assert '[ "$BRANCH_SHA" = "$BASE_SHA" ]' in text
+    prompt = (REPO_ROOT / ".if-fork" / "prompts" / "resolution-review.md").read_text()
+    assert "## Kind empty" in prompt and '"already_in_fork"' in prompt
+
+
+def test_resolver_prompts_escalate_only_for_hard_fail_or_injection() -> None:
+    for name in ("cherry-pick.md", "resolve-rebase-conflict.md"):
+        text = (REPO_ROOT / ".if-fork" / "prompts" / name).read_text()
+        assert "max_hunk_count" not in text and "max_conflict_lines" not in text
+        assert "min_confidence" not in text
+        assert "never a reason to escalate" in text
+        assert "`hard_fail_pattern` or `suspected_injection`" in text
+
+
+def test_resolver_refusal_and_failure_get_different_reasons(workflow: dict) -> None:
+    """Review finding: an incomplete resolution (markers after both tries, a
+    missing file) was recorded like the resolver's own refusal, green and
+    terminal. Now it is resolution_incomplete, which ingestion-escalate.sh
+    fails red without a ledger event."""
+    steps = {s.get("name"): s for s in workflow["jobs"]["finalize"]["steps"]}
+    overlay = steps["Recreate the conflict and apply the resolution"]["run"]
+    assert "reason=resolver_refused" in overlay
+    assert "reason=resolution_incomplete" in overlay
+    assert "cherry_pick_conflict" not in overlay
+    escalate = (REPO_ROOT / "tools" / "ingestion-escalate.sh").read_text()
+    start = escalate.index("DESIGNED_REFUSALS=(")
+    designed = escalate[start:escalate.index("\n)\n", start)]
+    assert "resolver_refused" in designed and "resolution_incomplete" not in designed

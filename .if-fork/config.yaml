@@ -46,6 +46,15 @@ discovery:
   # Reviews dispatched per discovery run. Each review is two model calls, so
   # this caps daily review cost while the backlog drains.
   max_reviews_per_run: 10
+  # Escalation reasons the pipeline now handles on its own (partial match goes
+  # on to the cherry-pick, the resolver always resolves, an empty resolution
+  # is recorded as graduated). Discovery sends an approved pair escalated for
+  # one of these back to pr-ingestion once, with a `requeued` ledger event; the
+  # approval check accepts that pair again for the same head SHA.
+  requeue_escalation_reasons:
+    - partial_graduation
+    - cherry_pick_conflict
+    - ingestion_retries_exhausted
 
 # Upstream commits/PRs that must NEVER be cherry-picked back into the fork.
 # Each entry refuses both the listed upstream commit SHA and any further commit
@@ -154,10 +163,11 @@ human_gate_environments:
   branch_promotion: branch-promotion
   bot_credentials: bot-credentials
 
+# The conflict resolvers (prompts cherry-pick.md and resolve-rebase-conflict.md)
+# always attempt a resolution, whatever its size; they escalate only for a
+# hard-fail pattern or a suspected injection. The gates below decide whether
+# a resolution lands.
 conflict_resolution:
-  max_hunk_count: 3
-  max_conflict_lines: 80
-  min_confidence: 0.85
   pause_run_if_escalation_pct_exceeds: 30
   # The Fable review of a resolved cherry-pick (pr-ingestion.yml
   # review-resolution) must report at least this confidence before automerge
@@ -186,11 +196,13 @@ claude_models:
   # pr-review.yml reads review_1 and review_2 from here (owner decision: Fable).
   review_1: claude-fable-5-1
   review_2: claude-fable-5-1
-  cherry_pick: claude-sonnet-4-6
+  # The two conflict resolvers: pr-ingestion.yml reads cherry_pick and
+  # nightly-rebase.yml reads conflict_resolve.
+  cherry_pick: claude-sonnet-5-5
   # pr-ingestion.yml review-resolution: checks a conflict resolution Claude
   # wrote for a cherry-pick (owner decision: Fable).
   resolution_review: claude-fable-5-1
-  conflict_resolve: claude-sonnet-4-6
+  conflict_resolve: claude-sonnet-5-5
   release_notes: claude-sonnet-4-6
   failure_analysis: claude-sonnet-4-6
 
@@ -212,6 +224,9 @@ bot_identity:
   email: "wpf-bot@initialforce.com"
   github_app_id_secret: GH_APP_ID
   github_app_private_key_secret: GH_APP_PRIVATE_KEY
+  # The App's bot login (the actor of its dispatches). close-ingestion-pr.sh
+  # closes only PRs this login opened.
+  github_login: "initial-force-wpf-bot[bot]"
 
 autonomy_kill_switches:
   enabled_var: IF_AUTONOMY_ENABLED

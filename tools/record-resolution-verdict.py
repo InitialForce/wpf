@@ -85,7 +85,15 @@ resolution_approved. Every rebuild makes a new branch commit, so a count per
 commit would never stop. When the change reaches MAX_REVIEW_ERRORS (3) with
 no valid verdict, the next action is give_up even if an attempt is left.
 
-An empty diff to scan is a rejection, not an error.
+An empty diff to scan is a rejection, not an error, except for kind empty.
+
+Kind empty (pr-ingestion.yml): the resolver kept the fork's code in every
+conflict, so the cherry-pick changes nothing and no branch commit exists.
+--branch-sha is then the pinned if/main commit and --final-diff must be
+empty. The verdict must also carry upstream_intent "already_in_fork" or
+"obsolete": the reviewer confirmed that dropping the upstream change loses
+nothing. Approved, the caller records graduated_upstream (fork_superseded);
+rejected, it is an attempt like any other (retry or give_up).
 
 --failed-step NAME records a record job that failed before it decided: a
 resolution_review_error and a resolution_rejected event for the pair and the
@@ -118,7 +126,8 @@ EXIT_ERROR = 3
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 VALID_VERDICTS = frozenset(["approve", "reject"])
-KINDS = ("cherry-pick", "sync")
+KINDS = ("cherry-pick", "sync", "empty")
+EMPTY_INTENTS = frozenset(["already_in_fork", "obsolete"])
 DEFAULT_MAX_ATTEMPTS = 2
 DEFAULT_MAX_NOVEL_LINES = 50
 MAX_REVIEW_ERRORS = 3
@@ -177,9 +186,15 @@ def load_verdict(
     return obj, []
 
 
-def verdict_problems(verdict: dict[str, Any], threshold: float) -> list[str]:
+def verdict_problems(
+    verdict: dict[str, Any], threshold: float, kind: str = "cherry-pick"
+) -> list[str]:
     """Return why a verdict that passed the origin checks does not approve."""
     problems: list[str] = []
+    if kind == "empty" and verdict.get("upstream_intent") not in EMPTY_INTENTS:
+        problems.append(
+            "an empty resolution needs upstream_intent already_in_fork or obsolete"
+        )
     value = verdict.get("verdict")
     if value not in VALID_VERDICTS:
         problems.append("the verdict is neither approve nor reject")
@@ -400,6 +415,7 @@ def decide(
     errors: list[tuple[Try, list[str]]],
     hits: list[dict[str, str]],
     threshold: float,
+    kind: str = "cherry-pick",
 ) -> list[str]:
     """Return every reason the resolution is not approved; empty means approved."""
     reasons: list[str] = []
@@ -408,7 +424,7 @@ def decide(
             reasons += why
         reasons.append(f"no valid review verdict in {len(errors)} tries")
     else:
-        reasons += verdict_problems(verdict, threshold)
+        reasons += verdict_problems(verdict, threshold, kind)
     reasons += [f"hard-fail pattern in the final diff: {hit['pattern']}" for hit in hits]
     return reasons
 
@@ -484,6 +500,8 @@ def build_event(
         details["verdict"] = verdict.get("verdict")
         details["confidence"] = verdict.get("confidence")
         details["novel_lines_justified"] = verdict.get("novel_lines_justified")
+        if args.kind == "empty":
+            details["upstream_intent"] = verdict.get("upstream_intent")
         reasoning = verdict.get("reasoning")
         if isinstance(reasoning, str):
             details["reasoning"] = reasoning[:2000]
@@ -547,7 +565,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("--reviewer-id must not be empty")
     if args.kind == "sync" and args.pr_number != 0:
         parser.error("a sync resolution is recorded with --pr-number 0")
-    if args.kind == "cherry-pick" and args.pr_number <= 0:
+    if args.kind in ("cherry-pick", "empty") and args.pr_number <= 0:
         parser.error("a cherry-pick needs the upstream PR number")
     if not args.failed_step and args.final_diff is None:
         parser.error("--final-diff is required")
@@ -646,8 +664,11 @@ def main(argv: list[str] | None = None) -> int:
             novel_reasons = novel_cap_problems(novel, cap)
 
     hits = hard_fail_hits(diff_text, patterns, sync=args.kind == "sync")
-    reasons = decide(verdict, errors, hits, threshold) + novel_reasons
-    if not diff_text.strip():
+    reasons = decide(verdict, errors, hits, threshold, args.kind) + novel_reasons
+    if args.kind == "empty":
+        if diff_text.strip():
+            reasons.append("an empty resolution must have an empty diff")
+    elif not diff_text.strip():
         reasons.append("the diff to scan is empty")
     attempt = prior + 1
     change_errors = prior_errors + len(errors)

@@ -15,6 +15,12 @@
 #       resolution; anything else in the artifact is ignored. Fails when a
 #       resolved file is missing, is a symlink or still has conflict markers.
 #       Stages the result.
+#
+#   conflict-handoff.sh markers <conflicts.txt> <work dir> [<delete list>]
+#       Run in the agent job after Claude, from the work tree root. Prints
+#       each conflicted path that still exists, is not in <delete list> and
+#       still has conflict marker lines. The workflow uses it to give the
+#       agent one more try with that list. <work dir> is unused (".").
 set -euo pipefail
 
 mode="$1"; list="$2"; dir="$3"; delete_list="${4:-/dev/null}"
@@ -58,6 +64,15 @@ case "$mode" in
       echo "::error::Unmerged paths remain" >&2; exit 1
     fi
     ;;
+  markers)
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      grep -qxF -- "$f" "$delete_list" 2>/dev/null && continue
+      if [ -f "$f" ] && [ ! -L "$f" ] && grep -qE '^(<<<<<<<|=======|>>>>>>>)( |$)' -- "$f"; then
+        echo "$f"
+      fi
+    done < "$list"
+    ;;
   *)
-    echo "usage: $0 collect|apply <conflicts.txt> <dir>" >&2; exit 1 ;;
+    echo "usage: $0 collect|apply|markers <conflicts.txt> <dir>" >&2; exit 1 ;;
 esac

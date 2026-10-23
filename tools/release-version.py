@@ -35,7 +35,8 @@ Usage
       successful publish.
 
   python tools/release-version.py reconcile \\
-      --published-tags-file <file> --runs-file <json> [--today yyyymmdd]
+      --published-tags-file <file> --runs-file <json> [--target <sha>]
+      [--today yyyymmdd]
       Decide whether auto-release.yml must (re)dispatch release.yml for an
       existing tag before it plans a new one. Prints ``action=dispatch|wait|none``,
       ``tag=<tag>`` and ``reason=<text>`` lines. <json> is
@@ -47,6 +48,11 @@ unpublished tags are superseded by it):
   1. none if there is no release tag, it has a GitHub Release, or it is more
      than --max-age-days (default 7) old.
   2. wait if a Release run for it is queued or in progress.
+  2b. none if --target names a newer green commit that descends from the
+     tag's commit and the tag is from an earlier day. ``plan`` then tags that
+     commit instead. A release run builds the tag's own tree, so re-running
+     an old tag can never pick up a fix that landed after it (on 2026-10-20
+     and 10-21 the 10-19 tag was re-run while if/main had moved on).
   3. none if a Release run for it succeeded (it ran but did not publish, for
      example because the autonomy gate was off).
   4. none if --max-attempts (default 3) Release runs for it already failed.
@@ -159,6 +165,25 @@ def _src_changed(repo: Path, base: str, target: str) -> bool:
     return result.returncode == 1
 
 
+def _newer_commit(repo: Path, tag: ReleaseTag | None, target: str) -> str:
+    """Return target's full SHA when it is a strict descendant of tag's commit."""
+    if tag is None or not target:
+        return ""
+    target = _git("rev-parse", "--verify", f"{target}^{{commit}}", repo=repo).strip()
+    tagged = _git("rev-parse", "--verify", f"{tag.name}^{{commit}}", repo=repo).strip()
+    if target == tagged:
+        return ""
+    result = subprocess.run(
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", tagged, target],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode not in (0, 1):
+        raise RuntimeError(f"git merge-base failed: {result.stderr.strip()}")
+    return target if result.returncode == 0 else ""
+
+
 @dataclass(frozen=True)
 class Plan:
     release: bool
@@ -217,6 +242,7 @@ def reconcile(
     today: str,
     max_age_days: int,
     max_attempts: int,
+    superseded_by: str = "",
 ) -> Reconcile:
     newest = latest(tags)
     if newest is None:
@@ -236,6 +262,13 @@ def reconcile(
     mine = [r for r in runs if r.get("displayTitle") == f"Release {newest.name}"]
     if any(r.get("status") in ACTIVE_RUN_STATUSES for r in mine):
         return Reconcile("wait", newest.name, f"a Release run for {newest.name} is running")
+    if superseded_by and newest.date < today:
+        return Reconcile(
+            "none",
+            "",
+            f"{newest.name} is unpublished but superseded by green commit "
+            f"{superseded_by[:12]}; planning a new tag",
+        )
     if any(r.get("conclusion") == "success" for r in mine):
         return Reconcile(
             "none", "", f"a Release run for {newest.name} succeeded without publishing"
@@ -277,6 +310,7 @@ def main(argv: list[str] | None = None) -> int:
     p_rec = sub.add_parser("reconcile", help="re-dispatch an unpublished release tag")
     p_rec.add_argument("--published-tags-file", type=Path, required=True)
     p_rec.add_argument("--runs-file", type=Path, required=True)
+    p_rec.add_argument("--target", default="", help="newest green if/main commit")
     p_rec.add_argument("--today", help="UTC date as yyyymmdd (default: today)")
     p_rec.add_argument("--max-age-days", type=int, default=7)
     p_rec.add_argument("--max-attempts", type=int, default=3)
@@ -301,13 +335,15 @@ def main(argv: list[str] | None = None) -> int:
             runs = json.loads(args.runs_file.read_text() or "[]")
             if not isinstance(runs, list) or not all(isinstance(r, dict) for r in runs):
                 raise ValueError("--runs-file must hold a JSON list of runs")
+            tags = _release_tags(args.repo)
             rec = reconcile(
-                tags=_release_tags(args.repo),
+                tags=tags,
                 published=published,
                 runs=runs,
                 today=today,
                 max_age_days=args.max_age_days,
                 max_attempts=args.max_attempts,
+                superseded_by=_newer_commit(args.repo, latest(tags), args.target),
             )
             print(f"action={rec.action}")
             print(f"tag={rec.tag}")

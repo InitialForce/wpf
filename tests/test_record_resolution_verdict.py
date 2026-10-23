@@ -45,6 +45,7 @@ def _run(
     config: Path = CONFIG,
     novel: dict[str, Any] | None = None,
     novel_sha256: str | None = None,
+    kind: str = "cherry-pick",
 ) -> tuple[int, dict[str, Any], dict[str, Any] | None]:
     vpath = tmp_path / "resolution.json"
     if verdict is not None:
@@ -59,7 +60,8 @@ def _run(
         novel_sha256 = hashlib.sha256(npath.read_bytes()).hexdigest()
     out, events = tmp_path / "decision.json", tmp_path / "events.jsonl"
     r = subprocess.run(
-        [sys.executable, str(TOOL), "--verdict", str(vpath), "--reviewer-id", reviewer_id,
+        [sys.executable, str(TOOL), "--kind", kind,
+         "--verdict", str(vpath), "--reviewer-id", reviewer_id,
          "--verdict-sha256", sha256 or "", "--upload", upload, "--config", str(config),
          "--final-diff", str(tmp_path / "final.diff"),
          "--novel-lines", str(npath), "--novel-sha256", novel_sha256,
@@ -602,3 +604,50 @@ def test_cherry_pick_scan_rejects_any_removed_hard_fail_line(tmp_path: Path) -> 
     rc, decision, _ = _run(tmp_path, _verdict(), diff=diff)
     assert rc == 1
     assert decision["reasons"] == ["hard-fail pattern in the final diff: Demand\\(\\)"]
+
+
+# ---------------------------------------------------------------------------
+# Kind empty: the resolver kept the fork everywhere (review finding: an empty
+# resolution must be reviewed before it is recorded as superseded)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("intent", ["already_in_fork", "obsolete"])
+def test_empty_resolution_approved_with_a_confirmed_intent(tmp_path: Path, intent: str) -> None:
+    rc, decision, event = _run(
+        tmp_path, _verdict(upstream_intent=intent), diff="", kind="empty",
+        novel={"novel_count": 0, "dropped_count": 0},
+    )
+    assert rc == 0, decision
+    assert event is not None and event["event"] == "resolution_approved"
+    assert event["head_sha"] == HEAD and event["details"]["branch_sha"] == BRANCH_SHA
+    assert event["details"]["kind"] == "empty"
+    assert event["details"]["upstream_intent"] == intent
+
+
+@pytest.mark.parametrize("intent", [None, "", "not_needed", True])
+def test_empty_resolution_without_a_confirmed_intent_is_rejected(
+    tmp_path: Path, intent: Any
+) -> None:
+    verdict = _verdict() if intent is None else _verdict(upstream_intent=intent)
+    rc, decision, event = _run(tmp_path, verdict, diff="", kind="empty",
+                               novel={"novel_count": 0, "dropped_count": 0})
+    assert rc == 1
+    assert any("upstream_intent" in r for r in decision["reasons"])
+    assert event is not None and event["event"] == "resolution_rejected"
+    assert decision["next_action"] == "retry"
+
+
+def test_empty_resolution_with_a_diff_is_rejected(tmp_path: Path) -> None:
+    rc, decision, _ = _run(tmp_path, _verdict(upstream_intent="already_in_fork"),
+                           kind="empty")
+    assert rc == 1
+    assert "an empty resolution must have an empty diff" in decision["reasons"]
+
+
+def test_empty_resolution_rejected_by_the_reviewer(tmp_path: Path) -> None:
+    rc, decision, _ = _run(
+        tmp_path, _verdict(verdict="reject", upstream_intent="already_in_fork"),
+        diff="", kind="empty", novel={"novel_count": 0, "dropped_count": 0},
+    )
+    assert rc == 1 and "the reviewer rejected the resolution" in decision["reasons"]

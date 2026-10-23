@@ -135,6 +135,30 @@ def test_apply_refuses_conflict_markers(
     assert "Conflict markers" in r.stderr
 
 
+def test_markers_lists_files_the_agent_left_unresolved(
+    conflicted: Path, git_env: dict[str, str], tmp_path: Path
+) -> None:
+    """The workflow gives the agent a second try with this list (#9551 and
+    #9431 ended with markers left and no escalation file)."""
+    lst = tmp_path / "conflicts.txt"
+    # a.txt still has the markers git wrote; gone.txt is a modify/delete
+    # conflict with the theirs version in the tree and no markers.
+    r = handoff("markers", conflicted, git_env, lst, Path("."))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == ["a.txt"]
+    (conflicted / "a.txt").write_text("resolved\n")
+    assert handoff("markers", conflicted, git_env, lst, Path(".")).stdout == ""
+    # A path the agent asked to delete is not reported.
+    (conflicted / "a.txt").write_text("<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> t\n")
+    delete_list = tmp_path / "delete.txt"
+    delete_list.write_text("a.txt\n")
+    r = subprocess.run(
+        ["bash", str(HANDOFF), "markers", str(lst), ".", str(delete_list)],
+        cwd=conflicted, env=git_env, capture_output=True, text=True,
+    )
+    assert r.returncode == 0 and r.stdout == ""
+
+
 def test_apply_refuses_symlink(conflicted: Path, git_env: dict[str, str], tmp_path: Path) -> None:
     out = tmp_path / "res"
     (out / "files").mkdir(parents=True)

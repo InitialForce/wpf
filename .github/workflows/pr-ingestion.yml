@@ -42,7 +42,7 @@
 #     resolution made on an older tree. automerge.yml rebuilds the PR when
 #     if/main has moved.
 #
-# Flow: gate -> pre-flight (already in the fork?) -> approval check (the
+# Flow: gate -> pre-flight (already in the fork? a partial match goes on) -> approval check (the
 # exact pair must be approved in the ledger) -> cherry-pick (deterministic) ->
 # [resolve-conflicts -> finalize -> resolution-review -> retry or give up]
 # -> open or reuse the PR to if/main.
@@ -134,11 +134,12 @@ jobs:
           gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
           gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
 
+      # A partial match continues to the cherry-pick: the PR is usually in the
+      # fork with one hunk edited later, and git decides (empty, clean or a
+      # conflict for the resolver and its review).
       - name: Run cherry-pick-pre-flight.sh
         id: check
         run: |
-          # The script exits 2 on partial graduation; capture it instead of
-          # letting bash -e end the step before the action is recorded.
           set +e
           RESULT=$(bash tools/cherry-pick-pre-flight.sh \
             --pr-number "$PR_NUMBER" \
@@ -148,7 +149,7 @@ jobs:
           RC=$?
           set -e
           echo "$RESULT"
-          if [ "$RC" -ne 0 ] && [ "$RC" -ne 2 ]; then
+          if [ "$RC" -ne 0 ]; then
             echo "::error::Pre-flight failed (exit $RC)."
             exit 1
           fi
@@ -161,14 +162,10 @@ jobs:
       - name: Handle graduated (nothing to do)
         if: steps.check.outputs.action == 'skip'
         run: |
+          bash tools/close-ingestion-pr.sh "$PR_NUMBER" "it is already in the fork (graduated_upstream)"
           echo "::notice::Upstream PR #$PR_NUMBER is already in the fork. Nothing to do."
-
-      - name: Handle partial graduation — stop for a human
-        if: steps.check.outputs.action == 'escalate'
-        run: |
-          # The pre-flight script already recorded an 'escalated' ledger event.
-          echo "::error::Upstream PR #$PR_NUMBER is partly in the fork already. A human must decide what to apply."
-          exit 1
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
   # -------------------------------------------------------------------------
   # Job 3: approval check — the exact (pr_number, head_sha) must be approved
@@ -230,6 +227,7 @@ jobs:
               --actor pr-ingestion \
               --details-json '{"reason": "sha_smuggling_detected", "cause": "no_approved_verdict_for_head"}' \
               --push
+            bash tools/close-ingestion-pr.sh "$PR_NUMBER" "escalated (sha_smuggling_detected)"
             exit 1
           fi
 
@@ -251,6 +249,10 @@ jobs:
       main_sha: ${{ steps.base.outputs.sha }}
       title: ${{ steps.apply.outputs.title }}
       result: ${{ steps.apply.outputs.result }}
+      source: ${{ steps.apply.outputs.source }}
+      source_kind: ${{ steps.apply.outputs.source_kind }}
+      approved_base: ${{ steps.apply.outputs.approved_base }}
+      approved_base_source: ${{ steps.apply.outputs.approved_base_source }}
       conflicts_allowed: ${{ steps.conflict-denylist.outputs.allowed }}
       pushed: ${{ steps.finish.outputs.pushed }}
 
@@ -317,6 +319,11 @@ jobs:
             echo "result=$(cat "$OUT/result")"
             echo "title=$(cat "$OUT/title" 2>/dev/null)"
             echo "reason=$(cat "$OUT/reason" 2>/dev/null)"
+            echo "detection=$(cat "$OUT/detection" 2>/dev/null)"
+            echo "source=$(cat "$OUT/source" 2>/dev/null)"
+            echo "source_kind=$(cat "$OUT/source_kind" 2>/dev/null)"
+            echo "approved_base=$(cat "$OUT/approved_base" 2>/dev/null)"
+            echo "approved_base_source=$(cat "$OUT/approved_base_source" 2>/dev/null)"
           } >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ github.token }}
@@ -355,15 +362,28 @@ jobs:
       - name: Record already-applied change
         if: steps.apply.outputs.result == 'empty'
         run: |
+          [[ "$DETECTION" =~ ^[a-z_]+$ ]] || DETECTION=empty_cherry_pick
           git checkout -q -B if/main origin/if/main
+          DETAILS=$(jq -cn --arg d "$DETECTION" --arg s "$SOURCE" --arg k "$SOURCE_KIND" \
+            --arg ab "$APPROVED_BASE" --arg abs "$APPROVED_BASE_SOURCE" \
+            '{detection_method: $d, source: $s, source_kind: $k,
+              approved_base: $ab, approved_base_source: $abs}')
           python "$TRUSTED/tools/ledger-event.py" \
             --event graduated_upstream \
             --pr-number "$PR_NUMBER" \
             --head-sha "$PINNED_HEAD_SHA" \
             --actor pr-ingestion \
-            --details-json '{"detection_method":"empty_cherry_pick"}' \
+            --details-json "$DETAILS" \
             --push
+          bash "$TRUSTED/tools/close-ingestion-pr.sh" "$PR_NUMBER" "it is already in the fork (graduated_upstream, $DETECTION)"
+          echo "::notice::Upstream PR #$PR_NUMBER is already in the fork ($DETECTION). Nothing to do."
         env:
+          DETECTION: ${{ steps.apply.outputs.detection }}
+          SOURCE: ${{ steps.apply.outputs.source }}
+          SOURCE_KIND: ${{ steps.apply.outputs.source_kind }}
+          APPROVED_BASE: ${{ steps.apply.outputs.approved_base }}
+          APPROVED_BASE_SOURCE: ${{ steps.apply.outputs.approved_base_source }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TRUSTED: ${{ github.workspace }}/trusted
 
       - name: Escalate when the change could not be applied
@@ -378,6 +398,7 @@ jobs:
         env:
           APPLY_REASON: ${{ steps.apply.outputs.reason }}
           FINISH_REASON: ${{ steps.finish.outputs.reason }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TRUSTED: ${{ github.workspace }}/trusted
 
   # -------------------------------------------------------------------------
@@ -420,6 +441,22 @@ jobs:
       - name: Install Python dependencies
         run: pip install pyyaml
 
+      # Read before the cherry-pick touches the tree: model and prompt come
+      # from the pinned if/main commit, never from the upstream change.
+      - name: Read the resolver model and prompt
+        id: setup
+        run: |
+          MODEL=$(python3 -c "import yaml; print(yaml.safe_load(open('.if-fork/config.yaml'))['claude_models']['cherry_pick'])")
+          [[ "$MODEL" =~ ^claude-[a-z0-9.-]+$ ]] || { echo "::error::Bad claude_models.cherry_pick: $MODEL"; exit 1; }
+          echo "model=$MODEL" >> "$GITHUB_OUTPUT"
+          cp .if-fork/prompts/cherry-pick.md "$RUNNER_TEMP/resolver-prompt.md"
+          {
+            echo 'prompt<<__EOF_PROMPT__'
+            cat "$RUNNER_TEMP/resolver-prompt.md"
+            echo
+            echo '__EOF_PROMPT__'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Recreate the conflicted cherry-pick
         run: |
           # Copy the scripts out first: the cherry-pick and the agent change the tree.
@@ -454,22 +491,16 @@ jobs:
             *) exit "$RC" ;;
           esac
 
-      - name: Load cherry-pick conflict prompt
-        id: load-prompt-pick
-        run: |
-          {
-            echo 'prompt<<__EOF_PROMPT__'
-            cat .if-fork/prompts/cherry-pick.md
-            echo
-            echo '__EOF_PROMPT__'
-          } >> "$GITHUB_OUTPUT"
-
       # Trusted settings only: --setting-sources user skips the tree's
       # .claude/ and CLAUDE.md, --strict-mcp-config skips its .mcp.json, and
       # disableAllHooks turns hooks off. The deny rules keep the process
       # environment (/proc) and the runner's command files (_temp) out of
       # reach; a double slash is an absolute path in a permission rule.
-      - name: Resolve conflicts (Claude Sonnet)
+      # show_full_output logs the agent's tool calls. This job holds no
+      # secret the agent can read (no shell, no /proc, no _temp; the API key
+      # is masked), so the log is safe and makes a failed resolution
+      # debuggable.
+      - name: Resolve conflicts (Claude)
         id: pick
         if: steps.prepare.outputs.run == 'true'
         continue-on-error: true
@@ -477,11 +508,62 @@ jobs:
         with:
           allowed_bots: initial-force-wpf-bot
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: ${{ steps.load-prompt-pick.outputs.prompt }}
+          prompt: ${{ steps.setup.outputs.prompt }}
           settings: '{"disableAllHooks": true}'
+          show_full_output: true
           claude_args: >-
             --max-turns 30
-            --model claude-sonnet-4-6
+            --model ${{ steps.setup.outputs.model }}
+            --setting-sources user
+            --strict-mcp-config
+            --allowedTools "${{ steps.prepare.outputs.allowed }}"
+            --disallowedTools "Bash,WebFetch,WebSearch,NotebookEdit,Task,Read(//proc/**),Read(/proc/**),Read(//home/runner/work/_temp/**),Read(/home/runner/work/_temp/**),Edit(//home/runner/work/_temp/**),mcp__github__push_files,mcp__github__create_pull_request"
+          github_token: ${{ github.token }}
+        env:
+          CONFIG_PATH: .if-fork/config.yaml
+          RESOLVER_INPUT: .resolver-input
+          ESCALATION_ISSUE_PATH: ${{ github.workspace }}/.escalation.md
+
+      # #9551 and #9431: the agent ended "success" with markers left and no
+      # escalation file. Give it one more run with the list of those files.
+      - name: Find conflicts the agent left
+        id: left
+        if: steps.prepare.outputs.run == 'true'
+        run: |
+          LEFT=$(bash "$RUNNER_TEMP/conflict-handoff.sh" markers "$RUNNER_TEMP/apply/conflicts.txt" . .resolver-delete.txt)
+          if [ -z "$LEFT" ] || [ -f .escalation.md ]; then
+            echo "retry=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "::warning::Conflict markers remain after the first run: $(echo "$LEFT" | tr '\n' ' ')"
+          {
+            echo "retry=true"
+            echo 'prompt<<__EOF_PROMPT__'
+            cat "$RUNNER_TEMP/resolver-prompt.md"
+            echo
+            echo "## Second try"
+            echo
+            echo "Your first run ended without an escalation file, but these files still hold conflict marker lines:"
+            echo
+            echo "$LEFT" | sed 's/^/- /'
+            echo
+            echo "The workflow takes only the files in the work tree, so every region from \`<<<<<<<\` to \`>>>>>>>\` must be replaced in the file itself. Keeping one side is also an edit. Read each file again. For each region make one Edit whose old_string is the whole region, markers included, and whose new_string is the resolved code: the kept side's lines, or nothing when that side is empty. Then Grep each file for the regex ^(<<<<<<<|=======|>>>>>>>) and fix every hit."
+            echo '__EOF_PROMPT__'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve conflicts again (Claude, second try)
+        id: pick-again
+        if: steps.left.outputs.retry == 'true'
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          allowed_bots: initial-force-wpf-bot
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: ${{ steps.left.outputs.prompt }}
+          settings: '{"disableAllHooks": true}'
+          show_full_output: true
+          claude_args: >-
+            --max-turns 30
+            --model ${{ steps.setup.outputs.model }}
             --setting-sources user
             --strict-mcp-config
             --allowedTools "${{ steps.prepare.outputs.allowed }}"
@@ -530,6 +612,9 @@ jobs:
       # Conflicted paths, space-separated. prepare-resolver.sh already refused
       # any path with characters outside A-Z a-z 0-9 . _ / + -.
       conflict_files: ${{ steps.overlay.outputs.conflicts }}
+      # true when the resolution kept the fork everywhere (nothing to push):
+      # review-empty then has Fable check that before anything is recorded.
+      empty: ${{ steps.overlay.outputs.empty }}
 
     steps:
       - name: Validate payload
@@ -592,12 +677,28 @@ jobs:
           if [ "$(cat "$OUT/result")" != conflict ]; then
             echo "reason=reapply_mismatch" >> "$GITHUB_OUTPUT"; exit 0
           fi
+          # A designed refusal: the resolver's escalation file (hard-fail
+          # pattern or suspected injection) or prepare-resolver.sh's refusal.
           if [ -s "$RUNNER_TEMP/resolution/escalation.md" ]; then
             cat "$RUNNER_TEMP/resolution/escalation.md"
-            echo "reason=cherry_pick_conflict" >> "$GITHUB_OUTPUT"; exit 0
+            echo "reason=resolver_refused" >> "$GITHUB_OUTPUT"; exit 0
           fi
+          # A failure, not a refusal: markers left after both tries (for
+          # example the API failed twice), or a missing or invalid file. It
+          # fails the run and records nothing, so the pair stays retryable.
           if ! bash "$TRUSTED/tools/conflict-handoff.sh" apply "$OUT/conflicts.txt" "$RUNNER_TEMP/resolution"; then
-            echo "reason=cherry_pick_conflict" >> "$GITHUB_OUTPUT"; exit 0
+            echo "reason=resolution_incomplete" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          # The resolver kept the fork's version everywhere. Nothing to push,
+          # and nothing is recorded here: review-empty has Fable confirm that
+          # the upstream change is already in the fork or obsolete.
+          if git diff --cached --quiet HEAD; then
+            git cherry-pick --abort
+            {
+              echo "empty=true"
+              echo "conflicts=$(tr '\n' ' ' < "$OUT/conflicts.txt")"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           GIT_EDITOR=true git cherry-pick --continue
           {
@@ -632,6 +733,7 @@ jobs:
         env:
           OVERLAY_REASON: ${{ steps.overlay.outputs.reason }}
           FINISH_REASON: ${{ steps.finish.outputs.reason }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TRUSTED: ${{ github.workspace }}/trusted
 
   # -------------------------------------------------------------------------
@@ -657,6 +759,106 @@ jobs:
       conflict_files: ${{ needs.finalize.outputs.conflict_files }}
 
   # -------------------------------------------------------------------------
+  # Job 7b: review-empty. The resolver kept the fork everywhere, so the
+  # cherry-pick is empty. Recording that as superseded would drop an
+  # approved upstream change on the resolver's word alone, so Fable reviews
+  # it (kind empty: branch_sha is the pinned if/main commit, and the verdict
+  # must say the upstream intent is already in the fork or obsolete). The
+  # verdict is bound to the upstream head and that if/main commit. Approved:
+  # record-superseded. Rejected: retry-resolution or give-up-resolution, as
+  # for any resolution.
+  # -------------------------------------------------------------------------
+  review-empty:
+    name: Resolution review (empty resolution)
+    needs: [gate, cherry-pick, finalize]
+    if: needs.gate.outputs.proceed == 'true' && needs.finalize.outputs.empty == 'true'
+    uses: ./.github/workflows/resolution-review.yml
+    secrets: inherit
+    with:
+      kind: empty
+      pr_number: ${{ inputs.pr_number || github.event.client_payload.pr_number }}
+      upstream_sha: ${{ inputs.head_sha || github.event.client_payload.head_sha }}
+      base_sha: ${{ needs.cherry-pick.outputs.main_sha }}
+      branch_sha: ${{ needs.cherry-pick.outputs.main_sha }}
+      branch: ${{ needs.cherry-pick.outputs.branch }}
+      conflict_files: ${{ needs.finalize.outputs.conflict_files }}
+
+  # -------------------------------------------------------------------------
+  # Job 7c: record-superseded. Fable approved the empty resolution: record
+  # graduated_upstream (reason fork_superseded) for this upstream head and
+  # if/main commit, and close any open fork PR for it.
+  # -------------------------------------------------------------------------
+  record-superseded:
+    name: Record the change as superseded by the fork
+    needs: [gate, cherry-pick, finalize, review-empty]
+    if: >-
+      always() && needs.gate.outputs.proceed == 'true' &&
+      needs.finalize.outputs.empty == 'true' &&
+      needs.review-empty.outputs.next_action == 'approved'
+    runs-on: ubuntu-latest
+    environment: bot-credentials
+    env:
+      BASE_SHA: ${{ needs.cherry-pick.outputs.main_sha }}
+
+    steps:
+      - name: Validate payload
+        run: |
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] && [[ "$PINNED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            && [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::Invalid pr_number, head_sha or if/main SHA"; exit 1; }
+
+      - name: Generate GH App token
+        id: app-token
+        uses: tibdex/github-app-token@v2
+        with:
+          app_id: ${{ secrets.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          ref: if/main
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Import bot GPG key
+        uses: ./.github/actions/import-bot-gpg
+        with:
+          gpg-private-key: ${{ secrets.GH_BOT_GPG_KEY }}
+          gpg-key-id: ${{ secrets.GH_BOT_GPG_KEY_ID }}
+          gpg-fingerprint: ${{ secrets.GH_BOT_GPG_FINGERPRINT }}
+
+      - name: Record graduated_upstream (fork_superseded)
+        run: |
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          jq -n --argjson pr "$PR_NUMBER" --arg sha "$PINNED_HEAD_SHA" --arg base "$BASE_SHA" \
+            --arg attempt "$ATTEMPT" --arg run "$RUN_URL" \
+            --arg source "$SOURCE" --arg kind "$SOURCE_KIND" \
+            --arg ab "$APPROVED_BASE" --arg abs "$APPROVED_BASE_SOURCE" \
+            '{event: "graduated_upstream", pr_number: $pr, head_sha: $sha,
+              details: {detection_method: "empty_resolution", reason: "fork_superseded",
+                        base_sha: $base, review_attempt: $attempt, run_url: $run,
+                        source: $source, source_kind: $kind,
+                        approved_base: $ab, approved_base_source: $abs}}' \
+            > "$RUNNER_TEMP/events.jsonl"
+          python tools/ledger-event.py --events-file "$RUNNER_TEMP/events.jsonl" \
+            --actor pr-ingestion --push
+          bash tools/close-ingestion-pr.sh "$PR_NUMBER" "the reviewed resolution keeps the fork's code everywhere (graduated_upstream, fork_superseded)"
+          echo "::notice::Upstream PR #$PR_NUMBER: Fable confirmed the fork already has it or it no longer applies. Recorded as superseded; no PR."
+        env:
+          GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
+          GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ATTEMPT: ${{ needs.review-empty.outputs.attempt }}
+          SOURCE: ${{ needs.cherry-pick.outputs.source }}
+          SOURCE_KIND: ${{ needs.cherry-pick.outputs.source_kind }}
+          APPROVED_BASE: ${{ needs.cherry-pick.outputs.approved_base }}
+          APPROVED_BASE_SOURCE: ${{ needs.cherry-pick.outputs.approved_base_source }}
+
+  # -------------------------------------------------------------------------
   # Job 8: retry-resolution. The review rejected the resolution and an
   # attempt is left: ask for a fresh ingestion run, which resolves the
   # conflict again from scratch in new jobs and reviews the new commit. The
@@ -664,11 +866,13 @@ jobs:
   # -------------------------------------------------------------------------
   retry-resolution:
     name: Resolve again from scratch
-    needs: [gate, finalize, resolution-review]
+    needs: [gate, finalize, resolution-review, review-empty]
     if: >-
       always() && needs.gate.outputs.proceed == 'true' &&
-      needs.finalize.outputs.pushed == 'true' &&
-      needs.resolution-review.outputs.next_action == 'retry'
+      ((needs.finalize.outputs.pushed == 'true' &&
+        needs.resolution-review.outputs.next_action == 'retry') ||
+       (needs.finalize.outputs.empty == 'true' &&
+        needs.review-empty.outputs.next_action == 'retry'))
     runs-on: ubuntu-latest
     environment: bot-credentials
 
@@ -694,8 +898,8 @@ jobs:
           echo "::notice::Resolution attempt $ATTEMPT was rejected ($REASON). A fresh run resolves upstream #$PR_NUMBER again."
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          ATTEMPT: ${{ needs.resolution-review.outputs.attempt }}
-          REASON: ${{ needs.resolution-review.outputs.reason }}
+          ATTEMPT: ${{ needs.resolution-review.outputs.attempt || needs.review-empty.outputs.attempt }}
+          REASON: ${{ needs.resolution-review.outputs.reason || needs.review-empty.outputs.reason }}
 
   # -------------------------------------------------------------------------
   # Job 9: give-up-resolution. The last attempt was rejected too: close the
@@ -704,11 +908,13 @@ jobs:
   # -------------------------------------------------------------------------
   give-up-resolution:
     name: Give up on this change
-    needs: [gate, cherry-pick, finalize, resolution-review]
+    needs: [gate, cherry-pick, finalize, resolution-review, review-empty]
     if: >-
       always() && needs.gate.outputs.proceed == 'true' &&
-      needs.finalize.outputs.pushed == 'true' &&
-      needs.resolution-review.outputs.next_action == 'give_up'
+      ((needs.finalize.outputs.pushed == 'true' &&
+        needs.resolution-review.outputs.next_action == 'give_up') ||
+       (needs.finalize.outputs.empty == 'true' &&
+        needs.review-empty.outputs.next_action == 'give_up'))
     runs-on: ubuntu-latest
     environment: bot-credentials
     env:
@@ -749,17 +955,13 @@ jobs:
         run: |
           set -euo pipefail
           RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          PR_NUM=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --head "$BRANCH" \
-                     --base if/main --json number --jq '.[0].number // empty')
-          if [ -n "$PR_NUM" ]; then
-            gh pr close "$PR_NUM" --repo "$GITHUB_REPOSITORY" --comment "The resolution review rejected Claude's conflict resolution $ATTEMPT times ($REASON). The pipeline gave up on upstream #$PR_NUMBER at \`$PINNED_HEAD_SHA\` and recorded it as escalated. Run: $RUN_URL"
-          fi
+          bash tools/close-ingestion-pr.sh "$PR_NUMBER" "the resolution review rejected Claude's conflict resolution $ATTEMPT times ($REASON); gave up on head $PINNED_HEAD_SHA"
           gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$BRANCH" \
-            || echo "::warning::Could not delete $BRANCH (already gone?)."
+            || echo "::notice::No branch $BRANCH to delete."
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          ATTEMPT: ${{ needs.resolution-review.outputs.attempt }}
-          REASON: ${{ needs.resolution-review.outputs.reason }}
+          ATTEMPT: ${{ needs.resolution-review.outputs.attempt || needs.review-empty.outputs.attempt }}
+          REASON: ${{ needs.resolution-review.outputs.reason || needs.review-empty.outputs.reason }}
 
       - name: Record escalated
         run: |
@@ -771,13 +973,13 @@ jobs:
                         last_reasons: $why, run_url: $run}}' > "$RUNNER_TEMP/events.jsonl"
           python tools/ledger-event.py --events-file "$RUNNER_TEMP/events.jsonl" \
             --actor pr-ingestion --push
-          echo "::warning::Upstream #$PR_NUMBER at $PINNED_HEAD_SHA: resolution rejected $ATTEMPT times. Escalated and closed."
+          echo "::notice::Upstream #$PR_NUMBER at $PINNED_HEAD_SHA: resolution rejected $ATTEMPT times. Escalated for this head only; a new upstream head is reviewed again."
         env:
           GIT_AUTHOR_NAME: "Claude (Initial Force WPF Bot)"
           GIT_AUTHOR_EMAIL: "wpf-bot@initialforce.com"
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          ATTEMPT: ${{ needs.resolution-review.outputs.attempt }}
-          REASON: ${{ needs.resolution-review.outputs.reason }}
+          ATTEMPT: ${{ needs.resolution-review.outputs.attempt || needs.review-empty.outputs.attempt }}
+          REASON: ${{ needs.resolution-review.outputs.reason || needs.review-empty.outputs.reason }}
 
   # -------------------------------------------------------------------------
   # Job 10: open-pr — open (or reuse) the PR to if/main, emit ledger event
@@ -878,13 +1080,26 @@ jobs:
 
       - name: Emit cherry_picked ledger event
         run: |
+          # source_kind says what was applied: the upstream merge commit (its
+          # diff is byte for byte the approved diff) or the approved diff itself.
+          # approved_base_source "recomputed" notes an older approval that
+          # recorded no merge base.
+          DETAILS=$(jq -cn --arg pr "$INTERNAL_PR" --arg b "$BRANCH" \
+            --arg s "$SOURCE" --arg k "$SOURCE_KIND" \
+            --arg ab "$APPROVED_BASE" --arg abs "$APPROVED_BASE_SOURCE" \
+            '{internal_pr: $pr, branch: $b, source: $s, source_kind: $k,
+              approved_base: $ab, approved_base_source: $abs}')
           python tools/ledger-event.py \
             --event cherry_picked \
             --pr-number "$PR_NUMBER" \
             --head-sha "$PINNED_HEAD_SHA" \
             --actor pr-ingestion \
-            --details-json "{\"internal_pr\": \"$INTERNAL_PR\", \"branch\": \"$BRANCH\"}" \
+            --details-json "$DETAILS" \
             --push
         env:
           INTERNAL_PR: ${{ steps.open-pr.outputs.pr_number }}
           BRANCH: ${{ needs.cherry-pick.outputs.branch }}
+          SOURCE: ${{ needs.cherry-pick.outputs.source }}
+          SOURCE_KIND: ${{ needs.cherry-pick.outputs.source_kind }}
+          APPROVED_BASE: ${{ needs.cherry-pick.outputs.approved_base }}
+          APPROVED_BASE_SOURCE: ${{ needs.cherry-pick.outputs.approved_base_source }}

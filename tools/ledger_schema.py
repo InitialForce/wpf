@@ -56,5 +56,9 @@ VALID_EVENTS: frozenset[str] = frozenset(
         # emitted by the same job for each review try that left no valid
         # verdict; not an outcome and not a resolution attempt
         "resolution_review_error",
+        # emitted by pr-discovery when it sends an escalated, approved pair
+        # back to pr-ingestion once (discovery.requeue_escalation_reasons);
+        # check-approval.py accepts the pair again after it
+        "requeued",
     ]
 )

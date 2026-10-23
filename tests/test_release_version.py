@@ -295,6 +295,60 @@ def test_reconcile_no_tags() -> None:
     assert _rec([]).action == "none"
 
 
+def test_reconcile_newer_green_commit_supersedes_failed_tag() -> None:
+    """Regression: the 10-19 tag failed its perf job and was re-run on 10-20
+    and 10-21 although if/main had a newer green commit with src/ changes.
+    A release builds the tag's own tree, so the re-runs could not succeed."""
+    sha = "b" * 40
+    r = rv.reconcile(tags=_tags(T), published=set(), runs=[_run(T)], today="20261009",
+                     max_age_days=7, max_attempts=3, superseded_by=sha)
+    assert r.action == "none"
+    assert "superseded" in r.reason
+    # A tag from today is still retried: plan() would not tag again today.
+    same_day = rv.reconcile(tags=_tags(T), published=set(), runs=[_run(T)],
+                            today="20261008", max_age_days=7, max_attempts=3,
+                            superseded_by=sha)
+    assert same_day.action == "dispatch"
+    # A running release is still waited for.
+    running = rv.reconcile(tags=_tags(T), published=set(),
+                           runs=[_run(T, status="in_progress", conclusion="")],
+                           today="20261009", max_age_days=7, max_attempts=3,
+                           superseded_by=sha)
+    assert running.action == "wait"
+
+
+def _cli_reconcile(repo: Path, d: Path, *extra: str) -> dict[str, str]:
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "reconcile", "--repo", str(repo),
+         "--published-tags-file", str(d / "published.txt"),
+         "--runs-file", str(d / "runs.json"), "--today", "20261009", *extra],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return dict(line.split("=", 1) for line in result.stdout.splitlines())
+
+
+def test_cli_reconcile_target_descendant_supersedes(
+    repo: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    _git(repo, "tag", T)
+    tagged = _git(repo, "rev-parse", "HEAD")
+    d = tmp_path_factory.mktemp("rec")
+    (d / "published.txt").write_text("")
+    (d / "runs.json").write_text(json.dumps([_run(T)]))
+    # The tagged commit itself, or no target: retry the tag.
+    assert _cli_reconcile(repo, d, "--target", tagged)["action"] == "dispatch"
+    assert _cli_reconcile(repo, d)["action"] == "dispatch"
+    newer = _commit(repo, "test/fix.csproj", "fixed")
+    lines = _cli_reconcile(repo, d, "--target", newer)
+    assert lines["action"] == "none"
+    assert newer[:12] in lines["reason"]
+    # A commit that does not descend from the tag never supersedes it.
+    _git(repo, "checkout", "-q", "--detach", f"{tagged}~1")
+    side = _commit(repo, "src/b.cs", "b")
+    assert _cli_reconcile(repo, d, "--target", side)["action"] == "dispatch"
+
+
 def test_cli_reconcile_output(repo: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
     _git(repo, "tag", T)
     d = tmp_path_factory.mktemp("rec")

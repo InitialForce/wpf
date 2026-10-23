@@ -137,6 +137,7 @@ Between review and ingestion a contributor can force-push a new commit to their 
 - Review pins `head_sha`, and the review dispatch carries it.
 - `tools/check-approval.py` requires an `approved` outcome for that exact `(pr_number, head_sha)`, with no later `rejected` or `escalated`.
 - `tools/apply-upstream-pr.sh` refuses when the PR's current head is not the pinned SHA (`head_moved_after_review`).
+- It applies the diff from the merge base that pr-review recorded with the approval to the pinned head. For a merged PR it applies the upstream merge commit only when its diff is byte for byte the approved diff (`git patch-id` is not used: it ignores whitespace, also inside string literals). Otherwise it applies the approved diff itself.
 - `automerge.yml` checks the `Upstream-PR-Head` trailer against the ledger again before merging.
 
 **Owner:** Øystein Krog
@@ -343,3 +344,22 @@ GitHub's merge API checks the PR head (`--match-head-commit`) but not the base. 
 **Owner:** Øystein Krog
 
 **Related:** FORK.md stage 5, operator-runbook.md "Auto-merge trust checks"
+
+---
+
+## RISK-019: A fork_superseded skip is not reconsidered when the fork changes
+
+**Severity:** low
+**Status:** accepted
+
+When the cherry-pick of upstream head H is empty because the fork already has the change, and the Fable resolution review agrees, pr-ingestion records `graduated_upstream` with reason `fork_superseded` for H. Discovery then treats H as done. If the fork later removes the code that made H obsolete, nothing reconsiders H, so H's fix stays out of the fork while upstream H is unchanged. A new upstream head does go through discovery and review again.
+
+**Why accepted:**
+- It is rare: it needs an empty resolution approved for H, and then a fork change that undoes the fork's version of the same fix.
+- Removing that code is itself a fork change. It goes through a reviewed fork PR, and that review is where the missing upstream fix should be noticed.
+
+**Possible fix:** bind the skip to the fork content it relied on (the `base_sha` recorded in the event, or a digest of the affected files), and requeue H once when that content changes.
+
+**Owner:** Øystein Krog
+
+**Related:** FORK.md (`review-empty`), `tools/discover-prs.py`

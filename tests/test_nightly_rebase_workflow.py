@@ -113,7 +113,7 @@ def test_rebase_prompt_exists_and_size() -> None:
 
 def test_conflict_prompt_exists_and_size() -> None:
     size = len(CONFLICT_PROMPT_PATH.read_text(encoding="utf-8"))
-    assert 800 <= size <= 5000, f"resolve-rebase-conflict.md is {size} chars"
+    assert 800 <= size <= 6000, f"resolve-rebase-conflict.md is {size} chars"
 
 
 

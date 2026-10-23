@@ -11,8 +11,9 @@ Covered cases:
   4. not-graduated: patch whose hunks are absent from the tree → action=apply, exit 0
   5. graduated: patch whose hunks are all present → action=skip, exit 0
   6. graduated: ledger event emitted (ledger file updated)
-  7. partial: only some hunks present → action=escalate, exit 2
-  8. partial: ledger escalated event emitted
+  7. partial: only some hunks present → action=apply, exit 0 (the
+     cherry-pick decides; partial graduation is not a stop)
+  8. partial: no ledger event emitted
   9. Unknown --patch-path exits 1
  10. check-graduated.py exit forwarded correctly when script not found
 """
@@ -326,7 +327,7 @@ def test_graduated_ledger_event_written(tmp_path: Path) -> None:
 
 
 # ===========================================================================
-# Case 7 — partial: action=escalate, exit 2
+# Case 7 — partial: action=apply, exit 0
 # ===========================================================================
 
 def _make_partial_patch(tmp_path: Path) -> Path:
@@ -368,8 +369,9 @@ def _make_partial_patch(tmp_path: Path) -> Path:
     return patch_path
 
 
-def test_partial_returns_escalate(tmp_path: Path) -> None:
-    """A partially-graduated patch → action=escalate, exit 2."""
+def test_partial_returns_apply(tmp_path: Path) -> None:
+    """Regression: a partial match stopped ingestion for a human (9 of 14
+    escalations after 2026-10-19). It now goes on to the cherry-pick."""
     tree = tmp_path / "tree"
     # Only the Foo/Bar.cs file exists (graduated hunk present), Widget.cs absent
     _make_graduated_tree(tree)
@@ -402,19 +404,20 @@ def test_partial_returns_escalate(tmp_path: Path) -> None:
         cwd=tmp_path,
     )
 
-    assert result.returncode == 2, (
-        f"partial should exit 2\nstdout={result.stdout}\nstderr={result.stderr}"
+    assert result.returncode == 0, (
+        f"partial should exit 0\nstdout={result.stdout}\nstderr={result.stderr}"
     )
     data = _stdout_json(result)
-    assert data["action"] == "escalate", f"Expected action=escalate, got {data}"
+    assert data["action"] == "apply", f"Expected action=apply, got {data}"
+    assert data["note"] == "partial-graduation"
 
 
 # ===========================================================================
-# Case 8 — partial: escalated event emitted in ledger
+# Case 8 — partial: no ledger event
 # ===========================================================================
 
-def test_partial_ledger_event_written(tmp_path: Path) -> None:
-    """Partial graduation emits an 'escalated' event to the ledger."""
+def test_partial_writes_no_ledger_event(tmp_path: Path) -> None:
+    """Partial graduation records nothing; the cherry-pick records the outcome."""
     tree = tmp_path / "tree"
     _make_graduated_tree(tree)
 
@@ -446,13 +449,8 @@ def test_partial_ledger_event_written(tmp_path: Path) -> None:
         cwd=tmp_path,
     )
 
-    assert ledger.exists(), "Ledger file must exist after partial run"
     lines = [ln for ln in ledger.read_text().splitlines() if ln.strip()]
-    assert lines, "Ledger must have at least one event after partial run"
-    event = json.loads(lines[-1])
-    assert event["event"] == "escalated", (
-        f"Expected escalated event, got: {event['event']}"
-    )
+    assert lines == [], f"Partial run must not write the ledger, got: {lines}"
 
 
 # ===========================================================================
@@ -537,7 +535,8 @@ def test_online_mode_new_pr_returns_apply(tmp_path: Path) -> None:
 
 
 def test_online_mode_checks_all_pr_commits(tmp_path: Path) -> None:
-    """Only the head commit's change is in the fork: that is partial, not graduated."""
+    """Only the head commit's change is in the fork: that is partial, not
+    graduated, so the cherry-pick runs."""
     upstream, head = _make_upstream_with_two_commit_pr(tmp_path)
     fork = _make_fork(tmp_path, upstream)
     (fork / "src").mkdir()
@@ -545,5 +544,51 @@ def test_online_mode_checks_all_pr_commits(tmp_path: Path) -> None:
     _git(fork, "add", ".")
     _git(fork, "commit", "-q", "-m", "only the second commit")
     result = _run(*_online_args(fork, head), cwd=fork, env={"CI": "false"})
-    assert result.returncode == 2, f"stdout={result.stdout}\nstderr={result.stderr}"
-    assert _stdout_json(result)["action"] == "escalate"
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+    data = _stdout_json(result)
+    assert (data["action"], data["note"]) == ("apply", "partial-graduation")
+
+
+def _merge_pr_upstream(upstream: Path, subject: str) -> str:
+    """Squash-merge PR #7 into upstream main with *subject*; return the commit."""
+    _git(upstream, "checkout", "-q", "main")
+    _git(upstream, "checkout", "-q", "pr", "--", "src")
+    _git(upstream, "commit", "-q", "-m", subject)
+    return _git(upstream, "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize(
+    "subject", ["Add A and B (#7)", "Merge pull request #7 from someone/branch"]
+)
+def test_online_mode_upstream_merge_in_history_is_graduated(
+    tmp_path: Path, subject: str
+) -> None:
+    """Fast path: the commit that merged the PR upstream is already in the
+    fork's history (for example through upstream release/10.0), as with #9769
+    (3ce8132a0) whose hunk check found 11 of 12 hunks."""
+    upstream, head = _make_upstream_with_two_commit_pr(tmp_path)
+    merged = _merge_pr_upstream(upstream, subject)
+    fork = _make_fork(tmp_path, upstream)
+    # A later upstream edit changes one of the PR's lines in the fork.
+    (fork / "src" / "A.cs").write_text("class A\n{\n    int first = 10;\n}\n")
+    _git(fork, "commit", "-q", "-am", "later edit")
+    result = _run(*_online_args(fork, head), cwd=fork, env={"CI": "false"})
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+    assert _stdout_json(result)["action"] == "skip"
+    ledger = fork / ".if-fork" / "patch-ledger.jsonl"
+    event = json.loads(ledger.read_text().splitlines()[-1])
+    assert event["event"] == "graduated_upstream"
+    assert event["details"]["detection_method"] == "upstream_commit_in_history"
+    assert event["details"]["commit"] == merged
+
+
+def test_online_mode_fork_commit_naming_pr_is_not_graduated(tmp_path: Path) -> None:
+    """A fork commit whose subject names the PR is not upstream's merge."""
+    upstream, head = _make_upstream_with_two_commit_pr(tmp_path)
+    fork = _make_fork(tmp_path, upstream)
+    (fork / "notes.txt").write_text("x\n")
+    _git(fork, "add", ".")
+    _git(fork, "commit", "-q", "-m", "Mention upstream (#7)")
+    result = _run(*_online_args(fork, head), cwd=fork, env={"CI": "false"})
+    assert result.returncode == 0, result.stderr
+    assert _stdout_json(result)["action"] == "apply"

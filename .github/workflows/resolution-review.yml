@@ -30,7 +30,7 @@ on:
   workflow_call:
     inputs:
       kind:
-        description: "cherry-pick or sync"
+        description: "cherry-pick, empty (a cherry-pick whose resolution kept the fork everywhere; branch_sha is base_sha) or sync"
         type: string
         required: true
       pr_number:
@@ -158,6 +158,8 @@ jobs:
           [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] && [[ "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ]] \
             && [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] && [[ "$BRANCH_SHA" =~ ^[0-9a-f]{40}$ ]] \
             && { { [ "$KIND" = cherry-pick ] && [ "$BRANCH" = "claude/cherry-pick-pr-$PR_NUMBER" ]; } \
+                 || { [ "$KIND" = empty ] && [ "$BRANCH" = "claude/cherry-pick-pr-$PR_NUMBER" ] \
+                      && [ "$BRANCH_SHA" = "$BASE_SHA" ]; } \
                  || { [ "$KIND" = sync ] && [ "$PR_NUMBER" = 0 ] && [ "$BRANCH" = if/staging ]; }; } \
             || { echo "::error::Invalid kind, pr_number, SHAs or branch"; exit 1; }
 
@@ -249,6 +251,12 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --quiet --no-tags origin "$BRANCH_SHA"
+          if [ "$KIND" = empty ]; then
+            # No branch commit: the scan diff is empty, and the rules require
+            # it to be (record-resolution-verdict.py).
+            git diff --no-color "$BASE_SHA" "$BRANCH_SHA" > "$RUNNER_TEMP/scan.diff"
+            exit 0
+          fi
           if [ "$KIND" = sync ]; then PARENTS="$BASE_SHA $UPSTREAM_SHA"; else PARENTS="$BASE_SHA"; fi
           [ "$(git rev-list --parents -n 1 "$BRANCH_SHA")" = "$BRANCH_SHA $PARENTS" ] \
             || { echo "::error::$BRANCH_SHA does not have the parents $PARENTS"; exit 1; }

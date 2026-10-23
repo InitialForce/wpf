@@ -202,25 +202,9 @@
     },
     "conflict_resolution": {
       "type": "object",
-      "required": ["max_hunk_count", "max_conflict_lines", "min_confidence", "pause_run_if_escalation_pct_exceeds", "review_min_confidence", "max_resolution_attempts", "max_novel_lines"],
+      "required": ["pause_run_if_escalation_pct_exceeds", "review_min_confidence", "max_resolution_attempts", "max_novel_lines"],
       "additionalProperties": false,
       "properties": {
-        "max_hunk_count": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "Maximum number of conflict hunks Claude will attempt to resolve"
-        },
-        "max_conflict_lines": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "Maximum number of conflict lines Claude will attempt to resolve"
-        },
-        "min_confidence": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 1.0,
-          "description": "Minimum confidence required to accept Claude's conflict resolution"
-        },
         "pause_run_if_escalation_pct_exceeds": {
           "type": "number",
           "minimum": 0.0,
@@ -289,7 +273,8 @@
         "merged_lookback_days": {"type": "integer", "minimum": 1},
         "open_query_limit": {"type": "integer", "minimum": 1},
         "merged_query_limit": {"type": "integer", "minimum": 1},
-        "max_reviews_per_run": {"type": "integer", "minimum": 0}
+        "max_reviews_per_run": {"type": "integer", "minimum": 0},
+        "requeue_escalation_reasons": {"type": "array", "items": {"type": "string", "pattern": "^[a-z_]+$"}}
       }
     },
     "claude_models": {
@@ -337,7 +322,8 @@
         "name": {"type": "string", "description": "Display name for the bot"},
         "email": {"type": "string", "format": "email", "description": "Email address for the bot"},
         "github_app_id_secret": {"type": "string", "description": "Secret name holding the GH App ID"},
-        "github_app_private_key_secret": {"type": "string", "description": "Secret name holding the GH App private key"}
+        "github_app_private_key_secret": {"type": "string", "description": "Secret name holding the GH App private key"},
+        "github_login": {"type": "string", "pattern": "^[a-z0-9-]+\\[bot\\]$", "description": "The App's bot login; tools/close-ingestion-pr.sh closes only PRs it opened"}
       }
     },
     "autonomy_kill_switches": {
