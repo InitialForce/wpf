@@ -26,6 +26,10 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <!-- Release config required for valid BDN measurements. -->
     <Optimize>true</Optimize>
+    <!-- The WPF Arcade SDK's ClearReferenceCopyLocalPaths target strips NuGet package
+         assemblies (BenchmarkDotNet and its dependencies) from the output unless this is
+         true, and the published exe then fails to load BenchmarkDotNet. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
   <ItemGroup>
