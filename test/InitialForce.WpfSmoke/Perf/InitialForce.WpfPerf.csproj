@@ -30,7 +30,9 @@
 
   <ItemGroup>
     <!-- The package under test. Resolved from local feed in CI via -source flag. -->
-    <PackageReference Include="InitialForce.WPF" Version="$(InitialForceWpfVersion)" />
+    <!-- GeneratePathProperty exposes $(PkgInitialForce_WPF) for PatchedWpfReference.targets. -->
+    <PackageReference Include="InitialForce.WPF" Version="$(InitialForceWpfVersion)"
+                      GeneratePathProperty="true" />
 
     <!-- BenchmarkDotNet + Windows memory diagnostics (ETW-based alloc tracking). -->
     <PackageReference Include="BenchmarkDotNet" Version="0.14.*" />
@@ -47,5 +49,9 @@
     <Compile Include="..\Smoke\SvgPathGenerator.cs" Link="Smoke\SvgPathGenerator.cs" />
     <Compile Include="..\Smoke\PixelDiffHelper.cs"  Link="Smoke\PixelDiffHelper.cs" />
   </ItemGroup>
+
+  <!-- Smoke/PixelDiffHelper.cs names WPF types, so compile against the patched WPF DLLs
+       the same way the smoke project does (CS0012 on WindowsBase otherwise). -->
+  <Import Project="..\PatchedWpfReference.targets" />
 
 </Project>

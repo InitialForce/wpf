@@ -524,6 +524,26 @@ jobs:
           if ($runExit -ne 0) { throw "smoke run reported failures or errors (exit $runExit)" }
         shell: pwsh
 
+      # Builds and runs the BenchmarkDotNet harness exactly as release.yml does, without
+      # the regression check, so a harness that cannot build or start fails here on the
+      # PR instead of in the release (NETSDK1022 and CS0012 each blocked releases for days).
+      - name: Build and run perf harness against packed nupkg
+        run: |
+          $ver = "${{ steps.pkgver.outputs.version }}"
+          $proj = "test/InitialForce.WpfSmoke/Perf/InitialForce.WpfPerf.csproj"
+          $bdn = Join-Path $env:RUNNER_TEMP "bdn-artifacts"
+          # The smoke step already added the local packed feed and nuget.org to NuGet.config.
+          dotnet restore $proj -p:InitialForceWpfVersion=$ver
+          if ($LASTEXITCODE -ne 0) { throw "restore failed" }
+          dotnet run -c Release --no-restore --project $proj `
+            -p:InitialForceWpfVersion=$ver `
+            -- --filter '*' --exporters json --artifacts $bdn
+          if ($LASTEXITCODE -ne 0) { throw "BenchmarkDotNet run failed" }
+          $json = Get-ChildItem $bdn -Recurse -Filter '*-report-full*.json'
+          if (-not $json) { throw "BenchmarkDotNet wrote no JSON report under $bdn" }
+          Write-Host "Perf harness ran: $($json.Count) JSON report(s)"
+        shell: pwsh
+
       - name: Enforce non-empty smoke run (NUnit3 floor gate)
         if: always()
         run: |
