@@ -344,3 +344,22 @@ GitHub's merge API checks the PR head (`--match-head-commit`) but not the base. 
 **Owner:** Øystein Krog
 
 **Related:** FORK.md stage 5, operator-runbook.md "Auto-merge trust checks"
+
+---
+
+## RISK-019: A fork_superseded skip is not reconsidered when the fork changes
+
+**Severity:** low
+**Status:** accepted
+
+When the cherry-pick of upstream head H is empty because the fork already has the change, and the Fable resolution review agrees, pr-ingestion records `graduated_upstream` with reason `fork_superseded` for H. Discovery then treats H as done. If the fork later removes the code that made H obsolete, nothing reconsiders H, so H's fix stays out of the fork while upstream H is unchanged. A new upstream head does go through discovery and review again.
+
+**Why accepted:**
+- It is rare: it needs an empty resolution approved for H, and then a fork change that undoes the fork's version of the same fix.
+- Removing that code is itself a fork change. It goes through a reviewed fork PR, and that review is where the missing upstream fix should be noticed.
+
+**Possible fix:** bind the skip to the fork content it relied on (the `base_sha` recorded in the event, or a digest of the affected files), and requeue H once when that content changes.
+
+**Owner:** Øystein Krog
+
+**Related:** FORK.md (`review-empty`), `tools/discover-prs.py`
