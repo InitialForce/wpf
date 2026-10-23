@@ -22,7 +22,7 @@
   <ItemGroup>
     <!-- The package under test. Resolved from local feed in CI via -source flag.
          GeneratePathProperty exposes $(PkgInitialForce_WPF), the extracted package
-         root, so _AddPatchedWpfCompileReference can point the compiler at the patched
+         root, so _AddPatchedWpfCompileReference (PatchedWpfReference.targets) can point the compiler at the patched
          WindowsBase.dll shipped under runtimes/. -->
     <PackageReference Include="InitialForce.WPF" Version="$(InitialForceWpfVersion)"
                       GeneratePathProperty="true" />
@@ -51,47 +51,7 @@
     <EmbeddedResource Include="goldens\**\*.sha256" />
   </ItemGroup>
 
-  <!--
-    The InitialForce.WPF package ships lib/net10.0/_._ (no compile assets) and its
-    four patched WPF DLLs as RID-specific runtime assets under runtimes/win-x64/.
-    Its buildTransitive targets strip PresentationCore, PresentationFramework,
-    WindowsBase and System.Xaml from the runtime pack and copy the patched DLLs into
-    the output instead. That leaves the C# compiler with an inconsistent WPF
-    reference set for this self-contained win-x64 project, so files that name WPF
-    types directly (System.Windows.Point, Dispatcher, DispatcherOperation) or
-    inherit/override a WPF type whose base chain reaches
-    System.Windows.DependencyObject fail with CS0246/CS0012.
-
-    This target points the compiler at the same four patched DLLs the app loads at
-    runtime, so the compile-time surface matches the runtime surface exactly. It
-    runs after reference resolution has populated both @(ReferencePath) and
-    @(ReferencePathWithRefAssemblies) and just before CoreCompile, replacing any
-    existing entry for each assembly (InjectIfWpfAssemblies performs the runtime copy
-    independently). Private=false keeps these references out of the copy-local set,
-    leaving the package's runtime DLL swap untouched.
-  -->
-  <Target Name="_AddPatchedWpfCompileReference"
-          DependsOnTargets="ResolveAssemblyReferences;FindReferenceAssembliesForReferences"
-          BeforeTargets="CoreCompile"
-          Condition="'$(RuntimeIdentifier)' == 'win-x64' and '$(PkgInitialForce_WPF)' != ''">
-    <ItemGroup>
-      <_IFPatchedWpf Include="$(PkgInitialForce_WPF)\runtimes\win-x64\lib\net10.0\PresentationCore.dll" />
-      <_IFPatchedWpf Include="$(PkgInitialForce_WPF)\runtimes\win-x64\lib\net10.0\PresentationFramework.dll" />
-      <_IFPatchedWpf Include="$(PkgInitialForce_WPF)\runtimes\win-x64\lib\net10.0\WindowsBase.dll" />
-      <_IFPatchedWpf Include="$(PkgInitialForce_WPF)\runtimes\win-x64\lib\net10.0\System.Xaml.dll" />
-    </ItemGroup>
-    <ItemGroup>
-      <ReferencePath Remove="@(ReferencePath)"
-                     Condition="'%(FileName)' == 'PresentationCore' or '%(FileName)' == 'PresentationFramework' or '%(FileName)' == 'WindowsBase' or '%(FileName)' == 'System.Xaml'" />
-      <ReferencePath Include="@(_IFPatchedWpf)">
-        <Private>false</Private>
-      </ReferencePath>
-      <ReferencePathWithRefAssemblies Remove="@(ReferencePathWithRefAssemblies)"
-                                      Condition="'%(FileName)' == 'PresentationCore' or '%(FileName)' == 'PresentationFramework' or '%(FileName)' == 'WindowsBase' or '%(FileName)' == 'System.Xaml'" />
-      <ReferencePathWithRefAssemblies Include="@(_IFPatchedWpf)">
-        <Private>false</Private>
-      </ReferencePathWithRefAssemblies>
-    </ItemGroup>
-  </Target>
+  <!-- Points the compiler at the patched WPF DLLs; see the comment in the file. -->
+  <Import Project="PatchedWpfReference.targets" />
 
 </Project>

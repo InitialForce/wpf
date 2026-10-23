@@ -487,41 +487,23 @@ jobs:
           Write-Host "Publish output nunit assemblies:"
           Get-ChildItem smoke-publish -Filter 'nunit*' -ErrorAction SilentlyContinue |
             ForEach-Object { Write-Host "  $($_.Name)" }
-          # A self-contained app resolves assemblies strictly from its deps.json TPA and
-          # does not probe the app base directory for files absent from it. The WPF Arcade
-          # SDK strips the NUnit package assemblies, and the InitialForce.WPF targets strip
-          # the patched WPF DLLs, from the generated deps.json (the WPF DLLs are still copied
-          # into the app directory by the package targets, just not registered). Register
-          # every assembly physically present in the publish directory that deps.json does
-          # not already list, so the host resolves them from the app base directory.
-          $depsPath = "smoke-publish/InitialForce.WpfSmoke.deps.json"
-          $deps = Get-Content $depsPath -Raw | ConvertFrom-Json
-          $rt = $deps.runtimeTarget.name
-          $existing = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-          foreach ($lib in $deps.targets.$rt.PSObject.Properties) {
-            $runtime = $lib.Value.runtime
-            if ($null -ne $runtime) {
-              foreach ($r in $runtime.PSObject.Properties) { [void]$existing.Add([System.IO.Path]::GetFileName($r.Name)) }
-            }
-          }
-          $appProp = $deps.targets.$rt.PSObject.Properties |
-                     Where-Object { $_.Name -like 'InitialForce.WpfSmoke/*' } | Select-Object -First 1
-          $runtimeObj = $deps.targets.$rt.($appProp.Name).runtime
-          $added = 0
-          foreach ($f in Get-ChildItem smoke-publish -Filter '*.dll') {
-            if (-not $existing.Contains($f.Name)) {
-              $runtimeObj | Add-Member -NotePropertyName $f.Name -NotePropertyValue ([pscustomobject]@{}) -Force
-              [void]$existing.Add($f.Name); $added++
-              Write-Host "  deps.json += $($f.Name)"
-            }
-          }
-          Write-Host "Registered $added assemblies in deps.json"
-          ($deps | ConvertTo-Json -Depth 100) | Set-Content $depsPath -Encoding utf8
+          # Register the NUnit and patched WPF DLLs that deps.json does not list.
+          ./tools/register-publish-assemblies.ps1 smoke-publish InitialForce.WpfSmoke
           New-Item -ItemType Directory -Force -Path smoke-results | Out-Null
           & "smoke-publish/InitialForce.WpfSmoke.exe" --result:"smoke-results/smoke.xml"
           $runExit = $LASTEXITCODE
           Write-Host "NUnitLite exit code: $runExit"
           if ($runExit -ne 0) { throw "smoke run reported failures or errors (exit $runExit)" }
+        shell: pwsh
+
+      # Builds and runs the BenchmarkDotNet harness exactly as release.yml does, without
+      # the regression check, so a harness that cannot build or start fails here on the
+      # PR instead of in the release (NETSDK1022 and CS0012 each blocked releases for days).
+      - name: Build and run perf harness against packed nupkg
+        run: |
+          $ver = "${{ steps.pkgver.outputs.version }}"
+          # The smoke step already added the local packed feed and nuget.org to NuGet.config.
+          ./tools/run-perf-harness.ps1 $ver (Join-Path $env:RUNNER_TEMP "bdn-artifacts")
         shell: pwsh
 
       - name: Enforce non-empty smoke run (NUnit3 floor gate)

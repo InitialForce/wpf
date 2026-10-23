@@ -180,20 +180,10 @@ jobs:
 
           $ver = $env:NUGET_VERSION
           if (-not $ver) { throw "nuget_version output is empty — cannot resolve InitialForceWpfVersion." }
-          $proj = "test/InitialForce.WpfSmoke/Perf/InitialForce.WpfPerf.csproj"
-          $bdn = Join-Path $env:RUNNER_TEMP "bdn-artifacts"
-
           dotnet nuget add source $feedDir --name local-packed --configfile NuGet.config
           dotnet nuget add source https://api.nuget.org/v3/index.json --name nuget.org --configfile NuGet.config
-          dotnet restore $proj `
-            -p:InitialForceWpfVersion=$ver
-          if ($LASTEXITCODE -ne 0) { throw "restore failed" }
-
-          # Standalone BenchmarkDotNet console harness (NOT the NUnit stubs).
-          dotnet run -c Release --no-restore --project $proj `
-            -p:InitialForceWpfVersion=$ver `
-            -- --filter '*' --exporters json --artifacts $bdn
-          if ($LASTEXITCODE -ne 0) { throw "BenchmarkDotNet run failed" }
+          # Publishes self-contained and runs the exe (dotnet run cannot start a self-contained app).
+          ./tools/run-perf-harness.ps1 $ver (Join-Path $env:RUNNER_TEMP "bdn-artifacts")
         shell: pwsh
 
       - name: Check perf regression (hard on Allocated, warn-only on time)
@@ -284,19 +274,10 @@ jobs:
 
           $ver = $env:NUGET_VERSION
           if (-not $ver) { throw "nuget_version output is empty." }
-          $proj = "test/InitialForce.WpfSmoke/Perf/InitialForce.WpfPerf.csproj"
-          $bdn = Join-Path $env:RUNNER_TEMP "bdn-artifacts"
-
           dotnet nuget add source $feedDir --name local-packed --configfile NuGet.config
           dotnet nuget add source https://api.nuget.org/v3/index.json --name nuget.org --configfile NuGet.config
-          dotnet restore $proj `
-            -p:InitialForceWpfVersion=$ver
-          if ($LASTEXITCODE -ne 0) { throw "restore failed" }
-
-          dotnet run -c Release --no-restore --project $proj `
-            -p:InitialForceWpfVersion=$ver `
-            -- --filter '*' --exporters json --artifacts $bdn
-          if ($LASTEXITCODE -ne 0) { throw "BenchmarkDotNet run failed" }
+          # Publishes self-contained and runs the exe (dotnet run cannot start a self-contained app).
+          ./tools/run-perf-harness.ps1 $ver (Join-Path $env:RUNNER_TEMP "bdn-artifacts")
         shell: pwsh
 
       - name: Merge all reports into the baseline
