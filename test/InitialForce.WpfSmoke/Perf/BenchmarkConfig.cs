@@ -1,7 +1,9 @@
 using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Diagnosers;
 using BenchmarkDotNet.Exporters.Json;
+using BenchmarkDotNet.Columns;
 using BenchmarkDotNet.Jobs;
+using BenchmarkDotNet.Loggers;
 using BenchmarkDotNet.Toolchains.InProcess.Emit;
 using BenchmarkDotNet.Validators;
 
@@ -29,6 +31,11 @@ public class BenchmarkConfig : ManualConfig
             // In-process: the harness runs as a self-contained publish with the patched
             // WPF DLLs swapped in, and an out-of-process child build would not get them.
             .WithToolchain(InProcessEmitToolchain.Instance));
+
+        // ManualConfig starts empty: without a logger BenchmarkDotNet prints nothing,
+        // so a failed run exits non-zero with no reason in the CI log.
+        AddLogger(ConsoleLogger.Default);
+        AddColumnProvider(DefaultColumnProviders.Instance);
 
         // Memory diagnostics: allocations per operation appear in JSON output.
         AddDiagnoser(MemoryDiagnoser.Default);
