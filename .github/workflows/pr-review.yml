@@ -689,6 +689,7 @@ jobs:
             --config .if-fork/config.yaml \
             --diff "$RUNNER_TEMP/review-input/pr.diff" \
             --files "$RUNNER_TEMP/review-input/files.txt" \
+            --meta "$RUNNER_TEMP/review-input/meta.json" \
             --retry-missing \
             --ledger-path .if-fork/patch-ledger.jsonl \
             --pr-number "$PR_NUMBER" \

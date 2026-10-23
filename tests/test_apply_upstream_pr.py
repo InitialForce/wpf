@@ -160,7 +160,18 @@ def _merged_upstream(
     return fork, head, _git(up, "rev-parse", "HEAD")
 
 
-def _apply_merged(tmp_path: Path, fork: Path, head: str, merge: str) -> tuple[Path, str]:
+def _apply_merged(
+    tmp_path: Path, fork: Path, head: str, merge: str, approved_base: str = ""
+) -> tuple[Path, str]:
+    """Run the script for merged PR #12. *approved_base* is the merge_base the
+    approval recorded; empty means an older approval without one."""
+    ledger = tmp_path / "ledger.jsonl"
+    details = {"source": "merged_verdict"}
+    if approved_base:
+        details["merge_base"] = approved_base
+    ledger.write_text(json.dumps(
+        {"event": "approved", "pr_number": 12, "head_sha": head, "details": details}
+    ) + "\n")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     upr = {"head": {"sha": head}, "merged": True, "merge_commit_sha": merge,
@@ -186,6 +197,7 @@ def _apply_merged(tmp_path: Path, fork: Path, head: str, merge: str) -> tuple[Pa
             "OUT": str(out),
             "TRUSTED": str(REPO_ROOT),
             "GH_TOKEN": "x",
+            "LEDGER": str(ledger),
         },
     )
     assert r.returncode == 0, r.stderr
@@ -223,3 +235,50 @@ def test_whitespace_only_edit_in_a_string_literal_is_not_the_approved_diff(
     out, _ = _apply_merged(tmp_path, fork, head, merge)
     assert (out / "source_kind").read_text().strip() == "approved_diff"
     assert (fork / "a.cs").read_text() == 'string s = "a b";\n'
+
+
+def test_reviewed_base_is_used_when_upstream_merged_part_of_the_pr_first(
+    tmp_path: Path,
+) -> None:
+    """Astra: review approves B -> C1 -> H (two fixes). Upstream merges C1 on
+    its own, then merges H. merge-base(H, M^1) is now C1, so a recomputed
+    base would drop C1's fix. The base pr-review recorded (B) keeps it."""
+    up = tmp_path / "upstream"
+    up.mkdir()
+    _git(up, "init", "-q", "-b", "main")
+    (up / "a.cs").write_text("int x = 0;\n")
+    (up / "c.cs").write_text("int z = 0;\n")
+    _git(up, "add", ".")
+    _git(up, "commit", "-q", "-m", "base")
+    base = _git(up, "rev-parse", "HEAD")
+    fork = tmp_path / "fork"
+    _git(tmp_path, "clone", "-q", str(up), str(fork))
+    _git(fork, "remote", "add", "upstream", str(up))
+    _git(up, "checkout", "-q", "-b", "pr")
+    (up / "c.cs").write_text("int z = 1;\n")
+    _git(up, "commit", "-q", "-am", "first fix")
+    c1 = _git(up, "rev-parse", "HEAD")
+    (up / "a.cs").write_text("int x = 1;\n")
+    _git(up, "commit", "-q", "-am", "second fix")
+    head = _git(up, "rev-parse", "HEAD")
+    _git(up, "update-ref", "refs/pull/12/head", head)
+    _git(up, "checkout", "-q", "main")
+    _git(up, "merge", "-q", "--no-ff", "-m", "Merge the first fix", c1)
+    _git(up, "merge", "-q", "--no-ff", "-m", "Merge pull request #12 from x/pr", "pr")
+    merge = _git(up, "rev-parse", "HEAD")
+    assert _git(up, "merge-base", head, f"{merge}^1") == c1
+
+    out, _ = _apply_merged(tmp_path, fork, head, merge, approved_base=base)
+    assert (out / "approved_base").read_text().strip() == base
+    assert (out / "approved_base_source").read_text().strip() == "review"
+    assert (out / "source_kind").read_text().strip() == "approved_diff"
+    assert (fork / "a.cs").read_text() == "int x = 1;\n"
+    assert (fork / "c.cs").read_text() == "int z = 1;\n"
+
+
+def test_approval_without_a_base_falls_back_and_says_so(tmp_path: Path) -> None:
+    fork, head, merge = _merged_upstream(tmp_path)
+    out, stdout = _apply_merged(tmp_path, fork, head, merge)
+    assert (out / "approved_base_source").read_text().strip() == "recomputed"
+    assert (out / "source_kind").read_text().strip() == "merge_commit"
+    assert "records no merge base" in stdout

@@ -251,6 +251,8 @@ jobs:
       result: ${{ steps.apply.outputs.result }}
       source: ${{ steps.apply.outputs.source }}
       source_kind: ${{ steps.apply.outputs.source_kind }}
+      approved_base: ${{ steps.apply.outputs.approved_base }}
+      approved_base_source: ${{ steps.apply.outputs.approved_base_source }}
       conflicts_allowed: ${{ steps.conflict-denylist.outputs.allowed }}
       pushed: ${{ steps.finish.outputs.pushed }}
 
@@ -320,6 +322,8 @@ jobs:
             echo "detection=$(cat "$OUT/detection" 2>/dev/null)"
             echo "source=$(cat "$OUT/source" 2>/dev/null)"
             echo "source_kind=$(cat "$OUT/source_kind" 2>/dev/null)"
+            echo "approved_base=$(cat "$OUT/approved_base" 2>/dev/null)"
+            echo "approved_base_source=$(cat "$OUT/approved_base_source" 2>/dev/null)"
           } >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ github.token }}
@@ -361,7 +365,9 @@ jobs:
           [[ "$DETECTION" =~ ^[a-z_]+$ ]] || DETECTION=empty_cherry_pick
           git checkout -q -B if/main origin/if/main
           DETAILS=$(jq -cn --arg d "$DETECTION" --arg s "$SOURCE" --arg k "$SOURCE_KIND" \
-            '{detection_method: $d, source: $s, source_kind: $k}')
+            --arg ab "$APPROVED_BASE" --arg abs "$APPROVED_BASE_SOURCE" \
+            '{detection_method: $d, source: $s, source_kind: $k,
+              approved_base: $ab, approved_base_source: $abs}')
           python "$TRUSTED/tools/ledger-event.py" \
             --event graduated_upstream \
             --pr-number "$PR_NUMBER" \
@@ -375,6 +381,8 @@ jobs:
           DETECTION: ${{ steps.apply.outputs.detection }}
           SOURCE: ${{ steps.apply.outputs.source }}
           SOURCE_KIND: ${{ steps.apply.outputs.source_kind }}
+          APPROVED_BASE: ${{ steps.apply.outputs.approved_base }}
+          APPROVED_BASE_SOURCE: ${{ steps.apply.outputs.approved_base_source }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TRUSTED: ${{ github.workspace }}/trusted
 
@@ -829,10 +837,12 @@ jobs:
           jq -n --argjson pr "$PR_NUMBER" --arg sha "$PINNED_HEAD_SHA" --arg base "$BASE_SHA" \
             --arg attempt "$ATTEMPT" --arg run "$RUN_URL" \
             --arg source "$SOURCE" --arg kind "$SOURCE_KIND" \
+            --arg ab "$APPROVED_BASE" --arg abs "$APPROVED_BASE_SOURCE" \
             '{event: "graduated_upstream", pr_number: $pr, head_sha: $sha,
               details: {detection_method: "empty_resolution", reason: "fork_superseded",
                         base_sha: $base, review_attempt: $attempt, run_url: $run,
-                        source: $source, source_kind: $kind}}' \
+                        source: $source, source_kind: $kind,
+                        approved_base: $ab, approved_base_source: $abs}}' \
             > "$RUNNER_TEMP/events.jsonl"
           python tools/ledger-event.py --events-file "$RUNNER_TEMP/events.jsonl" \
             --actor pr-ingestion --push
@@ -845,6 +855,8 @@ jobs:
           ATTEMPT: ${{ needs.review-empty.outputs.attempt }}
           SOURCE: ${{ needs.cherry-pick.outputs.source }}
           SOURCE_KIND: ${{ needs.cherry-pick.outputs.source_kind }}
+          APPROVED_BASE: ${{ needs.cherry-pick.outputs.approved_base }}
+          APPROVED_BASE_SOURCE: ${{ needs.cherry-pick.outputs.approved_base_source }}
 
   # -------------------------------------------------------------------------
   # Job 8: retry-resolution. The review rejected the resolution and an
@@ -1070,9 +1082,13 @@ jobs:
         run: |
           # source_kind says what was applied: the upstream merge commit (its
           # diff is byte for byte the approved diff) or the approved diff itself.
+          # approved_base_source "recomputed" notes an older approval that
+          # recorded no merge base.
           DETAILS=$(jq -cn --arg pr "$INTERNAL_PR" --arg b "$BRANCH" \
             --arg s "$SOURCE" --arg k "$SOURCE_KIND" \
-            '{internal_pr: $pr, branch: $b, source: $s, source_kind: $k}')
+            --arg ab "$APPROVED_BASE" --arg abs "$APPROVED_BASE_SOURCE" \
+            '{internal_pr: $pr, branch: $b, source: $s, source_kind: $k,
+              approved_base: $ab, approved_base_source: $abs}')
           python tools/ledger-event.py \
             --event cherry_picked \
             --pr-number "$PR_NUMBER" \
@@ -1085,3 +1101,5 @@ jobs:
           BRANCH: ${{ needs.cherry-pick.outputs.branch }}
           SOURCE: ${{ needs.cherry-pick.outputs.source }}
           SOURCE_KIND: ${{ needs.cherry-pick.outputs.source_kind }}
+          APPROVED_BASE: ${{ needs.cherry-pick.outputs.approved_base }}
+          APPROVED_BASE_SOURCE: ${{ needs.cherry-pick.outputs.approved_base_source }}

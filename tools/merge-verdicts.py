@@ -83,6 +83,7 @@ EXIT_ERROR = 3
 EXIT_REVIEW_ERROR = 4
 
 DEFAULT_MAX_REVIEW_ERRORS = 3
+SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 # ---------------------------------------------------------------------------
 # Types
@@ -425,7 +426,7 @@ def _review_details(rv: ReviewerVerdict, run_url: str) -> dict[str, Any]:
 
 
 def build_ledger_events(
-    output: OutputVerdict, single_review: bool, run_url: str
+    output: OutputVerdict, single_review: bool, run_url: str, merge_base: str = ""
 ) -> list[dict[str, Any]]:
     """Return the ledger events for one review run, in order.
 
@@ -433,6 +434,11 @@ def build_ledger_events(
     outcome event (approved / rejected / escalated) and, when approved, the
     first ingestion_requested. pr-discovery treats merged_verdict as "this
     head_sha is reviewed"; pr-ingestion reads the review_N head_sha.
+
+    *merge_base* is the upstream commit the reviewed diff starts from
+    (merge_base..head_sha). An approved event records it, so pr-ingestion
+    applies exactly that diff. Both are commit SHAs, so they pin the diff's
+    content and no separate diff hash is needed.
 
     review_error run: one review_error event, which pr-discovery does not
     count as reviewed.
@@ -467,7 +473,10 @@ def build_ledger_events(
     if output.get("origin_errors"):
         summary["origin_errors"] = output["origin_errors"]
     events.append(event("merged_verdict", summary))
-    events.append(event(_OUTCOME_EVENTS[verdict], {"source": "merged_verdict"}))
+    outcome_details: dict[str, Any] = {"source": "merged_verdict"}
+    if verdict == "approved" and merge_base:
+        outcome_details["merge_base"] = merge_base
+    events.append(event(_OUTCOME_EVENTS[verdict], outcome_details))
     if verdict == "approved":
         events.append(event("ingestion_requested", {"attempt": 1, "source": "pr-review"}))
     return events
@@ -535,6 +544,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--files", metavar="PATH", help="Changed file list, one path per line"
+    )
+    parser.add_argument(
+        "--meta",
+        metavar="PATH",
+        help="meta.json of the review input; its merge_base goes into the approved event",
     )
     parser.add_argument(
         "--retry-missing",
@@ -737,13 +751,32 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901
     return _write_outputs(args, output, exit_code)
 
 
+def _reviewed_merge_base(args: argparse.Namespace) -> str:
+    """merge_base from --meta, checked against the pinned head; "" without --meta."""
+    if not getattr(args, "meta", None):
+        return ""
+    try:
+        meta = json.loads(Path(args.meta).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        die(EXIT_ERROR, f"cannot read review meta: {exc}")
+        raise  # unreachable
+    if not isinstance(meta, dict):
+        meta = {}
+    merge_base = str(meta.get("merge_base") or "")
+    if meta.get("head_sha") != args.head_sha or not SHA_RE.fullmatch(merge_base):
+        die(EXIT_ERROR, "review meta does not match the pinned head or has no valid merge_base")
+    return merge_base
+
+
 def _write_outputs(args: argparse.Namespace, output: OutputVerdict, exit_code: int) -> int:
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(output, indent=2), encoding="utf-8")
 
     if args.events_out:
-        events = build_ledger_events(output, args.single_review, args.run_url)
+        events = build_ledger_events(
+            output, args.single_review, args.run_url, _reviewed_merge_base(args)
+        )
         Path(args.events_out).write_text(
             "".join(json.dumps(e, sort_keys=True) + "\n" for e in events), encoding="utf-8"
         )

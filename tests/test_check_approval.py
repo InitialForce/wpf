@@ -192,3 +192,38 @@ def test_requeue_needs_an_earlier_approval(tmp_path: Path) -> None:
         ("approved", 7, SHA_A), ("rejected", 7, SHA_A), ("requeued", 7, SHA_A),
     ])
     assert _run(rejected, "7", SHA_A)[0] == 2
+
+
+def test_print_merge_base_returns_the_last_approved_base(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.jsonl"
+    rows = [
+        {"event": "approved", "pr_number": 7, "head_sha": SHA_A,
+         "details": {"merge_base": "1" * 40}},
+        {"event": "approved", "pr_number": 7, "head_sha": SHA_B,
+         "details": {"merge_base": "2" * 40}},
+        {"event": "approved", "pr_number": 7, "head_sha": SHA_A,
+         "details": {"merge_base": "3" * 40}},
+    ]
+    ledger.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+    def base(sha: str) -> str:
+        r = subprocess.run(
+            [sys.executable, str(TOOL), "--ledger", str(ledger), "--pr-number", "7",
+             "--head-sha", sha, "--print-merge-base"],
+            capture_output=True, text=True, check=True,
+        )
+        return r.stdout.strip()
+
+    assert base(SHA_A) == "3" * 40
+    assert base(SHA_B) == "2" * 40
+    assert base("c" * 40) == ""
+
+
+def test_print_merge_base_is_empty_for_an_older_approval(tmp_path: Path) -> None:
+    ledger = _ledger(tmp_path, [("approved", 7, SHA_A)])
+    r = subprocess.run(
+        [sys.executable, str(TOOL), "--ledger", str(ledger), "--pr-number", "7",
+         "--head-sha", SHA_A, "--print-merge-base"],
+        capture_output=True, text=True, check=True,
+    )
+    assert r.stdout.strip() == ""

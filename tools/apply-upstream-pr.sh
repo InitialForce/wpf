@@ -16,6 +16,8 @@
 #   OUT              directory for result files
 #   TRUSTED          checkout of if/main whose tools and config are used
 #   GH_TOKEN         token for read-only GitHub API calls
+# Optional:
+#   LEDGER           patch ledger with the approval (default: TRUSTED's)
 # Expects remotes: origin (with BASE_SHA fetched) and upstream.
 #
 # Writes to $OUT:
@@ -32,6 +34,10 @@
 #              approved_diff (the reviewed diff merge-base..head,
 #              squashed, because the merge commit's diff differs from it) or
 #              pr_head (an open PR, squashed the same way)
+#   approved_base  upstream commit the approved diff starts from
+#   approved_base_source  review (recorded with the approval by pr-review) or
+#              recomputed (an older approval with no recorded base: the merge
+#              base of the head with M's first parent, or with upstream main)
 #   conflicts.txt  conflicted paths (only for conflict)
 set -euo pipefail
 
@@ -90,9 +96,36 @@ if [ -n "$MERGE_SHA" ] && [ "$SOURCE" = "$MERGE_SHA" ] \
   exit 0
 fi
 
-# The review approved head H, that is the diff merge-base..H. The merge
-# commit M can carry more (merge-resolution edits, a squash against a newer
-# main), so use M only when its first-parent diff is the same change, byte
+# The review approved head H as the diff B..H, where B is the merge base
+# pr-review recorded with the approval. Use B itself: a base worked out now
+# can differ (upstream may have merged part of the PR on its own), and then
+# part of the reviewed change would be lost.
+LEDGER="${LEDGER:-$TRUSTED/.if-fork/patch-ledger.jsonl}"
+REVIEWED_BASE=$(python3 "$TRUSTED/tools/check-approval.py" --ledger "$LEDGER" \
+  --pr-number "$PR_NUMBER" --head-sha "$PINNED_HEAD_SHA" --print-merge-base)
+if [[ "$REVIEWED_BASE" =~ ^[0-9a-f]{40}$ ]]; then
+  git cat-file -e "$REVIEWED_BASE^{commit}" 2>/dev/null \
+    || git fetch --no-tags upstream "$REVIEWED_BASE"
+  git merge-base --is-ancestor "$REVIEWED_BASE" "$PINNED_HEAD_SHA" \
+    || refuse reviewed_base_not_ancestor
+  APPROVED_BASE="$REVIEWED_BASE"
+  BASE_SOURCE=review
+else
+  # An approval from before pr-review recorded the base.
+  if [ "$SOURCE_KIND" = merge_commit ]; then
+    APPROVED_BASE=$(git merge-base "$PINNED_HEAD_SHA" "$MERGE_SHA^1")
+  else
+    APPROVED_BASE=$(git merge-base "$PINNED_HEAD_SHA" upstream/main)
+  fi
+  BASE_SOURCE=recomputed
+  echo "::notice::The approval of PR #$PR_NUMBER records no merge base; using $APPROVED_BASE."
+fi
+echo "$APPROVED_BASE" > "$OUT/approved_base"
+echo "$BASE_SOURCE" > "$OUT/approved_base_source"
+
+# The merge commit M can carry more than B..H (edits made while merging, a
+# squash against a newer main) or less (a part upstream merged on its own),
+# so use M only when its first-parent diff is the same change, byte
 # for byte. Not git patch-id: it ignores whitespace, also inside string
 # literals. --full-index pins the exact blobs on both sides and --binary
 # includes binary content.
@@ -101,7 +134,6 @@ change_digest() {
     | sha256sum | cut -d' ' -f1
 }
 if [ "$SOURCE_KIND" = merge_commit ]; then
-  APPROVED_BASE=$(git merge-base "$PINNED_HEAD_SHA" "$MERGE_SHA^1")
   if [ "$(change_digest "$MERGE_SHA^1" "$MERGE_SHA")" != "$(change_digest "$APPROVED_BASE" "$PINNED_HEAD_SHA")" ]; then
     echo "::notice::The upstream merge commit of PR #$PR_NUMBER differs from the approved diff; applying the approved diff."
     SOURCE="$PINNED_HEAD_SHA"
@@ -117,13 +149,8 @@ if [ "$SOURCE_KIND" != merge_commit ]; then
   # Squash the reviewed head into one synthetic commit on its upstream base
   # so cherry-pick can do a real 3-way merge, including modify/delete
   # conflicts.
-  if [ "$SOURCE_KIND" = approved_diff ]; then
-    BASE="$APPROVED_BASE"
-  else
-    BASE=$(git merge-base "$PINNED_HEAD_SHA" upstream/main)
-  fi
   SOURCE=$(GIT_AUTHOR_NAME="$AUTHOR" GIT_AUTHOR_EMAIL="$AUTHOR@users.noreply.github.com" \
-    git commit-tree "$PINNED_HEAD_SHA^{tree}" -p "$BASE" -m "$TITLE (dotnet/wpf#$PR_NUMBER)")
+    git commit-tree "$PINNED_HEAD_SHA^{tree}" -p "$APPROVED_BASE" -m "$TITLE (dotnet/wpf#$PR_NUMBER)")
   PICK_ARGS=()
 elif [ "$(git rev-list --parents -n 1 "$SOURCE" | wc -w)" -gt 2 ]; then
   PICK_ARGS+=(-m 1)

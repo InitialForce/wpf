@@ -24,6 +24,11 @@ commit of the branch does not count, so a new push needs a new review.
 outcome. automerge-verify.sh uses it for a sync merge, recorded with
 pr_number 0 and the upstream release/10.0 SHA as head_sha.
 
+--print-merge-base prints the merge_base recorded with the last ``approved``
+event for the pair (the upstream commit the reviewed diff starts from), or an
+empty line when that approval recorded none, and skips the checks above.
+apply-upstream-pr.sh uses it to apply exactly the reviewed diff.
+
 Exit codes:
   0  approved
   1  bad input or unreadable ledger
@@ -98,6 +103,24 @@ def resolution_outcome(
     return outcome
 
 
+def approved_merge_base(ledger_text: str, pr_number: int, head_sha: str) -> str:
+    """merge_base of the last approved event for the pair, or "" if it has none."""
+    merge_base = ""
+    for line in ledger_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        entry = json.loads(line)
+        if entry.get("event") != "approved":
+            continue
+        if entry.get("pr_number") != pr_number or entry.get("head_sha") != head_sha:
+            continue
+        details = entry.get("details")
+        value = details.get("merge_base") if isinstance(details, dict) else None
+        merge_base = str(value) if isinstance(value, str) and SHA_RE.match(value) else ""
+    return merge_base
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--ledger", type=Path, required=True)
@@ -105,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--head-sha", required=True)
     parser.add_argument("--resolution-branch-sha")
     parser.add_argument("--resolution-only", action="store_true")
+    parser.add_argument("--print-merge-base", action="store_true")
     args = parser.parse_args(argv)
     if args.resolution_only and args.resolution_branch_sha is None:
         parser.error("--resolution-only needs --resolution-branch-sha")
@@ -117,6 +141,14 @@ def main(argv: list[str] | None = None) -> int:
     ):
         print(json.dumps({"approved": False, "reason": "invalid pr_number or SHA"}))
         return 1
+    if args.print_merge_base:
+        try:
+            text = args.ledger.read_text(encoding="utf-8")
+            print(approved_merge_base(text, int(args.pr_number), args.head_sha))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"cannot read ledger: {exc}", file=sys.stderr)
+            return 1
+        return 0
     try:
         text = args.ledger.read_text(encoding="utf-8")
         outcome = last_outcome(text, int(args.pr_number), args.head_sha)
