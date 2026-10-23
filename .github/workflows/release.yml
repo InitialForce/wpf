@@ -482,15 +482,22 @@ jobs:
           set -euo pipefail
           PKGS="$RUNNER_TEMP/packages"
           mkdir -p "$PKGS"
-          find "$RUNNER_TEMP/build" -name '*.nupkg' -exec cp {} "$PKGS/" \;
-          # Exactly the two packages, both at the version derived from the tag.
+          # Take exactly our two packages, at the version derived from the tag. The
+          # upstream build also packs its own packages (for example
+          # runtime.win-x64.Microsoft.DotNet.Wpf.GitHub); those are never published.
           for id in InitialForce.WPF InitialForce.WPF.RuntimeOverride; do
-            if [ ! -s "$PKGS/$id.$NUGET_VERSION.nupkg" ]; then
+            src=$(find "$RUNNER_TEMP/build" -name "$id.$NUGET_VERSION.nupkg" | head -n 1)
+            if [ -z "$src" ] || [ ! -s "$src" ]; then
               echo "::error::Missing or empty $id.$NUGET_VERSION.nupkg"
-              ls -l "$PKGS"
+              find "$RUNNER_TEMP/build" -name '*.nupkg' -exec ls -l {} \;
               exit 1
             fi
+            cp "$src" "$PKGS/"
           done
+          find "$RUNNER_TEMP/build" -name '*.nupkg' \
+            ! -name "InitialForce.WPF.$NUGET_VERSION.nupkg" \
+            ! -name "InitialForce.WPF.RuntimeOverride.$NUGET_VERSION.nupkg" \
+            -exec echo "Not published: {}" \;
           COUNT=$(find "$PKGS" -name '*.nupkg' | wc -l)
           if [ "$COUNT" -ne 2 ]; then
             echo "::error::Expected 2 packages, found $COUNT"
