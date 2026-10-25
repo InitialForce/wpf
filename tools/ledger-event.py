@@ -43,8 +43,10 @@ from ledger_schema import VALID_EVENTS  # noqa: E402
 DEFAULT_LEDGER_PATH = ".if-fork/patch-ledger.jsonl"
 
 # Maximum number of push attempts on non-fast-forward (CRIT-3 fix). Several
-# pr-review runs can finish at the same minute, so allow a few rounds.
-MAX_PUSH_RETRIES = 8
+# pr-review runs can finish at the same minute, so allow a few rounds. About 15
+# ingestion runs also start together after discovery; with 8 attempts some lost
+# every race (13 failed runs on 2026-10-24 and 10-25).
+MAX_PUSH_RETRIES = 30
 
 # Every ledger commit subject ends with this so GitHub skips push-triggered
 # workflows (build.yml) for ledger-only commits.
@@ -375,12 +377,13 @@ def _push_with_retry(
                 returncode=push_result.returncode,
             )
 
-        # Non-FF: fetch the latest remote state first
+        # Back off with jitter so concurrent writers do not collide again. Sleep
+        # before the fetch, so the rebase starts from the freshest remote tip.
+        time.sleep(min(attempt, 10) + random.uniform(0, 5))
+
+        # Non-FF: fetch the latest remote state
         if not _fetch_origin(branch):
             die(6, "Failed to fetch origin after non-fast-forward push rejection")
-
-        # Back off with jitter so concurrent writers do not collide again.
-        time.sleep(attempt + random.uniform(0, 2))
 
         # Try to rebase our commit cleanly on top of the remote tip.
         if _try_rebase(branch):
