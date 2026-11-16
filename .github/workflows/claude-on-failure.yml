@@ -128,7 +128,7 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
@@ -170,7 +170,7 @@ jobs:
       - name: Run failure analysis (Claude Sonnet)
         id: run-analysis
         continue-on-error: true
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@f3b070c88125d33dbae5653df5f143101d4ea9dc # v1.0.276
         with:
           allowed_bots: initial-force-wpf-bot,github-actions
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -196,7 +196,7 @@ jobs:
 
       - name: Upload analysis result artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: failure-analysis-${{ env.FAILED_RUN_ID }}
           path: failure-output/analysis.md
@@ -217,22 +217,22 @@ jobs:
     steps:
       - name: Generate GH App token
         id: app-token
-        uses: tibdex/github-app-token@v2
+        uses: tibdex/github-app-token@3beb63f4bd073e61482598c45c71c1019b59b73a # v2.1.0
         with:
           app_id: ${{ secrets.GH_APP_ID }}
           private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
       - name: Download analysis artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: failure-analysis-${{ env.FAILED_RUN_ID }}
           path: ${{ runner.temp }}/analysis
